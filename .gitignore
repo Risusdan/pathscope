@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Test / packaging artifacts
+.pytest_cache/
+*.spec.bak

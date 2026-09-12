@@ -37,6 +37,10 @@ FIXTURE = """<?xml version="1.0" encoding="utf-8"?>
             <field><name>CHSEL</name><bitOffset>25</bitOffset><bitWidth>3</bitWidth></field>
           </fields>
         </register>
+        <register>
+          <dim>2</dim><dimIncrement>0x18</dimIncrement>
+          <name>S%sNDTR</name><addressOffset>0x14</addressOffset>
+        </register>
       </registers>
     </peripheral>
   </peripherals>

@@ -45,6 +45,9 @@ def test_flow_state_and_anomaly_end_to_end(rig):
     assert wait_for(
         lambda: updates[-1].badges.get("adc1") is not None
         and updates[-1].badges["adc1"].count >= 1)
+    all_events = [ev for u in updates for ev in u.events]
+    assert all(ev.msg != "never fires" for ev in all_events)
+    assert updates[-1].badges["adc1"].count == 1   # exactly one rising edge, no spurious contribution
 
 
 def test_history_populated(rig):

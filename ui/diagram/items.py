@@ -111,7 +111,8 @@ class BlockItem(QGraphicsItem):
         elif kind == "pin":
             p.drawText(body, Qt.AlignCenter, self.block.title)
         else:
-            p.drawText(QRectF(0, 4, w, 40), Qt.AlignHCenter | Qt.AlignTop,
+            p.drawText(QRectF(0, 4, w, 40),
+                       Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
                        self.block.title)
 
         p.setFont(FONT_PORT)

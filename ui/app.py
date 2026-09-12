@@ -52,6 +52,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.demo:
         engine = make_demo_engine(args.target_dir)
+        target_label = "F411 (demo)"
     else:
         adapter = PyOCDAdapter(target=args.target)
         try:
@@ -61,9 +62,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("ERROR: cannot connect to target: %s" % e)
             return 1
         engine = Engine.load(args.target_dir, adapter)
+        target_label = info.name
 
     bridge = EngineBridge(engine)
-    win = MainWindow(engine, bridge)
+    win = MainWindow(engine, bridge, target_label=target_label)
     win.show()
     engine.start()
     try:

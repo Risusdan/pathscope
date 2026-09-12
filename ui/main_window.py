@@ -36,7 +36,8 @@ class _DiagramView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, engine: Engine, bridge: EngineBridge, parent=None):
+    def __init__(self, engine: Engine, bridge: EngineBridge, parent=None,
+                 target_label: Optional[str] = None):
         super().__init__(parent)
         self.setWindowTitle("Data Path Explorer")
         self.resize(1280, 800)
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.bridge = bridge
         self.frozen = False
         self.last_update: Optional[EngineUpdate] = None
+        self._target_label_text = target_label
 
         self.diagram_state = DiagramState()
         self.scene, self.blocks, self.wires = build_scene(
@@ -145,9 +147,11 @@ class MainWindow(QMainWindow):
             "QLabel { font-size: 14px; }")
         self.addToolBar(tb)
 
-        cpu_blocks = [b for b in self.engine.topology.blocks.values()
-                     if b.kind == "cpu"]
-        target_name = cpu_blocks[0].title if cpu_blocks else "target"
+        target_name = self._target_label_text
+        if target_name is None:
+            cpu_blocks = [b for b in self.engine.topology.blocks.values()
+                         if b.kind == "cpu"]
+            target_name = cpu_blocks[0].title if cpu_blocks else "target"
         self.target_label = QLabel("  %s  " % target_name)
         tb.addWidget(self.target_label)
         tb.addSeparator()

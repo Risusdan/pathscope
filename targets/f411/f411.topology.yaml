@@ -45,10 +45,14 @@ edges:
   - {from: tim1, to: mux0, label: TRGO, when_select: 6,
      points: [[200, 470], [232, 470], [232, 400], [255, 400]]}
   - {from: mux0, to: dma2, to_port: periph, label: S0}
-  - {from: dma2, from_port: mem, to: busmx, label: AHB}
-  - {from: busmx, to: sram1, label: M0AR}
-  - {from: flash, to: busmx, label: I-bus}
-  - {from: busmx, to: cm4, label: fetch}
+  - {from: dma2, from_port: mem, to: busmx, label: AHB,
+     points: [[490, 370], [580, 370]]}
+  - {from: busmx, to: sram1, label: M0AR,
+     points: [[690, 275], [780, 275]]}
+  - {from: flash, to: busmx, label: I-bus,
+     points: [[780, 90], [690, 90]]}
+  - {from: busmx, to: cm4, label: fetch,
+     points: [[580, 95], [230, 95]]}
 
 layout:
   pa1:   {x: 8,   y: 300, w: 34,  h: 34}

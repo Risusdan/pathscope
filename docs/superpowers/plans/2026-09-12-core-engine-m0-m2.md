@@ -3002,8 +3002,8 @@ With firmware running and `python -m cli monitor --seconds 60` active:
 
 1. Baseline: status lines show `adc_to_sram ACTIVE`, `prog` changing.
 2. Press KEY once (DMA off). Expected within ~1 s:
-   `ANOMALY adc_to_sram: DMA stalled (block dma2)` and shortly after
-   `ANOMALY adc_to_sram: ADC overrun, data lost (block adc1)`.
+   `ANOMALY adc_to_sram: ADC overrun, data lost (block adc1)` and
+   shortly after (~0.5 s) `ANOMALY adc_to_sram: DMA stalled (block dma2)`.
 3. Status lines: `adc_to_sram idle` (EN==0 makes active_when false),
    `prog` frozen.
 4. Press KEY again (DMA restarts). Expected: `ACTIVE` returns, `prog`

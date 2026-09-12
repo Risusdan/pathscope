@@ -95,6 +95,25 @@ class MemoryPage(QWidget):
         else:
             self._timer.stop()
 
+    def hideEvent(self, event) -> None:
+        """Stop the auto-refresh timer while the page isn't shown (the
+        user clicked a different block, so this page is no longer the
+        current widget in MainWindow's Inspector stack) - otherwise a
+        hidden page keeps polling engine.read_words() forever. The
+        auto_check checkbox itself is left checked: this only pauses
+        the timer, it doesn't change the user's stated preference, so
+        showEvent() below can resume it without the user re-checking
+        the box."""
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:
+        """Resume the timer on redisplay if the user still wants
+        auto-refresh - the mirror image of hideEvent()'s pause."""
+        if self.auto_check.isChecked():
+            self._timer.start()
+        super().showEvent(event)
+
     # -- read / dump ---------------------------------------------------------
 
     def do_read(self) -> None:

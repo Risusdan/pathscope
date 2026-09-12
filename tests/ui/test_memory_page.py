@@ -15,3 +15,21 @@ def test_memory_read_renders_hex(qtbot):
         assert "00000001" in text              # EN bit set by demo
     finally:
         engine.stop()
+
+
+def test_auto_refresh_timer_stops_when_hidden(qtbot):
+    engine = make_demo_engine("targets/f411")
+    engine.start()
+    try:
+        page = MemoryPage(engine)
+        qtbot.addWidget(page)
+        page.show()
+        page.addr_edit.setText("0x20000000")
+        page.auto_check.setChecked(True)
+        assert page._timer.isActive()
+        page.hide()
+        assert not page._timer.isActive()
+        page.show()
+        assert page._timer.isActive()       # preference preserved
+    finally:
+        engine.stop()

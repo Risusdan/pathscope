@@ -65,6 +65,14 @@ class Poller(threading.Thread):
             except Exception as e:  # command bug: report, keep polling
                 result.put((False, e))
 
+    def _fail_pending(self) -> None:
+        while True:
+            try:
+                _fn, result = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            result.put((False, None))
+
     def _sweep(self) -> Snapshot:
         values = {}
         for op in self.plan:
@@ -90,7 +98,8 @@ class Poller(threading.Thread):
             except AdapterError:
                 self._emit_state(PollerState.TARGET_LOST)
                 while not self._stop_evt.is_set():
-                    time.sleep(self.reconnect_s)
+                    self._fail_pending()
+                    self._stop_evt.wait(self.reconnect_s)
                     try:
                         self.adapter.connect()
                         self._emit_state(PollerState.RUNNING)
@@ -99,4 +108,5 @@ class Poller(threading.Thread):
                         continue
                 continue
             self._stop_evt.wait(self.interval_s)
+        self._fail_pending()
         self._emit_state(PollerState.STOPPED)

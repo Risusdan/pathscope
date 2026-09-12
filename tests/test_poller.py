@@ -2,6 +2,7 @@
 import time
 
 import pytest
+from core.adapter.base import TargetLostError
 from core.adapter.mock import MockAdapter
 from core.engine.poller import Poller, PollerState
 from core.engine.readplan import ReadOp
@@ -79,3 +80,37 @@ def test_target_lost_and_reconnect():
     assert wait_for(lambda: len(snaps) > n)
     p.stop()
     assert states[-1] == PollerState.STOPPED
+
+
+class DeadAdapter(MockAdapter):
+    """connect() never succeeds - keeps the poller in TARGET_LOST."""
+    def connect(self):
+        raise TargetLostError("still dead")
+
+
+def test_stop_prompt_during_target_lost():
+    a = DeadAdapter({0x40000000: 1})
+    snaps, states = [], []
+    p = make_poller(a, snaps, states, interval=0.005)
+    p.reconnect_s = 5.0                    # long sleep: stop must interrupt it
+    p.start()
+    assert wait_for(lambda: len(snaps) >= 1)
+    a.fail_next(1)
+    assert wait_for(lambda: PollerState.TARGET_LOST in states)
+    t0 = time.monotonic()
+    p.stop()
+    assert time.monotonic() - t0 < 2.0
+    assert states[-1] == PollerState.STOPPED
+
+
+def test_pending_command_answered_on_stop():
+    a = DeadAdapter({})
+    snaps, states = [], []
+    p = make_poller(a, snaps, states, interval=0.005)
+    p.start()
+    a.fail_next(1)
+    assert wait_for(lambda: PollerState.TARGET_LOST in states)
+    q = p.submit(lambda ad: ad.read_block32(0x0, 1))
+    p.stop()
+    ok, result = q.get(timeout=1.0)
+    assert ok is False

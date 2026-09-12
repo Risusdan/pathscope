@@ -37,6 +37,7 @@ class Activity:
 class FlowSpec:
     activities: List[Activity]
     force_poll: List[str] = dfield(default_factory=list)
+    guarded: List[str] = dfield(default_factory=list)
 
 
 def _compile(ev: Evaluator, expr: str, where: str) -> CompiledExpr:
@@ -85,7 +86,14 @@ def load_flows(path: str, evaluator: Evaluator,
             force.append(evaluator.model.resolve(ref).reg_key)
         except SvdError as e:
             raise FlowError("force_poll: %s" % e)
-    return FlowSpec(activities=activities, force_poll=force)
+    guarded = []
+    for ref in (doc.get("poll", {}) or {}).get("guarded", []) or []:
+        try:
+            guarded.append(evaluator.model.resolve(ref).reg_key)
+        except SvdError as e:
+            raise FlowError("guarded: %s" % e)
+    return FlowSpec(activities=activities, force_poll=force,
+                    guarded=guarded)
 
 
 def needed_registers(spec: FlowSpec) -> Set[str]:

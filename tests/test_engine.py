@@ -53,3 +53,18 @@ def test_flow_state_and_anomaly_end_to_end(rig):
 def test_history_populated(rig):
     a, e, updates = rig
     assert wait_for(lambda: len(e.history.series("DMA2.S0CR")) >= 2)
+
+
+def test_overlay_guards_needed_register(tmp_path):
+    import shutil
+    tdir = tmp_path / "t"
+    shutil.copytree(TARGET, tdir)
+    fl = tdir / "mini.flows.yaml"
+    fl.write_text(fl.read_text().replace(
+        "force_poll: []",
+        "force_poll: []\n  guarded: [\"ADC1.SR\"]"))
+    e = Engine.load(str(tdir), MockAdapter({}))
+    assert "ADC1.SR" in e.excluded          # overlay guards it
+    assert "ADC1.DR" in e.excluded          # svd readAction still guards
+    assert 0x40012000 in e.guarded_addrs    # ADC1.SR address
+    assert 0x4001204C in e.guarded_addrs    # ADC1.DR address

@@ -2,7 +2,7 @@
 rules -> callbacks. The only class UI or CLI code needs to touch."""
 import glob
 import os
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Set
 
 from ..adapter.base import TargetAdapter
 from ..target.flows import FlowSpec, load_flows, needed_registers
@@ -31,12 +31,14 @@ def _one(target_dir: str, pattern: str) -> str:
 class Engine:
     def __init__(self, model: RegisterModel, topology: Topology,
                  flowspec: FlowSpec, history: History, poller: Poller,
-                 rules: RuleEngine, excluded: List[str]):
+                 rules: RuleEngine, excluded: List[str],
+                 guarded_addrs: Set[int]):
         self.model = model
         self.topology = topology
         self.flowspec = flowspec
         self.history = history
         self.excluded = excluded
+        self.guarded_addrs = guarded_addrs
         self._poller = poller
         self._rules = rules
         self._update_cbs: List[Callable[[EngineUpdate], None]] = []
@@ -55,11 +57,19 @@ class Engine:
         for b in topology.blocks.values():
             if b.select is not None:
                 needed.add(model.resolve(b.select).reg_key)
+        overlay = set(flowspec.guarded)
+        guarded_addrs = set()
+        for periph in model.peripherals.values():
+            for reg in periph.registers.values():
+                key = "%s.%s" % (periph.name, reg.name)
+                if reg.read_action is not None or key in overlay:
+                    guarded_addrs.add(reg.address)
         excluded = []
         polled = set()
         for key in needed:
             rr = model.resolve(key)
-            if rr.read_action is not None and key not in flowspec.force_poll:
+            is_guarded = rr.read_action is not None or key in overlay
+            if is_guarded and key not in flowspec.force_poll:
                 excluded.append(key)
             else:
                 polled.add(key)
@@ -67,7 +77,7 @@ class Engine:
         poller = Poller(adapter, plan, interval_s=interval_s)
         rules = RuleEngine(flowspec)
         return cls(model, topology, flowspec, history, poller, rules,
-                   sorted(excluded))
+                   sorted(excluded), guarded_addrs)
 
     def start(self) -> None:
         self._poller.start()

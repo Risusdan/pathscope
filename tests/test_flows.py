@@ -58,3 +58,17 @@ def test_unknown_rule_target_rejected(env):
 def test_bad_expression_rejected(env):
     with pytest.raises(FlowError):
         _load(env, FLOWS.replace("ADC1.SR.OVR == 1", "GHOST.X == 1"))
+
+
+def test_guarded_overlay_parsed(env):
+    text = FLOWS.replace("force_poll: []",
+                         "force_poll: []\n  guarded: [\"DMA2.S0CR\"]")
+    spec = _load(env, text)
+    assert spec.guarded == ["DMA2.S0CR"]
+
+
+def test_guarded_overlay_unknown_ref_rejected(env):
+    text = FLOWS.replace("force_poll: []",
+                         "force_poll: []\n  guarded: [\"GHOST.REG\"]")
+    with pytest.raises(FlowError):
+        _load(env, text)

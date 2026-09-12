@@ -8,8 +8,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QPainter
-from PySide6.QtWidgets import (QGraphicsView, QLabel, QMainWindow,
-                               QSizePolicy, QToolBar, QWidget)
+from PySide6.QtWidgets import (QDockWidget, QGraphicsView, QLabel,
+                               QMainWindow, QSizePolicy, QStackedWidget,
+                               QToolBar, QWidget)
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
@@ -18,6 +19,7 @@ from core.target.topology import Topology
 from .bridge import EngineBridge
 from .diagram.items import MONO, LegendItem
 from .diagram.scene import DiagramState, build_scene
+from .panels.register_page import RegisterPage
 
 
 class _DiagramView(QGraphicsView):
@@ -60,6 +62,8 @@ class MainWindow(QMainWindow):
         self._mux_select_ref = self._find_mux_select(engine)
 
         self._build_toolbar()
+        self._build_docks()
+        self.diagram_state.on_block_clicked = self._select_block
 
         self.bridge.update.connect(self.apply_update)
         self.bridge.state.connect(self.on_state)
@@ -187,6 +191,18 @@ class MainWindow(QMainWindow):
         self.rate_label.setFont(MONO)
         tb.addWidget(self.rate_label)
 
+    def _build_docks(self) -> None:
+        """Right "Inspector" dock: a QStackedWidget so later tasks can
+        add pages (the flow page lands here in Task 11) without
+        touching the dock itself - only the register page exists yet."""
+        self.reg_page = RegisterPage(self.engine)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.reg_page)
+        dock = QDockWidget("Inspector", self)
+        dock.setWidget(self.stack)
+        dock.setMinimumWidth(300)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+
     def fit_view(self) -> None:
         rect = self.scene.itemsBoundingRect()
         if not rect.isEmpty():
@@ -216,6 +232,24 @@ class MainWindow(QMainWindow):
         for item in self.blocks.values():
             item.update()
         self.legend.update()
+
+    # -- selection ---------------------------------------------------------
+
+    def _select_block(self, block_id: str) -> None:
+        """Wired to diagram_state.on_block_clicked (ui/diagram/items.py's
+        BlockItem.mousePressEvent). Ported from the prototype's
+        Main.select_block: marks the block selected, clears any flow
+        highlight, and routes the Inspector dock to the register page
+        for this block."""
+        self.diagram_state.selected_block = block_id
+        self.diagram_state.flow_blocks = set()
+        self.diagram_state.flow_edges = set()
+        for item in self.blocks.values():
+            item.update()
+        for item in self.wires.values():
+            item.update()
+        self.reg_page.show_block(block_id)
+        self.stack.setCurrentWidget(self.reg_page)
 
     # -- live data -----------------------------------------------------------
 
@@ -262,6 +296,8 @@ class MainWindow(QMainWindow):
             item.update()
         for item in self.wires.values():
             item.update()
+
+        self.reg_page.refresh(u)
 
     def on_state(self, state: str) -> None:
         self.statusBar().showMessage("poller: %s" % state)

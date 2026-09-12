@@ -29,6 +29,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="run against the hardware-free demo engine")
     p.add_argument("--shot", default=None, metavar="PATH",
                    help="offscreen smoke: save one frame to PATH, exit 0")
+    p.add_argument("--shot-select", default=None, metavar="BLOCK_ID",
+                   help="manual check only, requires --shot: select this "
+                        "block (opens the register inspector on it) "
+                        "before saving the frame")
     return p
 
 
@@ -67,6 +71,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             deadline = time.monotonic() + 3.0
             while win.last_update is None and time.monotonic() < deadline:
                 app.processEvents()
+            if args.shot_select is not None:
+                win._select_block(args.shot_select)
+                # pump events a bit longer so the newly live registers
+                # get at least one real poll sweep before the capture
+                select_deadline = time.monotonic() + 1.0
+                while time.monotonic() < select_deadline:
+                    app.processEvents()
             app.processEvents()
             win.grab().save(args.shot)
             print("saved", args.shot)

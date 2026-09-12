@@ -126,6 +126,26 @@ class MemoryPage(QWidget):
         length = self.len_combo.currentData()
         if length is None:
             length = LENGTH_CHOICES[0]
+        guarded_hit = next(
+            (ga for ga in range(addr, addr + length, 4)
+             if ga in self.engine.guarded_addrs), None)
+        if guarded_hit is not None:
+            # A sweep over an arbitrary address range can wander into
+            # a readAction/overlay-guarded register that the poller
+            # itself is careful never to touch (readplan.py isolates
+            # every guarded address into its own never-merged op) -
+            # the memory viewer must honor the same guard rather than
+            # reading straight through it. No dialog (this panel has
+            # no confirm-and-force path like register_page.py's
+            # guarded double-click); auto-refresh is stopped outright
+            # since it would just keep re-triggering the same refusal.
+            if self.auto_check.isChecked():
+                self.auto_check.setChecked(False)
+            self._timer.stop()
+            self.dump.setPlainText(
+                "range contains guarded register(s) at 0x%08X - "
+                "read refused" % guarded_hit)
+            return
         count = length // 4
         try:
             words = self.engine.read_words(addr, count)

@@ -38,6 +38,7 @@ COL_GREY = QColor("#B0B0B0")
 COL_ANOM = QColor("#C62828")
 COL_FLASH = QColor("#FFF59D")
 COL_TRANSPARENT = QColor("transparent")
+COL_WARN = QColor("#E65100")
 
 
 class RegisterPage(QTreeWidget):
@@ -58,6 +59,17 @@ class RegisterPage(QTreeWidget):
         guarded = (read_action is not None
                   or reg_key in self.engine.flowspec.guarded)
         return guarded and reg_key not in self.engine.flowspec.force_poll
+
+    def _force_poll_warn(self, reg_key: str, read_action) -> bool:
+        """spec 6.3c: a register that force_poll pulls back onto the
+        watch list despite having read side effects (readAction or a
+        guarded overlay) needs a persistent warning, since it reads
+        as an ordinary "watched" row otherwise - _is_guarded() above
+        returns False for it precisely because force_poll overrides
+        the guard, which is the condition this checks for."""
+        would_be_guarded = (read_action is not None
+                            or reg_key in self.engine.flowspec.guarded)
+        return would_be_guarded and reg_key in self.engine.flowspec.force_poll
 
     def _mode(self, reg_key: str, read_action, refused) -> str:
         if reg_key in self.engine.polled:
@@ -99,7 +111,9 @@ class RegisterPage(QTreeWidget):
         for name, reg in peripheral.registers.items():
             reg_key = "%s.%s" % (block.svd, name)
             mode = self._mode(reg_key, reg.read_action, refused)
-            it = QTreeWidgetItem([name, "--"])
+            force_warn = self._force_poll_warn(reg_key, reg.read_action)
+            display_name = ("[!] " + name) if force_warn else name
+            it = QTreeWidgetItem([display_name, "--"])
             it.setData(0, Qt.UserRole, (reg_key, mode, reg.address))
             it.setFont(1, MONO)
             if mode == "cold":
@@ -111,6 +125,14 @@ class RegisterPage(QTreeWidget):
                 it.setText(1, "[guarded]")
                 it.setToolTip(0, "readAction register: reading has side "
                                  "effects. Double-click to force one read.")
+            if force_warn:
+                # persistent marker (spec 6.3c): this row reads as an
+                # ordinary "watched" row otherwise, but force_poll put
+                # it back on the watch list despite its read side
+                # effects - overrides any tooltip/color the mode
+                # branches above may have already set.
+                it.setForeground(0, QBrush(COL_WARN))
+                it.setToolTip(0, "force-polled despite read side effects")
             for fname, f in reg.fields.items():
                 ch = QTreeWidgetItem(
                     ["  .%s [%d:%d]" % (fname, f.msb, f.lsb), "--"])

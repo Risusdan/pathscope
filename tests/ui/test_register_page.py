@@ -27,6 +27,21 @@ def _guarded_target(tmp_path):
     return str(tdir)
 
 
+def _guarded_force_polled_target(tmp_path):
+    """Copy targets/f411 and overlay f411.flows.yaml so ADC1.DR is
+    both guarded (readAction/overlay) and force-polled - the spec
+    6.3c case where force_poll pulls a side-effecting register back
+    onto the live watch list, which needs a persistent warning marker
+    rather than reading as an ordinary watched row."""
+    tdir = tmp_path / "t"
+    shutil.copytree(TARGET, tdir)
+    fl = tdir / "f411.flows.yaml"
+    fl.write_text(fl.read_text().replace(
+        "force_poll: []",
+        "force_poll: [\"ADC1.DR\"]\n  guarded: [\"ADC1.DR\"]"))
+    return str(tdir)
+
+
 def _find_row(page, reg_key):
     for i in range(page.topLevelItemCount()):
         it = page.topLevelItem(i)
@@ -150,5 +165,26 @@ def test_cold_read_failure_shows_read_failed(qtbot, monkeypatch):
         page._on_double(item, 1)
 
         assert item.text(1) == "(read failed)"
+    finally:
+        engine.stop()
+
+
+def test_force_polled_guarded_register_gets_warning_marker(tmp_path, qtbot):
+    target_dir = _guarded_force_polled_target(tmp_path)
+    adapter = MockAdapter({})
+    engine = Engine.load(target_dir, adapter, interval_s=0.01)
+    engine.start()
+    try:
+        page = RegisterPage(engine)
+        qtbot.addWidget(page)
+        page.show_block("adc1")
+
+        item = _find_row(page, "ADC1.DR")
+        assert item is not None
+        assert item.text(0).startswith("[!]")
+        reg_key, mode, _addr = item.data(0, Qt.UserRole)
+        assert mode == "watched"          # force_poll put it back on the
+                                           # live watch list, not guarded
+        assert "ADC1.DR" in engine.polled
     finally:
         engine.stop()

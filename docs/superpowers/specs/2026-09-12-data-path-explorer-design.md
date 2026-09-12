@@ -228,28 +228,68 @@ recovery is automatic. No modal error dialogs.
 Measured achieved snapshot rate (Hz) is always visible in the toolbar.
 Users must never mistake the display for real time.
 
-## 7. UI (draft -- to be refined via prototype)
+## 7. UI (validated 2026-09-12 via stub-data prototype)
 
-This section is a starting point only. Layout and interaction will be
-iterated on a throwaway UI prototype with stub data before implementation
-(see 9, milestone M3 gate).
+Decisions below were settled through a requirements interview and a
+PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
 
-Single main window:
+**Diagram**
+- Flat single diagram per debug scenario: only the blocks involved in
+  the described flows plus necessary context. No full-chip diagram; no
+  hierarchical drill-down for MVP.
+- Textbook / reference-manual visual language: white canvas, thin black
+  borders, orthogonal wires, arrowheads, port labels (optional per
+  block, only where meaningful), wire labels.
+- Kind-tint fill is the DEFAULT (peripheral green, DMA blue, memory
+  yellow, CPU grey, interconnect lilac -- muted tones, wires stay
+  black); a toggle switches to pure black-and-white. An on-canvas
+  legend explains block colors, wire states, and the anomaly badge,
+  and follows the tint mode.
+- Light theme only, permanently. The app forces a light color scheme
+  and never follows the OS dark appearance.
 
-- Center: QGraphicsView block diagram. Blocks/edges from topology.yaml;
-  coordinates from graphviz `dot` unless overridden in `layout:`.
-  Active edges animate (dash-offset) and highlight; anomaly turns the
-  involved blocks red and logs an event.
-- Right dock: Register Inspector for the selected block -- register/field
-  tree from SVD, live values, just-changed values flash. Field view shows
-  bit definitions.
-- Bottom dock: Event log (timestamped flow/anomaly events; click to
-  focus the related block).
+**Activity**
+- Active edges: thicker colored stroke with marching-dash animation
+  (deliberately symbolic, constant speed) plus a live numeric progress
+  label (e.g. NDTR) next to the marked edge. Real information lives in
+  the numbers; the animation only says "this path is alive".
+- Mux blocks are first-class topology citizens (trapezoid, `select:`
+  expression); edges into a mux carry `when_select` values and draw
+  grey while not selected.
+
+**Anomalies**
+- Latched badge on the involved block with occurrence count: solid red
+  while the rule condition holds, outlined red once it has passed
+  (latched). Never auto-clears; clicking the badge resets the count.
+  Event log keeps the full history. No modal alerts.
+
+**Flows**
+- Flows are first-class: clicking any edge lists all flows through it
+  (live active/idle state), auto-selecting the single active one.
+  The flow panel shows `active_when`, live progress, and each anomaly
+  rule with a live pass/fail indicator. Selecting a flow highlights
+  its whole path (glow under wires + block outlines).
+
+**Register Inspector** (right dock)
+- Registers referenced by rules/flows are polled live; changed values
+  flash briefly. Other registers display grey stale values and are
+  read once on demand (double-click). `readAction` registers are
+  marked, excluded from polling, and require an explicit confirmation
+  per forced read.
+
+**Other chrome**
+- Freeze button: freezes diagram + inspector display while the engine
+  keeps polling and recording (event log stays live); distinct from
+  halting the target. Toolbar also carries connect/halt, tint toggle,
+  fit-view, target name, and the measured poll rate. Toolbar buttons
+  are sized generously (14px text, wide padding).
+- Bottom dock: event log (timestamped, anomalies in red, click to
+  focus the related block; no auto-scroll while the user is reading
+  scrollback).
 - Memory viewer: on-demand hex dump for memory blocks (command-queue
   read; optional periodic refresh). Waveform rendering of buffers is a
-  post-MVP stretch goal.
-- Toolbar: connect/disconnect, halt/resume, target name, measured poll
-  rate.
+  post-MVP stretch goal. Not exercised in the prototype.
+- Time-travel scrubbing over the history buffer is post-MVP.
 
 ## 8. Testing Strategy
 
@@ -275,8 +315,9 @@ Single main window:
   probe or repositioning) before building more.*
 - **M2** - Test firmware + flows rule engine; CLI prints flow
   active/stalled/anomaly events. Core value proven.
-- **M3** - UI/UX prototype review gate (stub data, throwaway allowed),
-  then PySide6 diagram + activity highlight + register inspector.
+- **M3** - PySide6 diagram + activity highlight + register inspector.
+  (The UI/UX prototype review gate passed on 2026-09-12; see section 7.
+  `prototype/ui_proto.py` is the approved visual reference.)
 - **M4** - Memory viewer + event log + fault-injection demo. Feasibility
   line: the build shown to stakeholders.
 - **M5** - PyInstaller onedir packaging + GitHub Actions Windows build.

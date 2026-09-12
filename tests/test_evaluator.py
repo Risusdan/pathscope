@@ -64,6 +64,9 @@ def test_changed_builtin(ev):
     "GHOST.REG == 1",
     "stalled(123, 500)",
     "ADC1.SR ==",
+    "stalled(DMA2.S0NDTR, 'x')",
+    "stalled(DMA2.S0NDTR, None)",
+    "stalled(DMA2.S0NDTR, True)",
 ])
 def test_rejects_disallowed(ev, bad):
     with pytest.raises(ExprError):

@@ -125,8 +125,11 @@ class Evaluator:
             hist = self.history
             if name == "stalled":
                 if len(node.args) != 2 \
-                        or not isinstance(node.args[1], ast.Constant):
-                    raise ExprError("stalled(REF, ms) expects a constant ms")
+                        or not isinstance(node.args[1], ast.Constant) \
+                        or isinstance(node.args[1].value, bool) \
+                        or not isinstance(node.args[1].value, (int, float)):
+                    raise ExprError(
+                        "stalled(REF, ms) expects a numeric constant ms")
                 ms = float(node.args[1].value)
 
                 def stalled(s: Snapshot):

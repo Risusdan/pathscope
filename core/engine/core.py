@@ -2,6 +2,7 @@
 rules -> callbacks. The only class UI or CLI code needs to touch."""
 import glob
 import os
+import queue
 from typing import Any, Callable, List, Set
 
 from ..adapter.base import TargetAdapter
@@ -32,13 +33,17 @@ class Engine:
     def __init__(self, model: RegisterModel, topology: Topology,
                  flowspec: FlowSpec, history: History, poller: Poller,
                  rules: RuleEngine, excluded: List[str],
-                 guarded_addrs: Set[int]):
+                 guarded_addrs: Set[int], base_polled: Set[str]):
         self.model = model
         self.topology = topology
         self.flowspec = flowspec
         self.history = history
         self.excluded = excluded
         self.guarded_addrs = guarded_addrs
+        self._guarded_addrs = guarded_addrs
+        self._base_polled = set(base_polled)
+        self._extra: Set[str] = set()
+        self.polled: Set[str] = set(self._base_polled)
         self._poller = poller
         self._rules = rules
         self._update_cbs: List[Callable[[EngineUpdate], None]] = []
@@ -65,20 +70,20 @@ class Engine:
                 if reg.read_action is not None or key in overlay:
                     guarded_addrs.add(reg.address)
         excluded = []
-        polled = set()
+        base_polled = set()
         for key in needed:
             rr = model.resolve(key)
             is_guarded = rr.read_action is not None or key in overlay
             if is_guarded and key not in flowspec.force_poll:
                 excluded.append(key)
             else:
-                polled.add(key)
-        plan = build_read_plan(polled, model,
+                base_polled.add(key)
+        plan = build_read_plan(base_polled, model,
                                forbidden_addrs=frozenset(guarded_addrs))
         poller = Poller(adapter, plan, interval_s=interval_s)
         rules = RuleEngine(flowspec)
         return cls(model, topology, flowspec, history, poller, rules,
-                   sorted(excluded), guarded_addrs)
+                   sorted(excluded), guarded_addrs, base_polled)
 
     def start(self) -> None:
         self._poller.start()
@@ -97,6 +102,49 @@ class Engine:
 
     def submit(self, fn: Callable[[TargetAdapter], Any]) -> Any:
         return self._poller.submit(fn)
+
+    def set_watch(self, extra: Set[str]) -> List[str]:
+        refused = []
+        accepted = set()
+        for key in extra:
+            rr = self.model.resolve(key)
+            is_guarded = rr.read_action is not None \
+                or key in set(self.flowspec.guarded)
+            if is_guarded and key not in self.flowspec.force_poll:
+                refused.append(key)
+            else:
+                accepted.add(key)
+        self._extra = accepted
+        self.polled = set(self._base_polled) | accepted
+        plan = build_read_plan(self.polled, self.model,
+                               forbidden_addrs=frozenset(self._guarded_addrs))
+        poller = self._poller
+
+        def swap(_adapter):
+            poller.plan = plan
+        self._poller.submit(swap)
+        return sorted(refused)
+
+    def read_words(self, addr: int, count: int,
+                   timeout_s: float = 2.0) -> List[int]:
+        return self._exec(lambda ad: ad.read_block32(addr, count),
+                          timeout_s)
+
+    def halt(self) -> None:
+        self._exec(lambda ad: ad.halt())
+
+    def resume(self) -> None:
+        self._exec(lambda ad: ad.resume())
+
+    def _exec(self, fn, timeout_s: float = 2.0):
+        q = self._poller.submit(fn)
+        try:
+            ok, result = q.get(timeout=timeout_s)
+        except queue.Empty:
+            raise EngineError("command timed out")
+        if not ok:
+            raise EngineError("command failed: %r" % (result,))
+        return result
 
     def _handle_snapshot(self, snap: Snapshot) -> None:
         for key, sample in snap.values.items():

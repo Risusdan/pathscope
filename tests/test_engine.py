@@ -55,6 +55,31 @@ def test_history_populated(rig):
     assert wait_for(lambda: len(e.history.series("DMA2.S0CR")) >= 2)
 
 
+def test_set_watch_adds_and_refuses(rig):
+    a, e, updates = rig
+    # ADC2 is the fixture's derived peripheral (base 0x40012100);
+    # ADC2.SR is watchable, ADC1.DR is guarded by readAction.
+    refused = e.set_watch({"ADC2.SR", "ADC1.DR"})
+    assert refused == ["ADC1.DR"]              # guarded stays guarded
+    assert "ADC2.SR" in e.polled
+    assert wait_for(
+        lambda: updates and "ADC2.SR" in updates[-1].snapshot.values)
+
+
+def test_read_words_on_demand(rig):
+    a, e, updates = rig
+    a.set_word(0x20000000, 0xCAFE)
+    assert e.read_words(0x20000000, 1) == [0xCAFE]
+
+
+def test_halt_resume_via_engine(rig):
+    a, e, updates = rig
+    e.halt()
+    assert a.is_running() is False
+    e.resume()
+    assert a.is_running() is True
+
+
 def test_overlay_guards_needed_register(tmp_path):
     import shutil
     tdir = tmp_path / "t"

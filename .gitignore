@@ -14,3 +14,6 @@ build/
 # Test / packaging artifacts
 .pytest_cache/
 *.spec.bak
+
+# Firmware build artifacts
+firmware/**/fw.elf

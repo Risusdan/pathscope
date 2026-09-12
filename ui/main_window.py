@@ -20,6 +20,7 @@ from .diagram.items import MONO, LegendItem
 from .diagram.scene import DiagramState, build_scene
 from .panels.event_log import EventLog
 from .panels.flow_page import FlowPage, build_flow_edge_map
+from .panels.memory_page import MemoryPage
 from .panels.register_page import RegisterPage
 
 
@@ -180,14 +181,17 @@ class MainWindow(QMainWindow):
 
     def _build_docks(self) -> None:
         """Right "Inspector" dock: a QStackedWidget holding the register
-        page (block clicks, Task 10) and the flow page (edge clicks,
-        Task 11). Bottom "Event log" dock: same size (140px) as the
+        page (block clicks, Task 10), the flow page (edge clicks,
+        Task 11), and the memory page (memory-kind block clicks, Task
+        12). Bottom "Event log" dock: same size (140px) as the
         prototype's `dock2`."""
         self.reg_page = RegisterPage(self.engine)
         self.flow_page = FlowPage(self.engine)
+        self.mem_page = MemoryPage(self.engine)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.reg_page)
         self.stack.addWidget(self.flow_page)
+        self.stack.addWidget(self.mem_page)
         dock = QDockWidget("Inspector", self)
         dock.setWidget(self.stack)
         dock.setMinimumWidth(300)
@@ -237,7 +241,9 @@ class MainWindow(QMainWindow):
         BlockItem.mousePressEvent). Ported from the prototype's
         Main.select_block: marks the block selected, clears any flow
         highlight, and routes the Inspector dock to the register page
-        for this block."""
+        for this block - except a memory-kind block (SRAM/Flash, no SVD
+        peripheral registers to show), which task-12-brief.md routes to
+        the memory page instead."""
         self.diagram_state.selected_block = block_id
         self.diagram_state.flow_blocks = set()
         self.diagram_state.flow_edges = set()
@@ -245,8 +251,13 @@ class MainWindow(QMainWindow):
             item.update()
         for item in self.wires.values():
             item.update()
-        self.reg_page.show_block(block_id)
-        self.stack.setCurrentWidget(self.reg_page)
+        block = self.engine.topology.blocks.get(block_id)
+        if block is not None and block.kind == "memory":
+            self.mem_page.show_block(block_id)
+            self.stack.setCurrentWidget(self.mem_page)
+        else:
+            self.reg_page.show_block(block_id)
+            self.stack.setCurrentWidget(self.reg_page)
 
     def _on_edge_clicked(self, edge_id: str) -> None:
         """Wired to diagram_state.on_edge_clicked (ui/diagram/items.py's

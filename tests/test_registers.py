@@ -73,6 +73,7 @@ def test_read_action_surfaces(model):
 def test_derived_from_copies_registers(model):
     r = model.resolve("ADC2.SR.OVR")
     assert r.address == 0x40012100          # base of ADC2, not ADC1
+    assert model.peripherals["ADC1"].registers["SR"].fields is not model.peripherals["ADC2"].registers["SR"].fields
 
 
 def test_dim_expansion(model):

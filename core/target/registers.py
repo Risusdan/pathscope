@@ -93,7 +93,7 @@ class RegisterModel:
             src = peripherals[parent]
             regs = {
                 rn: Register(rn, base + (r.address - src.base),
-                             r.read_action, r.fields)
+                             r.read_action, dict(r.fields))
                 for rn, r in src.registers.items()
             }
             peripherals[name] = Peripheral(name, base, regs)

@@ -1,0 +1,43 @@
+from core.engine.history import History
+from core.engine.snapshot import Sample, Snapshot
+
+
+def test_snapshot_value_lookup():
+    s = Snapshot(values={"A.B": Sample(7, 1.0)}, t=1.0, rate_hz=10.0)
+    assert s.value("A.B") == 7
+    assert s.value("A.MISSING") is None
+
+
+def test_last_change_age_needs_two_samples():
+    h = History()
+    h.record("A.B", 0.0, 5)
+    assert h.last_change_age("A.B", 1.0) is None
+    h.record("A.B", 1.0, 5)
+    assert h.last_change_age("A.B", 2.0) == 2.0   # never seen a change yet:
+    # age counted from the FIRST sample when no change observed
+
+
+def test_change_resets_age():
+    h = History()
+    h.record("A.B", 0.0, 5)
+    h.record("A.B", 1.0, 5)
+    h.record("A.B", 2.0, 9)
+    assert h.last_change_age("A.B", 2.5) == 0.5
+    assert h.changed_on_last("A.B") is True
+    h.record("A.B", 3.0, 9)
+    assert h.changed_on_last("A.B") is False
+
+
+def test_window_trim():
+    h = History(window_s=1.0)
+    for i in range(50):
+        h.record("A.B", i * 0.1, i)
+    ts = [t for t, _ in h.series("A.B")]
+    assert min(ts) >= 4.9 - 1.0 - 1e-9
+
+
+def test_unknown_key():
+    h = History()
+    assert h.last_change_age("X.Y", 1.0) is None
+    assert h.changed_on_last("X.Y") is False
+    assert h.series("X.Y") == []

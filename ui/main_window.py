@@ -4,7 +4,7 @@ Ported from prototype/ui_proto.py's Main class - toolbar construction
 (stylesheet, actions) and freeze semantics are the same pattern, wired
 to the real Engine/EngineBridge/DiagramState instead of the prototype's
 StubEngine and stub-dict snapshots."""
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QPainter
@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (QDockWidget, QGraphicsView, QLabel,
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
-from core.target.topology import Topology
 
 from .bridge import EngineBridge
 from .diagram.items import MONO, LegendItem
 from .diagram.scene import DiagramState, build_scene
+from .panels.event_log import EventLog
+from .panels.flow_page import FlowPage, build_flow_edge_map
 from .panels.register_page import RegisterPage
 
 
@@ -55,8 +56,8 @@ class MainWindow(QMainWindow):
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setCentralWidget(self.view)
 
-        self._flow_edges = self._build_flow_edge_map(engine.topology,
-                                                      engine.flowspec)
+        self._flow_edges = build_flow_edge_map(engine.topology,
+                                               engine.flowspec)
         self._progress_edge = self._build_progress_edge_map(
             engine.flowspec, self._flow_edges, self.wires)
         self._mux_select_ref = self._find_mux_select(engine)
@@ -64,6 +65,10 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_docks()
         self.diagram_state.on_block_clicked = self._select_block
+        self.diagram_state.on_edge_clicked = self._on_edge_clicked
+        self.diagram_state.on_badge_clicked = self._on_badge_clicked
+        self.flow_page.on_pick = self._highlight_flow
+        self.event_log.on_focus = self._on_log_focus
 
         self.bridge.update.connect(self.apply_update)
         self.bridge.state.connect(self.on_state)
@@ -76,24 +81,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.fit_view)
 
     # -- one-time topology/flowspec derived maps ----------------------------
-
-    @staticmethod
-    def _build_flow_edge_map(topology: Topology, flowspec
-                             ) -> Dict[str, Set[str]]:
-        """An activity's edge set = edges whose (src, dst) are
-        consecutive blocks in the activity's `path` (order-sensitive
-        pairs) - same rule the prototype hardcoded by hand in its FLOWS
-        dict, computed here from topology + flowspec instead."""
-        pair_to_edges: Dict[Tuple[str, str], List[str]] = {}
-        for edge in topology.edges:
-            pair_to_edges.setdefault((edge.src, edge.dst), []).append(edge.id)
-        result: Dict[str, Set[str]] = {}
-        for act in flowspec.activities:
-            edges: Set[str] = set()
-            for a, b in zip(act.path, act.path[1:]):
-                edges.update(pair_to_edges.get((a, b), []))
-            result[act.name] = edges
-        return result
 
     @staticmethod
     def _build_progress_edge_map(flowspec, flow_edges, wires
@@ -192,16 +179,26 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.rate_label)
 
     def _build_docks(self) -> None:
-        """Right "Inspector" dock: a QStackedWidget so later tasks can
-        add pages (the flow page lands here in Task 11) without
-        touching the dock itself - only the register page exists yet."""
+        """Right "Inspector" dock: a QStackedWidget holding the register
+        page (block clicks, Task 10) and the flow page (edge clicks,
+        Task 11). Bottom "Event log" dock: same size (140px) as the
+        prototype's `dock2`."""
         self.reg_page = RegisterPage(self.engine)
+        self.flow_page = FlowPage(self.engine)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.reg_page)
+        self.stack.addWidget(self.flow_page)
         dock = QDockWidget("Inspector", self)
         dock.setWidget(self.stack)
         dock.setMinimumWidth(300)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+
+        self.event_log = EventLog()
+        log_dock = QDockWidget("Event log", self)
+        log_dock.setWidget(self.event_log)
+        log_dock.setMinimumHeight(100)
+        self.addDockWidget(Qt.BottomDockWidgetArea, log_dock)
+        self.resizeDocks([log_dock], [140], Qt.Vertical)
 
     def fit_view(self) -> None:
         rect = self.scene.itemsBoundingRect()
@@ -251,6 +248,65 @@ class MainWindow(QMainWindow):
         self.reg_page.show_block(block_id)
         self.stack.setCurrentWidget(self.reg_page)
 
+    def _on_edge_clicked(self, edge_id: str) -> None:
+        """Wired to diagram_state.on_edge_clicked (ui/diagram/items.py's
+        WireItem.mousePressEvent). Ported from the prototype's
+        Main.select_edge: an edge that belongs to no activity is a
+        no-op (reuses self._flow_edges, T9, for that membership check);
+        otherwise clears block selection, routes the Inspector dock to
+        the flow page for this edge, and highlights the flow the page
+        auto-picked."""
+        flow_ids = [name for name, edges in self._flow_edges.items()
+                   if edge_id in edges]
+        if not flow_ids:
+            return
+        self.diagram_state.selected_block = None
+        for item in self.blocks.values():
+            item.update()
+        self.flow_page.show_edge(edge_id, self.last_update)
+        self._highlight_flow(self.flow_page.flow_id)
+        self.stack.setCurrentWidget(self.flow_page)
+
+    def _highlight_flow(self, flow_id: Optional[str]) -> None:
+        """Wired to flow_page.on_pick as well as called directly from
+        _on_edge_clicked. Ported from the prototype's
+        Main.highlight_flow: sets diagram_state.flow_edges/flow_blocks
+        from a flow_id - edges via self._flow_edges (T9), blocks via
+        the activity's own `path` (flow_page.activities)."""
+        edges: Set[str] = (self._flow_edges.get(flow_id, set())
+                           if flow_id else set())
+        blocks: Set[str] = set()
+        if flow_id is not None:
+            act = self.flow_page.activities.get(flow_id)
+            if act is not None:
+                blocks = set(act.path)
+        self.diagram_state.flow_edges = edges
+        self.diagram_state.flow_blocks = blocks
+        for item in self.blocks.values():
+            item.update()
+        for item in self.wires.values():
+            item.update()
+
+    def _on_badge_clicked(self, block_id: str) -> None:
+        """Wired to diagram_state.on_badge_clicked (BlockItem's
+        mousePressEvent badge-rect hit). Ported from the prototype's
+        BlockItem.mousePressEvent badge branch: clears the badge and
+        logs an info row. No explicit repaint here - same as the
+        prototype - since the next EngineUpdate's badges dict (the
+        RuleEngine, cleared by engine.clear_badge(), is the source of
+        truth diagram_state.badges is refreshed from in _apply) repaints
+        the block within one poll tick."""
+        self.engine.clear_badge(block_id)
+        self.event_log.add_info("badge cleared on %s" % block_id, block_id)
+
+    def _on_log_focus(self, block_id: str) -> None:
+        """Wired to event_log.on_focus (EventLog row click). Ported
+        from the prototype's Main.log_clicked: centers the view on the
+        block and routes the Inspector dock to its register page."""
+        if block_id in self.blocks:
+            self._select_block(block_id)
+            self.view.centerOn(self.blocks[block_id])
+
     # -- live data -----------------------------------------------------------
 
     def apply_update(self, u: EngineUpdate) -> None:
@@ -298,9 +354,12 @@ class MainWindow(QMainWindow):
             item.update()
 
         self.reg_page.refresh(u)
+        self.flow_page.refresh(u)
+        self.event_log.add_events(u.events)
 
     def on_state(self, state: str) -> None:
         self.statusBar().showMessage("poller: %s" % state)
+        self.event_log.add_info("poller: %s" % state)
 
     def _advance_dash(self) -> None:
         if self.frozen:

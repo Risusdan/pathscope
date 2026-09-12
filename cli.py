@@ -79,6 +79,18 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    # Imported here, not at module scope, so the core CLI (probe/monitor)
+    # keeps working on machines without PySide6 installed.
+    from ui.app import main as gui_main
+    argv = ["--target", args.target, "--target-dir", args.target_dir]
+    if args.demo:
+        argv.append("--demo")
+    if args.shot:
+        argv += ["--shot", args.shot]
+    return gui_main(argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dpe")
     p.add_argument("--target", default="stm32f411ce")
@@ -89,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     mon.add_argument("--seconds", type=float, default=10.0)
     mon.add_argument("--interval", type=float, default=20.0,
                      help="sweep interval in ms")
+    gui = sub.add_parser("gui", help="launch the live diagram window")
+    gui.add_argument("--target-dir", default="targets/f411")
+    gui.add_argument("--demo", action="store_true",
+                     help="run against the hardware-free demo engine")
+    gui.add_argument("--shot", default=None, metavar="PATH",
+                     help="offscreen smoke: save one frame to PATH, exit 0")
     return p
 
 
@@ -98,6 +116,8 @@ def main(argv=None) -> int:
         return cmd_probe(args)
     if args.cmd == "monitor":
         return cmd_monitor(args)
+    if args.cmd == "gui":
+        return cmd_gui(args)
     return 1
 
 

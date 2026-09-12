@@ -1,0 +1,14 @@
+blocks:
+  - id: adc1
+    kind: peripheral
+    svd: ADC1
+  - id: dma2
+    kind: dma
+    svd: DMA2
+  - id: sram1
+    kind: memory
+    base: 0x20000000
+    size: 0x20000
+edges:
+  - {from: adc1, to: dma2}
+  - {from: dma2, to: sram1}

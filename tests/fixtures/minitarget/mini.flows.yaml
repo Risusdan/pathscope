@@ -1,0 +1,10 @@
+activities:
+  - name: adc_to_sram
+    path: [adc1, dma2, sram1]
+    active_when: "DMA2.S0CR.EN == 1"
+    progress: "DMA2.S0CR"
+    anomalies:
+      - {rule: "ADC1.SR.OVR == 1", msg: "ADC overrun", target: adc1}
+      - {rule: "ADC1.DR == 0", msg: "never fires", target: adc1}
+poll:
+  force_poll: []

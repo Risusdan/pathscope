@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device><name>TESTCHIP</name>
+  <peripherals>
+    <peripheral>
+      <name>ADC1</name>
+      <baseAddress>0x40012000</baseAddress>
+      <registers>
+        <register>
+          <name>SR</name><addressOffset>0x0</addressOffset>
+          <fields>
+            <field><name>OVR</name><bitOffset>5</bitOffset><bitWidth>1</bitWidth></field>
+            <field><name>EOC</name><bitOffset>1</bitOffset><bitWidth>1</bitWidth></field>
+          </fields>
+        </register>
+        <register>
+          <name>DR</name><addressOffset>0x4C</addressOffset>
+          <readAction>clear</readAction>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="ADC1">
+      <name>ADC2</name>
+      <baseAddress>0x40012100</baseAddress>
+    </peripheral>
+    <peripheral>
+      <name>DMA2</name>
+      <baseAddress>0x40026400</baseAddress>
+      <registers>
+        <register>
+          <dim>2</dim><dimIncrement>0x18</dimIncrement>
+          <name>S%sCR</name><addressOffset>0x10</addressOffset>
+          <fields>
+            <field><name>EN</name><bitOffset>0</bitOffset><bitWidth>1</bitWidth></field>
+            <field><name>CHSEL</name><bitOffset>25</bitOffset><bitWidth>3</bitWidth></field>
+          </fields>
+        </register>
+        <register>
+          <dim>2</dim><dimIncrement>0x18</dimIncrement>
+          <name>S%sNDTR</name><addressOffset>0x14</addressOffset>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

@@ -136,9 +136,9 @@ blocks:
   - id: busmx
     kind: interconnect
 edges:
-  - { from: adc1, to: dma2,  via: busmx, label: "S0 CH0" }
+  - { from: adc1, to: dma2,  via: busmx, label: "S0 CH0", points: [10, 120, 50, 120] }
   - { from: dma2, to: sram1, via: busmx }
-layout:                     # optional; absent -> graphviz dot auto-layout
+layout:                     # maps block ids to {x,y[,w,h]}; width/height optional
   adc1: { x: 0, y: 120 }
 ```
 
@@ -160,6 +160,7 @@ activities:
       - { rule: "stalled(DMA2.S0NDTR, 500)",   msg: "DMA stalled" }  # window in ms
 poll:
   force_poll: []             # registers to poll despite readAction (explicit opt-in)
+  guarded: []                # register refs treated as if readAction were set (annotation overlay)
 ```
 
 Built-in functions for MVP: `stalled(reg, window)`, `changed(reg)`.
@@ -183,7 +184,8 @@ USB transaction latency dominates (~0.5-1 ms per transaction on clone
 ST-Links). The poller:
 
 1. Collects the union of registers referenced by loaded rules and by the
-   currently visible UI panels.
+   currently visible inspector panels, using `Engine.set_watch()` to
+   dynamically track which registers are needed as the UI changes.
 2. Groups them by peripheral; contiguous register banks are fetched with
    one `read_block32` per group.
 
@@ -199,10 +201,16 @@ would make the tool corrupt the system it observes.
 
 - The SVD `readAction` attribute (`clear`, `modifyExternal`, ...) marks
   such registers; the loader honors it.
+- `poll.guarded` in flows.yaml provides an annotation overlay for vendor
+  SVDs lacking readAction, treating listed register refs as if readAction
+  were set.
 - Policy: a register is polled only if (a) some rule or visible panel
-  needs it AND (b) it has no `readAction`, unless (c) it is explicitly
-  listed under `poll.force_poll` in flows.yaml, in which case the UI
-  displays a persistent warning badge on it.
+  needs it AND (b) it has no `readAction` and is not in `guarded`, unless
+  (c) it is explicitly listed under `poll.force_poll` in flows.yaml, in
+  which case the UI displays a persistent warning badge on it.
+- The read plan splits block-read merges around guarded addresses so a
+  guarded register is never swept incidentally as part of a contiguous
+  bank read.
 
 ### 6.4 Snapshot semantics
 
@@ -341,6 +349,8 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
   entry plus a tint/shape. Candidates when real targets demand them:
   `fifo` (fill-level bar), `external` (off-chip devices).
 - Additional transport adapters (UART-based debug units, J-Link native).
+- Graphviz dot auto-layout for topology diagrams (manual layout via
+  YAML is implemented; automatic layout deferred).
 - Buffer waveform view, trace-buffer ingestion (AHB-trace-class sources).
 - Session record/replay in the UI (engine-level recording exists for tests).
 - Multi-target sessions; remote daemon protocol.

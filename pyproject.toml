@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-path-explorer"
+version = "0.0.1"
+description = "Visual data path debug tool - core engine"
+requires-python = ">=3.9"
+dependencies = [
+    "pyocd>=0.36",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["core"]
+
+[tool.setuptools.package-data]
+core = []

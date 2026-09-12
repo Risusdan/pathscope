@@ -383,6 +383,24 @@ class MainWindow(QMainWindow):
     def on_state(self, state: str) -> None:
         self.statusBar().showMessage("poller: %s" % state)
         self.event_log.add_info("poller: %s" % state)
+        if state != "running":
+            # a lost target must not keep animating a live data path -
+            # clear whatever the diagram was showing so dashes/progress
+            # text freeze-then-vanish instead of implying the (now
+            # stale) flow is still moving. The dash timer
+            # (_advance_dash) keeps running, but with active_edges
+            # empty it has nothing to animate. The next apply_update()
+            # after recovery repopulates both sets from the fresh
+            # EngineUpdate, same as any other poll tick.
+            affected = (self.diagram_state.active_edges
+                       | set(self.diagram_state.progress_text))
+            self.diagram_state.active_edges = set()
+            self.diagram_state.progress_text = {}
+            for eid in affected:
+                item = self.wires.get(eid)
+                if item is not None:
+                    item.update()
+            self.rate_label.setText("poll -- Hz  ")
 
     def _advance_dash(self) -> None:
         if self.frozen:

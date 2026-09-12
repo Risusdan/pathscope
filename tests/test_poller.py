@@ -114,3 +114,33 @@ def test_pending_command_answered_on_stop():
     p.stop()
     ok, result = q.get(timeout=1.0)
     assert ok is False
+
+
+def test_snapshot_callback_exception_does_not_kill_poller():
+    a = MockAdapter({0x40000000: 1})
+    states = []
+    good = []
+
+    def bad_cb(snap):
+        raise ValueError("boom")
+
+    plan = [ReadOp(addr=0x40000000, count=2,
+                   targets=[("P.A", 0), ("P.B", 1)])]
+    p = Poller(a, plan, interval_s=0.005, reconnect_s=0.02)
+    p.on_snapshot(bad_cb)
+    p.on_snapshot(good.append)
+    p.on_state(states.append)
+    p.start()
+    assert wait_for(lambda: len(good) >= 3)
+    p.stop()
+    assert states[-1] == PollerState.STOPPED
+
+
+def test_rate_hz_is_not_distorted_during_warmup():
+    a = MockAdapter({0x40000000: 1})
+    snaps, states = [], []
+    p = make_poller(a, snaps, states, interval=0.005)
+    p.start()
+    assert wait_for(lambda: len(snaps) >= 3)
+    p.stop()
+    assert snaps[2].rate_hz > 10

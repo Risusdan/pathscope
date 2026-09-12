@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 
+from core.adapter.base import TargetLostError
 from core.adapter.pyocd_swd import PyOCDAdapter
 from core.engine.core import Engine
 
@@ -25,6 +26,12 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 def cmd_monitor(args: argparse.Namespace) -> int:
     adapter = PyOCDAdapter(target=args.target)
+    try:
+        info = adapter.connect()
+        print("connected: %s idcode=0x%08X" % (info.name, info.idcode))
+    except TargetLostError as e:
+        print("ERROR: cannot connect to target: %s" % e)
+        return 1
     engine = Engine.load(args.target_dir, adapter,
                          interval_s=args.interval / 1000.0)
     if engine.excluded:

@@ -4,6 +4,7 @@ through here: periodic sweeps, user commands, reconnection."""
 import queue
 import threading
 import time
+import traceback
 from collections import deque
 from typing import Any, Callable, Deque, List
 
@@ -49,7 +50,10 @@ class Poller(threading.Thread):
 
     def _emit_state(self, state: str) -> None:
         for cb in self._state_cbs:
-            cb(state)
+            try:
+                cb(state)
+            except Exception:
+                traceback.print_exc()
 
     def _drain_commands(self) -> None:
         while True:
@@ -84,7 +88,8 @@ class Poller(threading.Thread):
         self._times.append(now)
         cutoff = now - 2.0
         recent = [t for t in self._times if t >= cutoff]
-        rate = len(recent) / 2.0 if len(recent) > 1 else 0.0
+        span = now - recent[0] if len(recent) >= 2 else 0.0
+        rate = (len(recent) - 1) / span if span > 0 else 0.0
         return Snapshot(values=values, t=now, rate_hz=rate)
 
     def run(self) -> None:
@@ -94,7 +99,10 @@ class Poller(threading.Thread):
                 self._drain_commands()
                 snap = self._sweep()
                 for cb in self._snapshot_cbs:
-                    cb(snap)
+                    try:
+                        cb(snap)
+                    except Exception:
+                        traceback.print_exc()
             except AdapterError:
                 self._emit_state(PollerState.TARGET_LOST)
                 while not self._stop_evt.is_set():

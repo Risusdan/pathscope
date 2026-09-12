@@ -1,0 +1,49 @@
+# targets/f411/f411.topology.yaml
+# STM32F411 "Blackpill" ADC->DMA->SRAM demo scenario.
+blocks:
+  - id: pa1
+    kind: pin
+    title: PA1
+  - id: adc1
+    kind: peripheral
+    title: ADC1
+    svd: ADC1
+    ports: {DR: [r, 0.5]}
+  - id: mux0
+    kind: mux
+    title: MUX
+    select: "DMA2.S0CR.CHSEL"
+  - id: tim1
+    kind: peripheral
+    title: TIM1
+    svd: TIM1
+  - id: dma2
+    kind: dma
+    title: DMA2
+    svd: DMA2
+    ports: {periph: [l, 0.5], mem: [r, 0.5]}
+  - id: busmx
+    kind: interconnect
+    title: AHB Bus Matrix
+  - id: sram1
+    kind: memory
+    title: SRAM1 128KB
+    base: 0x20000000
+    size: 0x20000
+  - id: cm4
+    kind: cpu
+    title: Cortex-M4
+  - id: flash
+    kind: memory
+    title: Flash 512KB
+    base: 0x08000000
+    size: 0x80000
+edges:
+  - {from: pa1, to: adc1, label: AIN1}
+  - {from: adc1, to: mux0, label: DR, when_select: 0}
+  - {from: tim1, to: mux0, label: TRGO, when_select: 6}
+  - {from: mux0, to: dma2, to_port: periph, label: S0}
+  - {from: dma2, from_port: mem, to: busmx, label: AHB}
+  - {from: busmx, to: sram1, label: M0AR}
+  - {from: flash, to: busmx, label: I-bus}
+  - {from: busmx, to: cm4, label: fetch}

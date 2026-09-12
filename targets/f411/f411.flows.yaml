@@ -1,0 +1,15 @@
+# targets/f411/f411.flows.yaml
+activities:
+  - name: adc_to_sram
+    path: [pa1, adc1, mux0, dma2, busmx, sram1]
+    active_when: "DMA2.S0CR.EN == 1 and DMA2.S0CR.CHSEL == 0"
+    progress: "DMA2.S0NDTR"
+    anomalies:
+      - {rule: "ADC1.SR.OVR == 1", msg: "ADC overrun, data lost",
+         target: adc1}
+      - {rule: "stalled(DMA2.S0NDTR, 500)", msg: "DMA stalled",
+         target: dma2}
+      - {rule: "DMA2.LISR.TEIF0 == 1", msg: "DMA transfer error",
+         target: dma2}
+poll:
+  force_poll: []

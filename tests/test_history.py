@@ -41,3 +41,13 @@ def test_unknown_key():
     assert h.last_change_age("X.Y", 1.0) is None
     assert h.changed_on_last("X.Y") is False
     assert h.series("X.Y") == []
+
+
+def test_gates_survive_window_trim():
+    h = History(window_s=1.0)
+    h.record("A.B", 0.0, 5)
+    h.record("A.B", 5.0, 5)      # gap > window: buffer trimmed to 1 sample
+    assert h.last_change_age("A.B", 5.0) == 5.0   # not None
+    h.record("A.B", 10.0, 7)
+    assert h.changed_on_last("A.B") is True
+    assert h.last_change_age("A.B", 10.5) == 0.5

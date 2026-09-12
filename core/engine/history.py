@@ -9,29 +9,32 @@ class History:
         self._buf: Dict[str, Deque[Tuple[float, int]]] = {}
         self._last_change_t: Dict[str, float] = {}
         self._first_t: Dict[str, float] = {}
+        self._count: Dict[str, int] = {}
+        self._prev_value: Dict[str, int] = {}
 
     def record(self, reg_key: str, t: float, value: int) -> None:
         buf = self._buf.setdefault(reg_key, deque())
-        if buf and buf[-1][1] != value:
-            self._last_change_t[reg_key] = t
+        if buf:
+            self._prev_value[reg_key] = buf[-1][1]
+            if buf[-1][1] != value:
+                self._last_change_t[reg_key] = t
         if reg_key not in self._first_t:
             self._first_t[reg_key] = t
+        self._count[reg_key] = self._count.get(reg_key, 0) + 1
         buf.append((t, value))
         while buf and buf[0][0] < t - self.window_s:
             buf.popleft()
 
     def last_change_age(self, reg_key: str, now: float) -> Optional[float]:
-        buf = self._buf.get(reg_key)
-        if not buf or len(buf) < 2:
+        if self._count.get(reg_key, 0) < 2:
             return None
         anchor = self._last_change_t.get(reg_key, self._first_t[reg_key])
         return now - anchor
 
     def changed_on_last(self, reg_key: str) -> bool:
-        buf = self._buf.get(reg_key)
-        if not buf or len(buf) < 2:
+        if self._count.get(reg_key, 0) < 2:
             return False
-        return buf[-1][1] != buf[-2][1]
+        return self._buf[reg_key][-1][1] != self._prev_value[reg_key]
 
     def series(self, reg_key: str) -> List[Tuple[float, int]]:
         return list(self._buf.get(reg_key, []))

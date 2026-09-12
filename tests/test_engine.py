@@ -3,6 +3,7 @@ import time
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
+from core.engine.poller import PollerState
 
 TARGET = "tests/fixtures/minitarget"
 S0CR = 0x40026410
@@ -64,6 +65,32 @@ def test_set_watch_adds_and_refuses(rig):
     assert "ADC2.SR" in e.polled
     assert wait_for(
         lambda: updates and "ADC2.SR" in updates[-1].snapshot.values)
+
+
+def test_set_watch_survives_target_lost_reconnect(rig):
+    """FIX 2 regression: a set_watch() swap command queued right
+    before the adapter drops can be drained-and-failed by
+    poller.py's _fail_pending() during reconnect without ever being
+    applied, leaving poller.plan stale while engine.polled (and
+    set_watch()'s own return value) claim the swap took effect.
+    Engine now re-subscribes to poller.on_state and rebuilds+resubmits
+    the plan from the current self.polled on every transition back to
+    RUNNING, so the watched register shows up regardless of whether
+    the original swap survived the race with the failure below."""
+    a, e, updates = rig
+    states = []
+    e.on_state(states.append)
+
+    refused = e.set_watch({"ADC2.SR"})
+    assert refused == []
+    a.fail_next(1)                             # force one TARGET_LOST
+
+    assert wait_for(lambda: PollerState.TARGET_LOST in states)
+    assert wait_for(lambda: states and states[-1] == PollerState.RUNNING,
+                    timeout=3.0)
+    assert wait_for(
+        lambda: updates and "ADC2.SR" in updates[-1].snapshot.values,
+        timeout=3.0)
 
 
 def test_read_words_on_demand(rig):

@@ -11,7 +11,7 @@ from ..target.registers import RegisterModel
 from ..target.topology import Topology, load_topology
 from .evaluator import Evaluator
 from .history import History
-from .poller import Poller
+from .poller import Poller, PollerState
 from .readplan import build_read_plan
 from .rules import EngineUpdate, RuleEngine
 from .snapshot import Snapshot
@@ -48,6 +48,7 @@ class Engine:
         self._rules = rules
         self._update_cbs: List[Callable[[EngineUpdate], None]] = []
         poller.on_snapshot(self._handle_snapshot)
+        poller.on_state(self._on_poller_state)
 
     @classmethod
     def load(cls, target_dir: str, adapter: TargetAdapter,
@@ -116,6 +117,17 @@ class Engine:
                 accepted.add(key)
         self._extra = accepted
         self.polled = set(self._base_polled) | accepted
+        self._swap_plan()
+        return sorted(refused)
+
+    def _swap_plan(self) -> None:
+        """Rebuild the read plan from the current self.polled and
+        submit it as a poller command. Used both by set_watch() and by
+        _on_poller_state() below - always rebuilds from self.polled
+        (the engine's source of truth for what should be watched)
+        rather than closing over a plan computed earlier, so a
+        re-swap is idempotent: replaying it against an already-current
+        plan is harmless."""
         plan = build_read_plan(self.polled, self.model,
                                forbidden_addrs=frozenset(self._guarded_addrs))
         poller = self._poller
@@ -123,7 +135,19 @@ class Engine:
         def swap(_adapter):
             poller.plan = plan
         self._poller.submit(swap)
-        return sorted(refused)
+
+    def _on_poller_state(self, state: str) -> None:
+        """A set_watch() swap command can be silently discarded: if
+        the adapter drops between the command being queued and the
+        poller draining it, the reconnect path's _fail_pending()
+        drains-and-fails every queued command (poller.py) without
+        ever applying it, leaving poller.plan stale while self.polled
+        (and set_watch()'s return value) claim the swap took effect.
+        Rebuilding and re-submitting the plan on every transition back
+        to RUNNING - including the very first one, at startup - closes
+        that window regardless of whether the original swap survived."""
+        if state == PollerState.RUNNING:
+            self._swap_plan()
 
     def read_words(self, addr: int, count: int,
                    timeout_s: float = 2.0) -> List[int]:

@@ -75,7 +75,7 @@ class Poller(threading.Thread):
                 _fn, result = self._commands.get_nowait()
             except queue.Empty:
                 return
-            result.put((False, None))
+            result.put((False, "target lost"))
 
     def _sweep(self) -> Snapshot:
         values = {}

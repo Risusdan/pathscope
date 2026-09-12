@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+ui = ["PySide6>=6.5"]
+dev = ["pytest>=7.0", "pytest-qt>=4.2"]
 
 [tool.setuptools]
 packages = ["core", "core.adapter", "core.engine", "core.target"]

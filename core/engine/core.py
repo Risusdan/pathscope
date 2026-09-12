@@ -73,7 +73,8 @@ class Engine:
                 excluded.append(key)
             else:
                 polled.add(key)
-        plan = build_read_plan(polled, model)
+        plan = build_read_plan(polled, model,
+                               forbidden_addrs=frozenset(guarded_addrs))
         poller = Poller(adapter, plan, interval_s=interval_s)
         rules = RuleEngine(flowspec)
         return cls(model, topology, flowspec, history, poller, rules,

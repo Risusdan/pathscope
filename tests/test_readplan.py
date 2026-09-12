@@ -31,3 +31,25 @@ def test_merge_gap_zero_never_merges(model):
     plan = build_read_plan({"DMA2.S0CR", "DMA2.S1CR"}, model,
                            merge_gap_words=0)
     assert len(plan) == 2
+
+
+def test_merge_refused_across_forbidden_address(model):
+    # S0CR @ +0x10 and S1CR @ +0x28 normally merge into one op; forbid an
+    # address inside the gap and the merge must split.
+    plan = build_read_plan({"DMA2.S0CR", "DMA2.S1CR"}, model,
+                           forbidden_addrs={0x40026414})   # S0NDTR
+    assert len(plan) == 2
+    assert plan[0].count == 1 and plan[1].count == 1
+
+
+def test_forbidden_target_still_readable_alone(model):
+    # A force-polled guarded register is a legitimate target; it must get
+    # its own op, and neighbours must not merge across it.
+    plan = build_read_plan({"DMA2.S0CR", "DMA2.S0NDTR", "DMA2.S1CR"},
+                           model, forbidden_addrs={0x40026414})
+    addrs = sorted(op.addr for op in plan)
+    assert 0x40026414 in addrs                # own op exists
+    for op in plan:
+        if op.addr != 0x40026414:
+            span = range(op.addr, op.addr + 4 * op.count, 4)
+            assert 0x40026414 not in span     # never swept incidentally

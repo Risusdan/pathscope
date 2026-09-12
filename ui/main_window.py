@@ -326,6 +326,15 @@ class MainWindow(QMainWindow):
 
     def apply_update(self, u: EngineUpdate) -> None:
         self.last_update = u
+        # spec 7 "event log stays live": the log must not depend on
+        # whether the diagram is frozen, so it is fed here,
+        # unconditionally, before the frozen check below - not from
+        # inside _apply(), which the frozen check can skip entirely.
+        # This also means unfreezing (which replays self.last_update
+        # through _apply() to restore the display) can no longer
+        # double-log that update's events, since _apply() itself never
+        # touches the log.
+        self.event_log.add_events(u.events)
         if self.frozen:
             return
         self._apply(u)
@@ -370,7 +379,6 @@ class MainWindow(QMainWindow):
 
         self.reg_page.refresh(u)
         self.flow_page.refresh(u)
-        self.event_log.add_events(u.events)
 
     def on_state(self, state: str) -> None:
         self.statusBar().showMessage("poller: %s" % state)

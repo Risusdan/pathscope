@@ -40,10 +40,23 @@ blocks:
     size: 0x80000
 edges:
   - {from: pa1, to: adc1, label: AIN1}
-  - {from: adc1, to: mux0, label: DR, when_select: 0}
-  - {from: tim1, to: mux0, label: TRGO, when_select: 6}
+  - {from: adc1, to: mux0, label: DR, when_select: 0,
+     points: [[210, 320], [232, 320], [232, 350], [255, 350]]}
+  - {from: tim1, to: mux0, label: TRGO, when_select: 6,
+     points: [[200, 470], [232, 470], [232, 400], [255, 400]]}
   - {from: mux0, to: dma2, to_port: periph, label: S0}
   - {from: dma2, from_port: mem, to: busmx, label: AHB}
   - {from: busmx, to: sram1, label: M0AR}
   - {from: flash, to: busmx, label: I-bus}
   - {from: busmx, to: cm4, label: fetch}
+
+layout:
+  pa1:   {x: 8,   y: 300, w: 34,  h: 34}
+  adc1:  {x: 70,  y: 280, w: 140, h: 80}
+  tim1:  {x: 70,  y: 430, w: 130, h: 80}
+  mux0:  {x: 255, y: 330, w: 45,  h: 90}
+  dma2:  {x: 330, y: 320, w: 160, h: 100}
+  busmx: {x: 580, y: 40,  w: 110, h: 440}
+  sram1: {x: 780, y: 230, w: 170, h: 90}
+  cm4:   {x: 70,  y: 50,  w: 160, h: 90}
+  flash: {x: 780, y: 50,  w: 170, h: 80}

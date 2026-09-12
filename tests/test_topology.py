@@ -71,3 +71,32 @@ def test_bad_kind_rejected(tmp_path, model):
 def test_duplicate_id_rejected(tmp_path, model):
     with pytest.raises(TopologyError):
         _load(tmp_path, model, GOOD.replace("id: sram1", "id: adc1"))
+
+
+LAYOUT = GOOD + """
+layout:
+  adc1: {x: 70, y: 280, w: 140, h: 80}
+  sram1: {x: 780, y: 230}
+"""
+
+
+def test_layout_parsed(tmp_path, model):
+    t = _load(tmp_path, model, LAYOUT)
+    assert (t.blocks["adc1"].x, t.blocks["adc1"].y) == (70, 280)
+    assert t.blocks["adc1"].w == 140
+    assert t.blocks["sram1"].w is None       # size optional
+    assert t.blocks["dma2"].x is None        # absent -> None
+
+
+def test_layout_unknown_id_rejected(tmp_path, model):
+    with pytest.raises(TopologyError):
+        _load(tmp_path, model, GOOD + "\nlayout:\n  ghost: {x: 1, y: 2}\n")
+
+
+def test_edge_points_parsed(tmp_path, model):
+    text = GOOD.replace(
+        "  - {from: adc1, to: mux0, when_select: 0}",
+        "  - {from: adc1, to: mux0, when_select: 0, "
+        "points: [[210, 320], [232, 320], [232, 350]]}")
+    t = _load(tmp_path, model, text)
+    assert t.edges[0].points == [(210, 320), (232, 320), (232, 350)]

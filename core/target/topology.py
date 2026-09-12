@@ -24,6 +24,10 @@ class Block:
     base: Optional[int] = None
     size: Optional[int] = None
     ports: Dict[str, Tuple[str, float]] = dfield(default_factory=dict)
+    x: Optional[int] = None
+    y: Optional[int] = None
+    w: Optional[int] = None
+    h: Optional[int] = None
 
 
 @dataclass
@@ -36,6 +40,7 @@ class Edge:
     when_select: Optional[int] = None
     src_port: Optional[str] = None
     dst_port: Optional[str] = None
+    points: List[Tuple[int, int]] = dfield(default_factory=list)
 
 
 @dataclass
@@ -80,8 +85,19 @@ def load_topology(path: str, model: RegisterModel) -> Topology:
         via = raw.get("via")
         if via is not None and via not in blocks:
             raise TopologyError("edge %d: unknown via %r" % (i, via))
+        points = [(int(px), int(py)) for px, py in raw.get("points", [])]
         edges.append(Edge(
             id="%s->%s#%d" % (src, dst, i), src=src, dst=dst, via=via,
             label=raw.get("label"), when_select=raw.get("when_select"),
-            src_port=raw.get("from_port"), dst_port=raw.get("to_port")))
+            src_port=raw.get("from_port"), dst_port=raw.get("to_port"),
+            points=points))
+    for bid, pos in (doc.get("layout") or {}).items():
+        if bid not in blocks:
+            raise TopologyError("layout: unknown block %r" % bid)
+        b = blocks[bid]
+        b.x, b.y = int(pos["x"]), int(pos["y"])
+        if "w" in pos:
+            b.w = int(pos["w"])
+        if "h" in pos:
+            b.h = int(pos["h"])
     return Topology(blocks=blocks, edges=edges)

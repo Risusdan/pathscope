@@ -51,3 +51,27 @@ def test_gates_survive_window_trim():
     h.record("A.B", 10.0, 7)
     assert h.changed_on_last("A.B") is True
     assert h.last_change_age("A.B", 10.5) == 0.5
+
+
+def test_concurrent_record_and_read():
+    import threading
+    h = History(window_s=1.0)
+    stop = threading.Event()
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            h.record("A.B", i * 0.001, i)
+            i += 1
+
+    t = threading.Thread(target=writer, daemon=True)
+    t.start()
+    try:
+        for _ in range(2000):
+            h.series("A.B")
+            h.last_change_age("A.B", 99.0)
+            h.changed_on_last("A.B")
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+    assert h.series("A.B")          # survived without exception

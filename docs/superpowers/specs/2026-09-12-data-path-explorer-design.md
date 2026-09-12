@@ -334,6 +334,12 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
 
 ## 11. Out of Scope for MVP (recorded for later)
 
+- Additional block kinds. The topology `kind` set (peripheral, dma,
+  memory, cpu, interconnect, mux, pin) is an extensible whitelist: a
+  kind only drives load-time validation, diagram styling, and the
+  legend, never engine behavior, so adding one is a one-line whitelist
+  entry plus a tint/shape. Candidates when real targets demand them:
+  `fifo` (fill-level bar), `external` (off-chip devices).
 - Additional transport adapters (UART-based debug units, J-Link native).
 - Buffer waveform view, trace-buffer ingestion (AHB-trace-class sources).
 - Session record/replay in the UI (engine-level recording exists for tests).

@@ -910,23 +910,31 @@ class ScopePage(QWidget):
 
     def _on_fit_clicked(self, key: str) -> None:
         """Per-row Fit toggle (spec point 4): switches this channel
-        between the two lane targets Auto-lane groups channels by -
-        "fill" (this channel alone fills the whole view) or "own" (it
-        gets one band of a multi-channel stack). The toggle only
-        changes which group the channel belongs to; the actual
-        scale/offset computation is Auto-lane's job - if Auto-lane is
-        currently on, recompute immediately so the regrouping is
-        visible right away rather than waiting on the next 200 ms
-        tick."""
+        between the two lane targets - "fill" (this channel alone
+        fills the whole view) or "own" (it gets one band of a
+        multi-channel stack) - and ALWAYS performs one fit pass right
+        now, like a real scope's autoset button, writing the computed
+        scale/offset of every channel into the editable fields. (A T5
+        hardware finding: with the one-shot pass gated on Auto-lane,
+        clicking Fit with Auto-lane off visibly did nothing.)
+        Auto-lane's checkbox is the CONTINUOUS version of the same
+        computation - while it is on, refresh_plot() re-runs the pass
+        every tick anyway, so the explicit call is skipped."""
         entry = self._channels.get(key)
         if entry is None:
             return
         entry["fit"] = "own" if entry["fit"] == "fill" else "fill"
         entry["fit_btn"].setText("Own" if entry["fit"] == "own" else "Fill")
-        if self._auto_lane:
-            # refresh_plot() re-runs _apply_auto_lane() itself while
-            # Auto-lane is on, so one call recomputes and repaints.
-            self.refresh_plot()
+        if not self._auto_lane:
+            # The pass reads _last_series - the data currently ON
+            # SCREEN, deliberately (fitting while stopped must fit
+            # what is displayed, not silently pull newer samples).
+            # Only a never-refreshed page (empty cache) primes it
+            # with one refresh first.
+            if not self._last_series:
+                self.refresh_plot()
+            self._apply_auto_lane()
+        self.refresh_plot()
 
     # -- Auto-lane (spec point 4) --------------------------------------------
 

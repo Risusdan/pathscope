@@ -756,6 +756,31 @@ def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
     assert page._channels[key]["transform"] == computed
 
 
+def test_fit_click_does_one_shot_pass_even_with_auto_lane_off(qtbot):
+    """T5 hardware finding: clicking a row's Fit button must perform
+    one fit pass right now (a scope autoset), even while Auto-lane is
+    unchecked - not just silently regroup for a computation that
+    never runs."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    engine.history.record(key, t0 + 0.1, 300)
+
+    assert not page.auto_lane_check.isChecked()
+    assert page._channels[key]["transform"] == {"scale": 1.0,
+                                                "offset": 0.0}
+
+    page._channels[key]["fit_btn"].click()
+    computed = dict(page._channels[key]["transform"])
+    assert computed != {"scale": 1.0, "offset": 0.0}
+    # and the computed values landed in the editable fields.
+    assert page._channels[key]["scale_edit"].text() != "1"
+
+
 def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
     """Spec point 7: no selection hides the axis tick numbers; a
     selected row titles the axis with that channel's name/color and

@@ -258,9 +258,25 @@ class MainWindow(QMainWindow):
             self.scope_dock.setMinimumHeight(200)
             self.addDockWidget(Qt.BottomDockWidgetArea, self.scope_dock)
             self.tabifyDockWidget(self.log_dock, self.scope_dock)
+            self.scope_dock.visibilityChanged.connect(
+                self._on_scope_visibility_changed)
         self.scope_dock.setVisible(on)
         if on:
             self.scope_dock.raise_()
+
+    def _on_scope_visibility_changed(self, visible: bool) -> None:
+        """Wired to scope_dock.visibilityChanged so the toolbar's
+        Scope action tracks the dock's actual visibility, including
+        when the user closes it via its titlebar X - which hides the
+        dock without going through _toggle_scope, leaving scope_act
+        checked with no dock showing (two clicks needed to reopen).
+        blockSignals guards against recursion: without it,
+        setChecked() below would re-fire scope_act.toggled ->
+        _toggle_scope -> scope_dock.setVisible(), re-entering this
+        slot."""
+        self.scope_act.blockSignals(True)
+        self.scope_act.setChecked(visible)
+        self.scope_act.blockSignals(False)
 
     def _toggle_tint(self, on: bool) -> None:
         self.diagram_state.tinted = on

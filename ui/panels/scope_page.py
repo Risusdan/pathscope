@@ -47,6 +47,22 @@ are part of the produced interface per task-2-brief.md.
 scope-cursor sync) are NOT implemented here - left entirely to Task 4,
 per task-2-brief.md's "you may stub cursor_time now or leave to Task
 4; document which" - this file leaves both to Task 4.
+
+ELF symbol picker (task 3, task-3-brief.md): "Load ELF..." opens a
+QFileDialog (the one dialog this panel uses - everything else is
+inline, per the class-level convention above) and hands the chosen
+path to `load_elf()`, which lazily imports ui.elf_symbols (same
+import-on-first-use pattern as pyqtgraph at this module's top) and
+populates `symbol_list` with every symbol name, filtered live by
+`symbol_filter_edit`. Picking one and clicking "Add symbol" calls
+`add_symbol_channel(name)`, which is a thin wrapper over the existing
+`add_address_channel()` - same synthetic-key/EngineError-through
+behavior as the manual address row, not a separate code path.
+load_symbols() reports every OBJECT symbol regardless of size; a
+channel always reads one 32-bit word (Engine.add_addr_watch), so
+symbol_list carries a tooltip noting that a symbol larger than 4
+bytes is only sampled at its first word - this is documented here
+rather than filtered at load time, per the brief.
 """
 import time
 from typing import Dict, List, Optional, Tuple
@@ -54,11 +70,15 @@ from typing import Dict, List, Optional, Tuple
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QPushButton, QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
+
+SYMBOL_LIST_TOOLTIP = (
+    "Symbols from the loaded ELF. Adding a channel always reads the "
+    "symbol's first 32-bit word, regardless of its declared size.")
 
 # pathscope is light-theme only by design (see ui/app.py's
 # app.styleHints().setColorScheme(Qt.ColorScheme.Light)) - pyqtgraph's
@@ -133,6 +153,11 @@ class ScopePage(QWidget):
         self._t0 = time.monotonic()
         self._channels: Dict[str, dict] = {}
         self._markers: List[Tuple[float, pg.InfiniteLine]] = []
+        # name -> ui.elf_symbols.Symbol (a namedtuple, hence `tuple`
+        # here) - populated by load_elf(); ui.elf_symbols is imported
+        # lazily there, not at this module's top, so this attribute is
+        # typed structurally rather than by importing the class.
+        self.elf_symbols: Dict[str, tuple] = {}
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -162,6 +187,29 @@ class ScopePage(QWidget):
         add_addr_btn.clicked.connect(self._on_add_address_clicked)
         addr_row.addWidget(add_addr_btn)
         side.addLayout(addr_row)
+
+        side.addWidget(QLabel("ELF symbols"))
+        elf_row = QHBoxLayout()
+        load_elf_btn = QPushButton("Load ELF...")
+        load_elf_btn.clicked.connect(self._on_load_elf_clicked)
+        elf_row.addWidget(load_elf_btn)
+        side.addLayout(elf_row)
+
+        self.symbol_filter_edit = QLineEdit()
+        self.symbol_filter_edit.setPlaceholderText("filter symbols")
+        self.symbol_filter_edit.textChanged.connect(
+            self._refresh_symbol_list)
+        side.addWidget(self.symbol_filter_edit)
+
+        self.symbol_list = QListWidget()
+        self.symbol_list.setToolTip(SYMBOL_LIST_TOOLTIP)
+        self.symbol_list.setMaximumHeight(120)
+        side.addWidget(self.symbol_list)
+
+        add_symbol_btn = QPushButton("Add symbol")
+        add_symbol_btn.setToolTip(SYMBOL_LIST_TOOLTIP)
+        add_symbol_btn.clicked.connect(self._on_add_symbol_clicked)
+        side.addWidget(add_symbol_btn)
 
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #C62828;")
@@ -317,6 +365,62 @@ class ScopePage(QWidget):
         if item is None:
             return
         self.remove_channel(item.data(Qt.UserRole))
+
+    # -- ELF symbol picker -------------------------------------------------
+
+    def load_elf(self, path: str) -> None:
+        """Load every OBJECT symbol from path's ELF (via
+        ui.elf_symbols.load_symbols, imported lazily here - same
+        import-on-first-use pattern as pyqtgraph at this module's top,
+        just deferred one step further since not every scope session
+        loads an ELF at all) into `elf_symbols` and repopulate
+        `symbol_list`. Any failure (bad path, unparsable ELF) is
+        rendered in `error_label` exactly like an EngineError from the
+        address row - never a dialog; the QFileDialog in
+        _on_load_elf_clicked is this panel's one and only dialog."""
+        try:
+            from ui.elf_symbols import load_symbols
+            symbols = load_symbols(path)
+        except Exception as e:
+            self.error_label.setText("ELF load failed: %s" % e)
+            return
+        self.elf_symbols = {s.name: s for s in symbols}
+        self.symbol_filter_edit.clear()
+        self._refresh_symbol_list()
+        self.error_label.setText("")
+
+    def add_symbol_channel(self, name: str) -> str:
+        """Add a channel for a symbol already loaded by load_elf(), by
+        its first word - a thin wrapper over add_address_channel (same
+        synthetic key, same EngineError-through behavior), not a
+        separate code path. Raises KeyError for an unknown name."""
+        symbol = self.elf_symbols[name]
+        return self.add_address_channel(symbol.addr, symbol.name)
+
+    def _refresh_symbol_list(self) -> None:
+        needle = self.symbol_filter_edit.text().strip().lower()
+        self.symbol_list.clear()
+        for name in self.elf_symbols:        # already sorted by load_symbols
+            if needle in name.lower():
+                self.symbol_list.addItem(QListWidgetItem(name))
+
+    def _on_load_elf_clicked(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Load ELF...", "", "ELF files (*.elf);;All files (*)")
+        if not path:
+            return
+        self.load_elf(path)
+
+    def _on_add_symbol_clicked(self) -> None:
+        item = self.symbol_list.currentItem()
+        if item is None:
+            return
+        try:
+            self.add_symbol_channel(item.text())
+        except EngineError as e:
+            self.error_label.setText("error: %s" % e)
+            return
+        self.error_label.setText("")
 
     # -- event markers ---------------------------------------------------
 

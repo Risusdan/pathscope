@@ -14,7 +14,7 @@ dependencies = [
 license = {file = "LICENSE"}
 
 [project.optional-dependencies]
-ui = ["PySide6>=6.5", "pyqtgraph>=0.13"]
+ui = ["PySide6>=6.5", "pyqtgraph>=0.13", "pyelftools>=0.29"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2"]
 build = ["pyinstaller>=6.0"]
 

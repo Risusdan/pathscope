@@ -79,6 +79,32 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench_read(args: argparse.Namespace) -> int:
+    adapter = PyOCDAdapter(target=args.target)
+    try:
+        adapter.connect()
+    except TargetLostError as e:
+        print("ERROR: cannot connect to target: %s" % e)
+        return 1
+    blocks = 0
+    start = time.monotonic()
+    end = start + args.seconds
+    try:
+        while time.monotonic() < end:
+            adapter.read_block32(args.addr, args.block_words)
+            blocks += 1
+        elapsed = time.monotonic() - start
+    finally:
+        adapter.disconnect()
+    total_bytes = blocks * args.block_words * 4
+    bytes_per_second = total_bytes / elapsed if elapsed > 0 else 0.0
+    kb_per_s = bytes_per_second / 1024.0
+    ceiling = int(bytes_per_second / 48)
+    print("blocks=%d bytes=%d throughput=%.1f KB/s ceiling@48B=%d Hz"
+          % (blocks, total_bytes, kb_per_s, ceiling))
+    return 0
+
+
 def cmd_gui(args: argparse.Namespace) -> int:
     # Imported here, not at module scope, so the core CLI (probe/monitor)
     # keeps working on machines without PySide6 installed.
@@ -101,6 +127,12 @@ def build_parser() -> argparse.ArgumentParser:
     mon.add_argument("--seconds", type=float, default=10.0)
     mon.add_argument("--interval", type=float, default=20.0,
                      help="sweep interval in ms")
+    bench = sub.add_parser("bench-read",
+                           help="measure block-read throughput")
+    bench.add_argument("--seconds", type=float, default=5.0)
+    bench.add_argument("--block-words", type=int, default=1024)
+    bench.add_argument("--addr", type=lambda s: int(s, 0),
+                       default=0x20000000)
     gui = sub.add_parser("gui", help="launch the live diagram window")
     gui.add_argument("--target-dir", default="targets/f411")
     gui.add_argument("--demo", action="store_true",
@@ -116,6 +148,8 @@ def main(argv=None) -> int:
         return cmd_probe(args)
     if args.cmd == "monitor":
         return cmd_monitor(args)
+    if args.cmd == "bench-read":
+        return cmd_bench_read(args)
     if args.cmd == "gui":
         return cmd_gui(args)
     return 1

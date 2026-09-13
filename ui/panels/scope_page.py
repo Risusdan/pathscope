@@ -396,16 +396,29 @@ class ScopePage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
 
+        # ONE header row for the whole page (a T5 compactness finding:
+        # the old separate time row + Channels row + status labels
+        # stacked up until the waveform was a strip): time readout,
+        # inline error surface, then the status cluster
+        # (window/budget/Auto-lane) and the big Run/Stop, which keeps
+        # the page's top-right - same spot as the Data Path page's.
         top_row = QHBoxLayout()
         self.time_label = QLabel("t-now = -- s")
         top_row.addWidget(self.time_label)
         # Inline error surface (never a dialog, per the class-level
-        # convention) - lives on the always-visible top row, NOT
-        # inside the scrollable controls block, so an error can't be
-        # scrolled out of sight.
+        # convention) - lives on the always-visible top row so an
+        # error can never be hidden by the splitter.
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #C62828;")
         top_row.addWidget(self.error_label, 1)
+        self.window_label = QLabel(
+            "window: %.0f s (History)" % engine.history.window_s)
+        top_row.addWidget(self.window_label)
+        self.budget_label = QLabel("")
+        top_row.addWidget(self.budget_label)
+        self.auto_lane_check = QCheckBox("Auto-lane")
+        self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
+        top_row.addWidget(self.auto_lane_check)
         # The scope page's own big Run/Stop button (spec point 1),
         # this page's only run/stop control besides spacebar
         # (keyPressEvent below) - checkable so its own pressed-look
@@ -419,23 +432,8 @@ class ScopePage(QWidget):
         outer.addLayout(top_row)
 
         side = QVBoxLayout()
-        channels_header = QHBoxLayout()
-        channels_header.addWidget(QLabel("Channels"))
-        channels_header.addStretch(1)
-        # window/budget moved up from the block's bottom (spec point
-        # 8 predates the top-bottom layout): at the bottom of a
-        # scrollable block they were the first thing scrolled out of
-        # sight, and the budget indicator is exactly what should stay
-        # visible while channels are added.
-        self.window_label = QLabel(
-            "window: %.0f s (History)" % engine.history.window_s)
-        channels_header.addWidget(self.window_label)
-        self.budget_label = QLabel("")
-        channels_header.addWidget(self.budget_label)
-        self.auto_lane_check = QCheckBox("Auto-lane")
-        self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
-        channels_header.addWidget(self.auto_lane_check)
-        side.addLayout(channels_header)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(3)
 
         # The channel table is this panel's hero (spec point 2):
         # replaces the old list+strip pair - name/type/value/rate and
@@ -449,61 +447,62 @@ class ScopePage(QWidget):
         self.channel_table.setSelectionMode(QTableWidget.SingleSelection)
         self.channel_table.setEditTriggers(
             QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
-        header = self.channel_table.horizontalHeader()
-        header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        # No Stretch column (a T5 finding: Name in Stretch mode ate
+        # the whole window width and squeezed Value/Scale/Offset into
+        # truncation) - every column gets a fixed sensible width and
+        # the leftover space simply stays blank on the right.
         self.channel_table.setColumnWidth(COL_REMOVE, 28)
         self.channel_table.setColumnWidth(COL_SWATCH, 18)
+        self.channel_table.setColumnWidth(COL_NAME, 220)
         self.channel_table.setColumnWidth(COL_TYPE, 70)
-        self.channel_table.setColumnWidth(COL_VALUE, 135)
+        self.channel_table.setColumnWidth(COL_VALUE, 170)
         self.channel_table.setColumnWidth(COL_HZ, 48)
-        self.channel_table.setColumnWidth(COL_SCALE, 64)
-        self.channel_table.setColumnWidth(COL_OFFSET, 64)
+        self.channel_table.setColumnWidth(COL_SCALE, 90)
+        self.channel_table.setColumnWidth(COL_OFFSET, 90)
+        self.channel_table.verticalHeader().setDefaultSectionSize(26)
         self.channel_table.itemChanged.connect(self._on_item_changed)
         self.channel_table.itemSelectionChanged.connect(
             self._on_table_selection_changed)
         # The table scrolls its own rows internally, so many channels
         # never push the add-controls below out of sight; the minimum
-        # keeps a few rows visible even with the splitter dragged up.
-        self.channel_table.setMinimumHeight(80)
+        # keeps a couple of rows visible even with the splitter
+        # dragged up.
+        self.channel_table.setMinimumHeight(60)
         side.addWidget(self.channel_table, 1)
 
-        # Add-channel area (spec point 8): compact, 3 rows - register,
-        # address, and the ELF header row (Load + the collapsible
-        # symbol-picker toggle below it).
-        reg_row = QHBoxLayout()
+        # Add-channel area (spec point 8, compacted further by a T5
+        # finding - three stacked rows left the waveform a strip):
+        # register, address, and ELF controls share ONE row.
+        add_row = QHBoxLayout()
         self.reg_combo = QComboBox()
-        reg_row.addWidget(self.reg_combo, 1)
+        add_row.addWidget(self.reg_combo, 2)
         add_reg_btn = QPushButton("Add register")
         add_reg_btn.clicked.connect(self._on_add_register_clicked)
-        reg_row.addWidget(add_reg_btn)
-        side.addLayout(reg_row)
-
-        addr_row = QHBoxLayout()
+        add_row.addWidget(add_reg_btn)
         self.addr_edit = QLineEdit()
         self.addr_edit.setPlaceholderText("0x20000000")
         self.addr_edit.setFont(MONO)
-        addr_row.addWidget(self.addr_edit, 1)
+        self.addr_edit.setMaximumWidth(130)
+        add_row.addWidget(self.addr_edit, 1)
         self.addr_label_edit = QLineEdit()
         self.addr_label_edit.setPlaceholderText("label")
-        addr_row.addWidget(self.addr_label_edit, 1)
+        self.addr_label_edit.setMaximumWidth(110)
+        add_row.addWidget(self.addr_label_edit, 1)
         add_addr_btn = QPushButton("Add address")
         add_addr_btn.clicked.connect(self._on_add_address_clicked)
-        addr_row.addWidget(add_addr_btn)
-        side.addLayout(addr_row)
-
-        elf_header_row = QHBoxLayout()
+        add_row.addWidget(add_addr_btn)
         load_elf_btn = QPushButton("Load ELF...")
         load_elf_btn.clicked.connect(self._on_load_elf_clicked)
-        elf_header_row.addWidget(load_elf_btn, 1)
+        add_row.addWidget(load_elf_btn)
         # Collapsible symbol picker (spec point 8): collapsed by
-        # default so the compact 3-row add area doesn't cost vertical
-        # space for a symbol list nobody has loaded yet - auto-expands
-        # the first time load_elf() actually populates one.
+        # default so the add row doesn't cost vertical space for a
+        # symbol list nobody has loaded yet - auto-expands the first
+        # time load_elf() actually populates one.
         self.elf_toggle_btn = QPushButton("> ELF symbols")
         self.elf_toggle_btn.setCheckable(True)
         self.elf_toggle_btn.clicked.connect(self._on_elf_toggle_clicked)
-        elf_header_row.addWidget(self.elf_toggle_btn, 1)
-        side.addLayout(elf_header_row)
+        add_row.addWidget(self.elf_toggle_btn)
+        side.addLayout(add_row)
 
         elf_content_layout = QVBoxLayout()
         elf_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -558,7 +557,7 @@ class ScopePage(QWidget):
         self.splitter.addWidget(self.plot_widget)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([260, 460])
+        self.splitter.setSizes([150, 570])
         outer.addWidget(self.splitter, 1)
 
         # Crosshair (feature 1): a light-grey dashed vertical line,

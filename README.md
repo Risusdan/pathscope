@@ -29,9 +29,11 @@ description files - no changes to the core engine or UI.
   on-demand reads for everything else.
 - Memory viewer for on-demand hex dumps of memory blocks, with the same
   guarded-range protection as the register inspector.
-- Scope view: a live pyqtgraph plot of polled registers, fixed addresses,
-  or ELF symbols, with event markers and gap-honest line breaks where
-  sampling actually stalled.
+- Scope view: a firmware trace-buffer sampler captures registers, fixed
+  addresses, or ELF symbols in one timer-ISR call, so every record in a
+  sample is coherent by construction; the tool drains the ring over the
+  debug probe, decodes it, and plots it with event markers and
+  gap-honest line breaks where sampling actually stalled.
 - Demo mode (`--demo`) runs the full UI against a scripted engine, no
   probe or target required.
 
@@ -50,6 +52,13 @@ With a Blackpill (STM32F411CE) + ST-Link:
     .venv/bin/pathscope gui
     .venv/bin/pathscope probe                  # print target identity
     .venv/bin/pathscope monitor --seconds 15   # headless poll-rate check
+
+The scope view needs a firmware-side trace buffer: link
+`firmware/ps_trace` into the firmware and call `ps_trace_sample()`
+from one periodic timer ISR (1 kHz on the Blackpill demo). The
+Blackpill demo firmware already integrates it - flash
+`firmware/blackpill_adc_dma/fw.elf`, then in the app open the scope
+tab, Load ELF, and add channels.
 
 ## Adding your own target
 
@@ -97,6 +106,18 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
   re-run in full, as the polling acquisition path is being replaced by
   a firmware trace-buffer sampler (M7) that guarantees same-instant
   samples by construction.
+- M7 (trace scope): firmware trace module (`ps_trace`) running at
+  1 kHz on the Blackpill, one timer-ISR call per sample. `pathscope
+  bench-read` measured `blocks=83 bytes=339968 throughput=65.8 KB/s
+  ceiling@48B=1403 Hz` on the reference clone ST-Link, so the 1 kHz
+  demo rate runs with about 40% headroom; run the same command to
+  measure your own link. Three automatic hardware tests pass (`pytest
+  -m hw`): end-to-end streaming of coherent-by-construction records
+  (adc_buf and DMA2.S0NDTR), live table edits under load with
+  generation-marked honest gaps, and Run/Stop held for over 4 seconds
+  with zero data loss. An interactive unplug/replug test exists behind
+  `PS_HW_INTERACTIVE=1`. Ring: 1024 records x 48 bytes, drain cadence
+  auto-derived from the ring span (about 204 ms at 1 kHz).
 
 ## Probe notes
 
@@ -110,19 +131,13 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
 - USB transaction latency dominates on a clone ST-Link (roughly 0.5-1 ms
   per transaction); the poller batches reads per peripheral to keep the
   snapshot rate up.
-- Scope channels at scattered addresses each cost one debug-probe
-  transaction per sweep; contiguous addresses merge into one block read.
-  If firmware groups its debug variables in a single struct, a whole set
-  of channels costs the same as one - a cheap habit that pays off in
-  sample rate.
-- The same habit is what buys value coherence: a probe reads memory
-  transaction by transaction, so channels in different reads are
-  sampled fractions of a millisecond apart - the scope's "skew" meter
-  shows the spread, and only "skew: 0" (every channel inside one block
-  read) supports same-instant reasoning across channels. For true
-  simultaneity of computed values, have firmware fill the struct
-  atomically (e.g. in one interrupt handler) and let the scope read
-  the snapshot.
+- Watch-table addresses can be anywhere - grouping no longer affects
+  coherence, only firmware whitelist design.
+- Trace records are same-instant by construction: firmware fills every
+  watched slot from one timer ISR, so cross-channel skew cannot occur.
+  Transport speed only bounds how fast the ring can be drained, i.e.
+  the sample rate; `pathscope bench-read` measures it on your own
+  probe (65.8 KB/s -> 1403 Hz ceiling on the reference clone probe).
 
 ## License
 

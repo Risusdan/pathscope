@@ -6,12 +6,14 @@ a C `static` array (e.g. firmware/blackpill_adc_dma/main.c's adc_buf)
 still gets a full symtab entry, it is just LOCAL-bound rather than
 missing - the brief is explicit both must appear.
 
-Word-size filtering (a scope channel always reads one 32-bit word via
-Engine.add_addr_watch, regardless of the symbol's declared byte size)
-happens at ADD time in ScopePage, not here: this module reports
-exactly what the ELF has, so the picker can show every candidate and
-let ScopePage's tooltip explain the caveat at the point where it
-matters.
+Word-size filtering (a scope channel always reads one 32-bit word,
+regardless of the symbol's declared byte size) happens at ADD time in
+ScopePage, not here: this module reports exactly what the ELF has, so
+the picker can show every candidate and let ScopePage's tooltip
+explain the caveat at the point where it matters. The consumer is the
+scope's trace watch table (ScopePage.add_address_slot() occupies a
+slot and pushes it to TraceReader.set_watch()), not the retired
+per-address polling path.
 
 pyelftools import is lazy (inside load_symbols), matching
 scope_page.py's pyqtgraph-imported-only-when-first-needed pattern, so

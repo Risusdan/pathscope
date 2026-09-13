@@ -191,6 +191,12 @@ side effect fires that side effect at the sample rate. Three layers:
 - Manual descriptor-address fallback for ELF-less workflows.
 - Double-buffered watch tables (gapless table swaps).
 - 10/30/60 s window selector (unblocked by the numpy path).
+- Restore-previous-table on firmware rejection (currently a rejected
+  edit stops all channels until the next valid table).
+- Drain status message could state that sampling halted table-wide.
+- Probe-adaptive read-cap/overhead tuning (current constants were
+  measured on one probe).
+- Organic concurrent-write simulation modeling.
 
 ## 10. Validation
 

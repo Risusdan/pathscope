@@ -190,6 +190,18 @@ BUDGET_TOOLTIP = ("debug-probe read transactions per poll sweep: each "
                   "scattered address costs one; contiguous addresses "
                   "merge into a single block read")
 
+# Sweep-coherence meter: a debug probe reads memory transaction by
+# transaction, so values from different read ops within one sweep are
+# NOT simultaneous. Zero skew (all of this page's channels inside one
+# block read) is the only state where cross-channel simultaneity
+# arguments are valid.
+SKEW_TOOLTIP = ("time between the first and last probe read of this "
+                "page's channels within one sweep. 0 = all channels "
+                "share one block read (same-instant values); nonzero "
+                "= values differ by that much in read time - group "
+                "the addresses contiguously (e.g. one firmware "
+                "struct) to reach 0")
+
 CURVE_COLORS = [
     "#1976D2",  # blue
     "#B71C1C",  # red
@@ -435,6 +447,15 @@ class ScopePage(QWidget):
         self.budget_label = QLabel("")
         self.budget_label.setToolTip(BUDGET_TOOLTIP)
         top_row.addWidget(self.budget_label)
+        # Sweep-coherence meter (a T5 hard requirement: the user must
+        # KNOW whether this page's values were read at one instant):
+        # the time between the first and last probe read of this
+        # page's channels within one sweep. 0 = every channel shares
+        # one block read - same-instant values, the only state that
+        # justifies simultaneity arguments in a debug session.
+        self.skew_label = QLabel("")
+        self.skew_label.setToolTip(SKEW_TOOLTIP)
+        top_row.addWidget(self.skew_label)
         self.auto_lane_check = QCheckBox("Auto-lane")
         self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
         top_row.addWidget(self.auto_lane_check)
@@ -1262,6 +1283,20 @@ class ScopePage(QWidget):
         self._update_budget_label()
 
     # -- bandwidth budget indicator -----------------------------------------
+
+    def update_sweep_skew(self, snapshot) -> None:
+        """Fed a Snapshot by MainWindow.apply_update every sweep:
+        computes the spread of this page's OWN channels' per-op read
+        timestamps (core stamps each Sample with its read op's time -
+        spec 6.4, a sweep is not atomic). Channels the sweep didn't
+        carry, and other pages' registers, don't enter the meter."""
+        ts = [s.t for k, s in snapshot.values.items()
+              if k in self._channels]
+        skew = (max(ts) - min(ts)) if len(ts) >= 2 else 0.0
+        if skew <= 0.0:
+            self.skew_label.setText("skew: 0 (coherent)")
+        else:
+            self.skew_label.setText("skew: %.1f ms" % (skew * 1e3))
 
     def _update_budget_label(self) -> None:
         """Rebuild budget_label's text from engine.read_ops - the

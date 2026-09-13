@@ -931,3 +931,30 @@ def test_spacebar_toggles_run_stop(qtbot):
 
     qtbot.keyClick(page, Qt.Key_Space)
     assert not page.is_stopped()
+
+
+def test_sweep_skew_meter_reads_channel_sample_times(qtbot):
+    """Hard requirement (T5): the user must be able to SEE whether
+    this page's values came from one instant. Zero spread across the
+    page's own channels' per-op timestamps reads "coherent"; a spread
+    shows in ms; other keys in the sweep don't enter the meter."""
+    from core.engine.snapshot import Sample, Snapshot
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    page.add_channel("DMA2.S0NDTR")
+    page.add_channel("ADC1.SR")
+
+    t0 = 100.0
+    snap = Snapshot(values={"DMA2.S0NDTR": Sample(5, t0),
+                            "ADC1.SR": Sample(6, t0),
+                            "OTHER.REG": Sample(7, t0 + 5.0)},
+                    t=t0, rate_hz=38.0)
+    page.update_sweep_skew(snap)
+    assert page.skew_label.text() == "skew: 0 (coherent)"
+
+    snap = Snapshot(values={"DMA2.S0NDTR": Sample(5, t0),
+                            "ADC1.SR": Sample(6, t0 + 0.0012)},
+                    t=t0, rate_hz=38.0)
+    page.update_sweep_skew(snap)
+    assert page.skew_label.text() == "skew: 1.2 ms"

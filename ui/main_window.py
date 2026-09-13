@@ -501,6 +501,7 @@ class MainWindow(QMainWindow):
             for ev in u.events:
                 self.scope_page.add_event_marker(
                     ev.t, "%s: %s" % (ev.flow, ev.msg))
+            self.scope_page.update_sweep_skew(u.snapshot)
         if self._datapath_stopped:
             return
         self._apply(u)

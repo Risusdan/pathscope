@@ -14,8 +14,8 @@ ADC_BUF_KEY = "@20000000"
 def _built_fw_elf():
     """Build the repo's real firmware ELF and return its path, or skip
     the test if no ARM toolchain is present (CI has none; the local
-    dev box does) - per task-3-brief.md's fixture strategy: pyelftools
-    only reads ELFs, so the only realistic fixture is a real one."""
+    dev box does) - pyelftools only reads ELFs, so the only realistic
+    fixture is a real one."""
     if shutil.which("arm-none-eabi-gcc") is None:
         pytest.skip("no ARM toolchain")
     subprocess.run(["make"], cwd=FWDIR, check=True)
@@ -58,7 +58,7 @@ def test_symbols_exclude_zero_size_and_non_object():
     assert "" not in names             # section/file symbols have no name
 
 
-# -- ScopePage symbol picker (interface #2 of task-3-brief.md) --------------
+# -- ScopePage symbol picker (the ELF picker's second interface) -----------
 
 
 def _list_texts(list_widget):

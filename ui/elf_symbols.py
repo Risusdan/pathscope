@@ -1,4 +1,4 @@
-"""ELF symbol lookup for scope channels (task 3, task-3-brief.md).
+"""ELF symbol lookup for scope channels, per the M6 scope-view plan.
 
 Loads every defined OBJECT symbol with a nonzero size from an ELF's
 .symtab via pyelftools - both STB_GLOBAL and STB_LOCAL bindings, since

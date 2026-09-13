@@ -245,8 +245,8 @@ class MainWindow(QMainWindow):
 
     def _toggle_scope(self, on: bool) -> None:
         """Wired to the toolbar's "Scope" action. Lazy dock creation
-        (task-2-brief.md): the pyqtgraph-importing module is only
-        imported here, on first open, not at MainWindow import time -
+        (per the M6 scope-view plan): the pyqtgraph-importing module is
+        only imported here, on first open, not at MainWindow import time -
         pyqtgraph's import cost is paid only if the user ever opens
         the scope. Docked bottom-tabbed next to the event log."""
         if self.scope_dock is None:
@@ -292,8 +292,8 @@ class MainWindow(QMainWindow):
         Main.select_block: marks the block selected, clears any flow
         highlight, and routes the Inspector dock to the register page
         for this block - except a memory-kind block (SRAM/Flash, no SVD
-        peripheral registers to show), which task-12-brief.md routes to
-        the memory page instead."""
+        peripheral registers to show), which routes to the memory page
+        instead."""
         self.diagram_state.selected_block = block_id
         self.diagram_state.flow_blocks = set()
         self.diagram_state.flow_edges = set()
@@ -370,11 +370,10 @@ class MainWindow(QMainWindow):
 
     def _on_log_time_focus(self, t: float) -> None:
         """Wired to event_log.on_event_time (EventLog row click, for a
-        row that carries an event time - task-4-brief.md's
-        event-to-scope cursor sync). Routes to the scope dock's
-        cursor; a no-op if the Scope dock has never been opened, same
-        "dock may not exist yet" guard apply_update() already uses for
-        add_event_marker."""
+        row that carries an event time - the event-to-scope cursor
+        sync). Routes to the scope dock's cursor; a no-op if the Scope
+        dock has never been opened, same "dock may not exist yet" guard
+        apply_update() already uses for add_event_marker."""
         if self.scope_page is not None:
             self.scope_page.jump_to(t)
 

@@ -1,5 +1,5 @@
 """Memory viewer panel: on-demand hex-dump reads for memory-kind
-topology blocks (SRAM, Flash), task-12-brief.md.
+topology blocks (SRAM, Flash).
 
 Not a port of anything in prototype/ui_proto.py - the prototype had no
 memory viewer. New widget, same conventions as the other Inspector
@@ -157,8 +157,8 @@ class MemoryPage(QWidget):
 
 def _format_dump(base_addr: int, words) -> str:
     """Classic hex dump: 8 words per row, `%08X:  ` address column then
-    space-joined `%08X` words - exact format task-12-brief.md's Step 3
-    specifies."""
+    space-joined `%08X` words - the fixed hex-dump layout this
+    function implements."""
     lines = []
     for i in range(0, len(words), WORDS_PER_ROW):
         row = words[i:i + WORDS_PER_ROW]

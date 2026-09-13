@@ -4,16 +4,15 @@ transitions, badge clears).
 
 Small new code (not a straight port - the prototype's `Main.log()`
 took a caller-supplied `focus_id` for every call site regardless of
-kind; here that becomes two entry points per task-11-brief.md's
-interface, `add_events()`/`add_info()`, both funnelling into one
-private `_append()` that carries over the prototype's `log()` row
-styling verbatim: `"[HH:MM:SS] SEVERITY   text"` in the shared mono
-font, red text for anomaly rows, and the same
+kind; here that becomes two entry points, `add_events()`/`add_info()`,
+both funnelling into one private `_append()` that carries over the
+prototype's `log()` row styling verbatim: `"[HH:MM:SS] SEVERITY   text"`
+in the shared mono font, red text for anomaly rows, and the same
 "don't auto-scroll while the user has scrolled up" scrollbar check
 (`sb.value() >= sb.maximum() - 4`, checked *after* the row is added -
 same order as the prototype).
 
-Row payload (Qt.UserRole): task-4-brief.md extends the original bare
+Row payload (Qt.UserRole): extended from the original bare
 focus_id into a `(focus_id, event_time)` pair, so a click can drive
 both MainWindow._on_log_focus (block focus, unchanged) and
 MainWindow._on_log_time_focus (scope cursor sync, new) independently -
@@ -44,7 +43,7 @@ class EventLog(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.on_focus: Callable[[str], None] = _noop
-        # task-4-brief.md's event-to-scope cursor sync: fired on click
+        # event-to-scope cursor sync: fired on click
         # only for rows that carry an event time (anomaly rows), never
         # for a plain info row - see _clicked's guard below.
         self.on_event_time: Callable[[float], None] = _noop
@@ -63,7 +62,7 @@ class EventLog(QListWidget):
         ts = time.strftime("%H:%M:%S")
         it = QListWidgetItem("[%s] %-5s %s" % (ts, severity.upper(), text))
         it.setFont(MONO)
-        # payload extended (task-4-brief.md) from a bare focus_id to a
+        # payload extended from a bare focus_id to a
         # (focus_id, event_time) pair - event_time is None for every
         # row except an anomaly row, which carries the AnomalyEvent's
         # .t so a click can also sync the scope cursor.

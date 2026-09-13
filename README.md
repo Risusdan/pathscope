@@ -13,6 +13,8 @@ description files - no changes to the core engine or UI.
 
 ![Register inspector: live DMA2 field values](docs/img/pathscope-inspector.png)
 
+![Scope view: live DMA2.S0NDTR plot with gap-honest line breaks](docs/img/pathscope-scope.png)
+
 ## Features
 
 - Live block diagram of a data path, with active edges animated and
@@ -27,6 +29,9 @@ description files - no changes to the core engine or UI.
   on-demand reads for everything else.
 - Memory viewer for on-demand hex dumps of memory blocks, with the same
   guarded-range protection as the register inspector.
+- Scope view: a live pyqtgraph plot of polled registers, fixed addresses,
+  or ELF symbols, with event markers and gap-honest line breaks where
+  sampling actually stalled.
 - Demo mode (`--demo`) runs the full UI against a scripted engine, no
   probe or target required.
 

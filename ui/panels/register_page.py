@@ -1,8 +1,8 @@
 """Register inspector panel: shows one topology block's SVD peripheral
 registers live, updated from bridge-delivered EngineUpdates.
 
-Ported from prototype/ui_proto.py's RegisterPage, with the semantic
-upgrades task-10-brief.md calls for:
+Ported from prototype/ui_proto.py's RegisterPage, with the following
+semantic upgrades:
 
   - the prototype's static REG_DEFS[block]["watched"/"cold"/"guarded"]
     table is gone; row mode is derived live from engine state

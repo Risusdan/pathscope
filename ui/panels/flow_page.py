@@ -14,7 +14,7 @@ activity's `path`). `MainWindow` and `FlowPage` each hold their own
 copy of this map (built from the same immutable topology/flowspec, so
 they never disagree) rather than one handing the other a private
 attribute - `FlowPage(engine)`'s constructor signature only takes the
-engine, per task-11-brief.md's interface.
+engine, with no other constructor arguments.
 
 The prototype's three-argument `show_edge(eid, flow_ids, auto_pick)`
 (Main.select_edge computed flow_ids/auto_pick itself and passed them

@@ -353,6 +353,16 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
   Coordinates freeze in the yaml after the one-time drag pass. Removes
   the hand-written absolute coordinates pain for large SoC scenario
   files. (Hardware-session request, 2026-09-13.)
+- Scope view (oscilloscope-style plotting): plot any polled register
+  or fixed-address firmware variable (globals/statics; ELF symbol
+  lookup via pyelftools, or manual address+type) over time. The
+  engine's History ring buffer already records exactly this data;
+  the work is a pyqtgraph panel, an arbitrary-address watch extension,
+  and cursor alignment with event-log timestamps. Achievable rate is
+  transport-bound (tens of Hz on USB debug probes; hundreds of Hz on
+  tuned UART debug links with burst reads; kHz-class on Ethernet
+  debug links) - the honest rate display already communicates this.
+  (Hardware-session request, 2026-09-13.)
 - Fault snapshot: on an anomaly rule's rising edge, attach the engine's
   current Snapshot (the very data the rule fired on) to the AnomalyEvent;
   clicking the event-log row shows the register state at fault time even

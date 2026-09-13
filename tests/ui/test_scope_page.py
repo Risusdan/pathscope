@@ -1,13 +1,14 @@
 import math
 
 import pyqtgraph as pg
+import pytest
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
 from ui.main_window import MainWindow
-from ui.panels.scope_page import ScopePage, _gapped_xy
+from ui.panels.scope_page import ScopePage, _gapped_xy, value_at
 
 TARGET = "targets/f411"
 
@@ -185,3 +186,103 @@ def test_log_click_moves_scope_cursor_to_event_time(qtbot):
         assert win.scope_page.cursor_time() == cursor_t
     finally:
         engine.stop()
+
+
+# -- scope UX upgrade (crosshair readout + per-channel scaling) ------------
+
+def test_value_at():
+    """Pure helper: newest sample with sample_t <= t, sorted-ascending
+    series (History.series()'s own guarantee)."""
+    series = [(0, 10), (1, 20), (2, 30)]
+    assert value_at(series, 1.5) == 20
+    assert value_at(series, 0) == 10
+    assert value_at(series, -1) is None
+    assert value_at([], 5) is None
+
+
+def test_crosshair_readout_shows_raw_values(qtbot):
+    """_update_crosshair(view_t) takes plot-relative seconds (the same
+    domain mapSceneToView would hand it) and must update both the
+    channel row's raw-value suffix and the time label - reading only
+    the per-channel series cached by the prior refresh_plot(), per the
+    module's cheapness requirement. History.record() is called
+    directly (no engine.start()) so sample timestamps are fully
+    controlled and the test needs no polling wait."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    engine.history.record(key, t0 + 1.0, 200)
+    engine.history.record(key, t0 + 2.0, 300)
+    page.refresh_plot()
+
+    page._update_crosshair(1.5)
+
+    item_text = page._channels[key]["item"].text()
+    assert item_text.endswith("= %d (0x%X)" % (200, 200))
+    assert page.time_label.text() == "t=1.500 s"
+
+
+def test_scale_offset_transforms_curve(qtbot):
+    """set_channel_transform() is the programmatic surface the scale/
+    offset spinboxes drive; refresh_plot() must apply y' = (y-offset)
+    * scale when building the curve's data."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    values = [100, 200, 300, 400]
+    for i, v in enumerate(values):
+        engine.history.record(key, t0 + i * 0.1, v)
+
+    page.set_channel_transform(key, scale=2.0, offset=5.0)
+    page.refresh_plot()
+
+    ys = page.curve_y(key)
+    expected = [(v - 5.0) * 2.0 for v in values]
+    assert len(ys) == len(expected)
+    for e, a in zip(expected, ys):
+        assert a == pytest.approx(e)
+
+    # the crosshair readout always shows raw values, never the scaled
+    # display curve - the whole point of the readout.
+    page._update_crosshair(0.1)
+    item_text = page._channels[key]["item"].text()
+    assert item_text.endswith("= %d (0x%X)" % (200, 200))
+
+
+def test_normalize_maps_to_unit_range(qtbot):
+    """Normalize ignores scale/offset and maps the current window's
+    min..max to 0..1; a flat (single-valued) series must map to 0.5
+    everywhere rather than dividing by a zero span."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    values = [100, 400, 250, 300]
+    for i, v in enumerate(values):
+        engine.history.record(key, t0 + i * 0.1, v)
+
+    page.set_channel_transform(key, scale=1.0, offset=0.0, normalize=True)
+    page.refresh_plot()
+
+    ys = page.curve_y(key)
+    assert min(ys) == pytest.approx(0.0)
+    assert max(ys) == pytest.approx(1.0)
+
+    flat_key = "SCOPE.FLAT"
+    page.add_channel(flat_key)
+    engine.history.record(flat_key, t0 + 0.0, 42)
+    page.set_channel_transform(flat_key, scale=1.0, offset=0.0,
+                               normalize=True)
+    page.refresh_plot()
+
+    flat_ys = page.curve_y(flat_key)
+    assert flat_ys == [pytest.approx(0.5)]

@@ -76,9 +76,10 @@ from typing import Dict, List, Optional, Tuple
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
+                               QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QPushButton,
+                               QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -109,6 +110,7 @@ RATE_WINDOW_S = 2.0
 GAP_FACTOR = 3.0
 MARKER_PEN = "#C62828"
 CURSOR_PEN = "#1565C0"
+CROSSHAIR_PEN = "#9E9E9E"
 MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
@@ -163,6 +165,41 @@ def _effective_rate_hz(series: List[Tuple[float, int]], now: float) -> float:
     return (len(recent) - 1) / span
 
 
+def value_at(series: List[Tuple[float, int]], t: float) -> Optional[int]:
+    """The newest sample with sample_t <= t, or None if series is
+    empty or every sample postdates t. series must be sorted
+    ascending by t - History.series()'s own guarantee - so a linear
+    scan from the end finds it without a bisect import; this is the
+    crosshair readout's pure, unit-testable lookup."""
+    for i in range(len(series) - 1, -1, -1):
+        if series[i][0] <= t:
+            return series[i][1]
+    return None
+
+
+def _apply_transform(ys: List[float], transform: dict) -> List[float]:
+    """Display-only transform applied to an already-gapped y array
+    (see _gapped_xy) - NaN gap placeholders pass through untouched,
+    since a gap's midpoint carries no real sample to scale or
+    normalize. Normalize ignores scale/offset entirely and maps this
+    window's min..max to 0..1, with a flat-series guard (max == min)
+    mapping every finite value to 0.5 instead of dividing by a zero
+    span. Pure python lists throughout - no numpy dependency."""
+    if transform["normalize"]:
+        finite = [v for v in ys if v == v]        # v == v excludes NaN
+        if not finite:
+            return list(ys)
+        lo = min(finite)
+        hi = max(finite)
+        if hi == lo:
+            return [0.5 if v == v else v for v in ys]
+        span = hi - lo
+        return [(v - lo) / span if v == v else v for v in ys]
+    scale = transform["scale"]
+    offset = transform["offset"]
+    return [(v - offset) * scale if v == v else v for v in ys]
+
+
 class ScopePage(QWidget):
     def __init__(self, engine: Engine, parent=None):
         super().__init__(parent)
@@ -173,6 +210,13 @@ class ScopePage(QWidget):
         self._markers: List[Tuple[float, pg.InfiniteLine]] = []
         self._cursor_t: Optional[float] = None
         self._cursor_line: Optional[pg.InfiniteLine] = None
+        # per-channel series cached by the last refresh_plot() - the
+        # crosshair handler reads this instead of calling
+        # engine.history.series() again, so a mouse-move event costs
+        # no extra History copy beyond the refresh that already ran.
+        self._last_series: Dict[str, List[Tuple[float, int]]] = {}
+        self._crosshair_t: Optional[float] = None
+        self._crosshair_line: Optional[pg.InfiniteLine] = None
         # name -> ui.elf_symbols.Symbol (a namedtuple, hence `tuple`
         # here) - populated by load_elf(); ui.elf_symbols is imported
         # lazily there, not at this module's top, so this attribute is
@@ -186,6 +230,40 @@ class ScopePage(QWidget):
         side.addWidget(QLabel("Channels"))
         self.channel_list = QListWidget()
         side.addWidget(self.channel_list, 1)
+
+        # per-channel scale/offset/normalize edit strip (feature 2) -
+        # hidden until a channel row is selected, populated from that
+        # channel's stored transform, and hidden again on deselection
+        # (currentItemChanged fires with current=None when the list
+        # goes empty of a selection, e.g. after removing the selected
+        # row).
+        transform_row = QHBoxLayout()
+        transform_row.addWidget(QLabel("scale"))
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(1e-6, 1e9)
+        self.scale_spin.setDecimals(6)
+        self.scale_spin.setValue(1.0)
+        transform_row.addWidget(self.scale_spin)
+
+        transform_row.addWidget(QLabel("offset"))
+        self.offset_spin = QDoubleSpinBox()
+        self.offset_spin.setRange(-1e9, 1e9)
+        self.offset_spin.setDecimals(6)
+        transform_row.addWidget(self.offset_spin)
+
+        self.normalize_check = QCheckBox("Normalize")
+        transform_row.addWidget(self.normalize_check)
+
+        self.transform_strip = QWidget()
+        self.transform_strip.setLayout(transform_row)
+        self.transform_strip.setVisible(False)
+        side.addWidget(self.transform_strip)
+
+        self.scale_spin.valueChanged.connect(self._on_transform_edited)
+        self.offset_spin.valueChanged.connect(self._on_transform_edited)
+        self.normalize_check.toggled.connect(self._on_transform_edited)
+        self.channel_list.currentItemChanged.connect(
+            self._on_channel_selected)
 
         reg_row = QHBoxLayout()
         self.reg_combo = QComboBox()
@@ -249,12 +327,34 @@ class ScopePage(QWidget):
         side_widget.setMaximumWidth(260)
         outer.addWidget(side_widget)
 
+        plot_side = QVBoxLayout()
+        self.time_label = QLabel("t=-- s")
+        plot_side.addWidget(self.time_label)
+
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel("bottom", "t", units="s")
         self.plot = self.plot_widget.getPlotItem()
         self.plot.addLegend()
-        outer.addWidget(self.plot_widget, 1)
+        plot_side.addWidget(self.plot_widget, 1)
+
+        plot_container = QWidget()
+        plot_container.setLayout(plot_side)
+        outer.addWidget(plot_container, 1)
+
+        # Crosshair (feature 1): a light-grey dashed vertical line,
+        # deliberately distinct from the cursor's dashed blue
+        # (CURSOR_PEN, jump_to()) and a marker's solid red
+        # (MARKER_PEN, add_event_marker()) so none of the three are
+        # ever confused. SignalProxy rate-limits sigMouseMoved so a
+        # fast mouse doesn't flood _update_crosshair with more work
+        # than the display can use; self.plot is already this page's
+        # PlotItem (aliased above from self.plot_widget.getPlotItem()),
+        # so its ViewBox is reached as self.plot.vb rather than a
+        # second .plotItem hop off a bare PlotWidget.
+        self._crosshair_proxy = pg.SignalProxy(
+            self.plot.scene().sigMouseMoved, rateLimit=30,
+            slot=self._on_mouse_moved)
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -340,6 +440,7 @@ class ScopePage(QWidget):
         entry = self._channels.pop(key, None)
         if entry is None:
             return
+        self._last_series.pop(key, None)
         self.plot.removeItem(entry["curve"])
         row = self.channel_list.row(entry["item"])
         if row >= 0:
@@ -357,7 +458,16 @@ class ScopePage(QWidget):
         item = QListWidgetItem(label)
         item.setData(Qt.UserRole, key)
         self.channel_list.addItem(item)
-        self._channels[key] = {"label": label, "curve": curve, "item": item}
+        # transform: display-only scale/offset/normalize (feature 2),
+        # identity by default; rate: last-computed effective Hz,
+        # cached here so _row_text() can rebuild the row's rate
+        # suffix from a crosshair move without waiting on the next
+        # refresh_plot().
+        self._channels[key] = {
+            "label": label, "curve": curve, "item": item,
+            "transform": {"scale": 1.0, "offset": 0.0, "normalize": False},
+            "rate": 0.0,
+        }
 
     # -- add-channel UI handlers -------------------------------------------
 
@@ -535,11 +645,105 @@ class ScopePage(QWidget):
         now = time.monotonic()
         for key, entry in self._channels.items():
             series = self.engine.history.series(key)
+            self._last_series[key] = series
             x, y = _gapped_xy(series, self._t0)
+            y = _apply_transform(y, entry["transform"])
             entry["curve"].setData(x, y, connect="finite")
-            rate = _effective_rate_hz(series, now)
-            entry["item"].setText("%s  (%.1f Hz)" % (entry["label"], rate))
+            entry["rate"] = _effective_rate_hz(series, now)
+            entry["item"].setText(self._row_text(key))
         self._prune_markers(now)
+
+    # -- crosshair readout (feature 1) --------------------------------------
+
+    def _row_text(self, key: str) -> str:
+        """The channel-list row text: the existing "name (rate Hz)"
+        suffix, plus - once the crosshair has moved at least once - a
+        "= value (0xhex)" suffix showing the RAW sample at the
+        crosshair's time (never the scaled/normalized display value,
+        which is the whole point of a raw readout)."""
+        entry = self._channels[key]
+        text = "%s  (%.1f Hz)" % (entry["label"], entry["rate"])
+        if self._crosshair_t is not None:
+            raw_t = self._crosshair_t + self._t0
+            value = value_at(self._last_series.get(key, []), raw_t)
+            if value is None:
+                value_text = "--"
+            else:
+                value_text = "%d (0x%X)" % (value, value)
+            text += "  = %s" % value_text
+        return text
+
+    def _on_mouse_moved(self, evt) -> None:
+        pos = evt[0]
+        if not self.plot.sceneBoundingRect().contains(pos):
+            return
+        view_point = self.plot.vb.mapSceneToView(pos)
+        self._update_crosshair(view_point.x())
+
+    def _update_crosshair(self, view_t: float) -> None:
+        """Move the crosshair to view_t - plot-relative seconds, the
+        same domain mapSceneToView's x is in (t - self._t0) - and
+        refresh every channel row's raw-value suffix plus the time
+        label. Reads only self._last_series, populated by the most
+        recent refresh_plot(): no engine.history.series() call here,
+        so a mouse-move event costs no History copy of its own."""
+        self._crosshair_t = view_t
+        if self._crosshair_line is None:
+            self._crosshair_line = pg.InfiniteLine(
+                pos=view_t, angle=90, movable=False,
+                pen=pg.mkPen(color=CROSSHAIR_PEN, width=1,
+                             style=Qt.DashLine))
+            self.plot.addItem(self._crosshair_line)
+        else:
+            self._crosshair_line.setPos(view_t)
+        self.time_label.setText("t=%.3f s" % view_t)
+        for key in self._channels:
+            self._channels[key]["item"].setText(self._row_text(key))
+
+    # -- per-channel scale/offset/normalize (feature 2) ---------------------
+
+    def set_channel_transform(self, key: str, scale: float, offset: float,
+                              normalize: bool = False) -> None:
+        """The programmatic surface the scale/offset spinboxes and
+        Normalize checkbox drive - also the direct entry point for
+        tests. A display-only transform: refresh_plot() applies it
+        (y' = (y - offset) * scale, or the normalize mapping) when
+        building each curve's y array; the crosshair readout above
+        always shows raw values regardless of this setting."""
+        entry = self._channels.get(key)
+        if entry is None:
+            return
+        entry["transform"] = {
+            "scale": scale, "offset": offset, "normalize": normalize}
+
+    def _on_channel_selected(self, current, _previous) -> None:
+        if current is None:
+            self.transform_strip.setVisible(False)
+            return
+        key = current.data(Qt.UserRole)
+        entry = self._channels.get(key)
+        if entry is None:
+            self.transform_strip.setVisible(False)
+            return
+        transform = entry["transform"]
+        spins = (self.scale_spin, self.offset_spin, self.normalize_check)
+        for w in spins:
+            w.blockSignals(True)
+        self.scale_spin.setValue(transform["scale"])
+        self.offset_spin.setValue(transform["offset"])
+        self.normalize_check.setChecked(transform["normalize"])
+        for w in spins:
+            w.blockSignals(False)
+        self.transform_strip.setVisible(True)
+
+    def _on_transform_edited(self, _value=None) -> None:
+        item = self.channel_list.currentItem()
+        if item is None:
+            return
+        key = item.data(Qt.UserRole)
+        self.set_channel_transform(
+            key, self.scale_spin.value(), self.offset_spin.value(),
+            self.normalize_check.isChecked())
 
     # -- test-support accessors ---------------------------------------------
 
@@ -552,3 +756,13 @@ class ScopePage(QWidget):
             return 0
         xdata, _ydata = entry["curve"].getData()
         return 0 if xdata is None else len(xdata)
+
+    def curve_y(self, key: str) -> List[float]:
+        """The curve's currently plotted y data - post gap-NaN
+        insertion and post display transform (scale/offset/
+        normalize)."""
+        entry = self._channels.get(key)
+        if entry is None:
+            return []
+        _xdata, ydata = entry["curve"].getData()
+        return [] if ydata is None else list(ydata)

@@ -26,6 +26,17 @@ def build_read_plan(entries: Dict[str, int],
         if plan:
             cur = plan[-1]
             cur_end = cur.addr + 4 * cur.count
+            if (cur.addr <= addr < cur_end
+                    and cur.addr not in forbidden_addrs):
+                # Already covered by the current op (a duplicate
+                # address, or a word inside its merged span): add
+                # another target on the same read instead of a second
+                # transaction. Besides saving budget, this makes two
+                # keys at one address read the SAME word in the same
+                # sweep - identical value, identical timestamp - which
+                # separate ops cannot guarantee for a live counter.
+                cur.targets.append((key, (addr - cur.addr) // 4))
+                continue
             gap = (addr - cur_end) // 4
             spans_forbidden = any(cur_end <= f < addr for f in forbidden)
             merged_would_span = any(cur.addr <= f <= addr

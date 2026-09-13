@@ -13,3 +13,7 @@ activities:
          target: dma2}
 poll:
   force_poll: []
+  # ST's SVD carries no readAction annotations; declare the real
+  # side-effect registers here so the tool never sweeps them.
+  # ADC1.DR: reading clears EOC and pops the conversion result.
+  guarded: ["ADC1.DR"]

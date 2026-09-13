@@ -274,7 +274,8 @@ def test_budget_label_shows_read_count_only(qtbot):
     page = ScopePage(engine)
     qtbot.addWidget(page)
     page.refresh_plot()
-    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+    assert page.budget_label.text() == \
+        "probe reads/sweep: %d" % engine.read_ops
     assert "Hz" not in page.budget_label.text()
 
 
@@ -291,10 +292,12 @@ def test_budget_label_updates_immediately_after_add_and_remove_channel(
     page._timer.stop()
 
     page.add_channel("DMA2.S0NDTR")
-    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+    assert page.budget_label.text() == \
+        "probe reads/sweep: %d" % engine.read_ops
 
     page.remove_channel("DMA2.S0NDTR")
-    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+    assert page.budget_label.text() == \
+        "probe reads/sweep: %d" % engine.read_ops
 
 
 
@@ -447,7 +450,7 @@ def test_channel_table_has_spec_columns_and_default_type(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    assert page.channel_table.columnCount() == 8
+    assert page.channel_table.columnCount() == 9
 
     key = "DMA2.S0NDTR"
     page.add_channel(key)

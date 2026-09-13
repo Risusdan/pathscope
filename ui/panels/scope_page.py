@@ -111,7 +111,7 @@ from typing import Dict, List, Optional, Tuple
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QDoubleValidator, QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton,
                                QSplitter, QTableWidget, QTableWidgetItem,
@@ -152,9 +152,10 @@ MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 
 # Channel table columns (spec point 2).
-COL_REMOVE, COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, \
-    COL_SCALE, COL_OFFSET = range(8)
-COLUMN_LABELS = ["", "", "Name", "Type", "Value", "Hz", "Scale", "Offset"]
+COL_REMOVE, COL_SWATCH, COL_NAME, COL_ADDR, COL_TYPE, COL_VALUE, \
+    COL_HZ, COL_SCALE, COL_OFFSET = range(9)
+COLUMN_LABELS = ["", "", "Name", "Address", "Type", "Value", "Hz",
+                 "Scale", "Offset"]
 
 # Type decode set (spec point 3): display-side only, core untouched.
 # Each spec is (bit width, signed?, shift-from-bit-0); f32 is handled
@@ -181,6 +182,13 @@ DEFAULT_TYPE = "u32"
 # briefly so the user sees why nothing changed.
 INVALID_EDIT_STYLE = "background-color: #FFCDD2;"
 INVALID_EDIT_FLASH_MS = 400
+
+# Read-budget indicator wording: the count is debug-probe
+# transactions per poll sweep - the thing adding a scattered address
+# increases and grouping addresses avoids.
+BUDGET_TOOLTIP = ("debug-probe read transactions per poll sweep: each "
+                  "scattered address costs one; contiguous addresses "
+                  "merge into a single block read")
 
 CURVE_COLORS = [
     "#1976D2",  # blue
@@ -304,6 +312,16 @@ def _default_type_for_size(size: int) -> str:
     return "u32"
 
 
+def _group_separator() -> QFrame:
+    """Thin vertical line separating the add row's three operation
+    groups (register / address / ELF) - grouping by geometry, not
+    color, per the light textbook style."""
+    line = QFrame()
+    line.setFrameShape(QFrame.VLine)
+    line.setFrameShadow(QFrame.Sunken)
+    return line
+
+
 def _fmt_num(v: float) -> str:
     """Compact numeric text for a scale/offset cell - "%g" keeps
     scientific notation for very small/large magnitudes instead of a
@@ -411,10 +429,11 @@ class ScopePage(QWidget):
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #C62828;")
         top_row.addWidget(self.error_label, 1)
-        self.window_label = QLabel(
-            "window: %.0f s (History)" % engine.history.window_s)
-        top_row.addWidget(self.window_label)
+        # No "window: N s" label - the x axis already shows the
+        # window's extent, and "(History)" was internal jargon (a T5
+        # readability finding).
         self.budget_label = QLabel("")
+        self.budget_label.setToolTip(BUDGET_TOOLTIP)
         top_row.addWidget(self.budget_label)
         self.auto_lane_check = QCheckBox("Auto-lane")
         self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
@@ -454,6 +473,7 @@ class ScopePage(QWidget):
         self.channel_table.setColumnWidth(COL_REMOVE, 28)
         self.channel_table.setColumnWidth(COL_SWATCH, 18)
         self.channel_table.setColumnWidth(COL_NAME, 220)
+        self.channel_table.setColumnWidth(COL_ADDR, 100)
         self.channel_table.setColumnWidth(COL_TYPE, 70)
         self.channel_table.setColumnWidth(COL_VALUE, 170)
         self.channel_table.setColumnWidth(COL_HZ, 48)
@@ -472,13 +492,19 @@ class ScopePage(QWidget):
 
         # Add-channel area (spec point 8, compacted further by a T5
         # finding - three stacked rows left the waveform a strip):
-        # register, address, and ELF controls share ONE row.
+        # register, address, and ELF controls share ONE row, its
+        # three groups separated by thin vertical lines (deliberately
+        # NOT by color: in this light textbook style, colored buttons
+        # read as states/warnings, and color is reserved for channel
+        # identity and anomalies).
         add_row = QHBoxLayout()
+        add_row.setSpacing(8)
         self.reg_combo = QComboBox()
         add_row.addWidget(self.reg_combo, 2)
         add_reg_btn = QPushButton("Add register")
         add_reg_btn.clicked.connect(self._on_add_register_clicked)
         add_row.addWidget(add_reg_btn)
+        add_row.addWidget(_group_separator())
         self.addr_edit = QLineEdit()
         self.addr_edit.setPlaceholderText("0x20000000")
         self.addr_edit.setFont(MONO)
@@ -491,6 +517,7 @@ class ScopePage(QWidget):
         add_addr_btn = QPushButton("Add address")
         add_addr_btn.clicked.connect(self._on_add_address_clicked)
         add_row.addWidget(add_addr_btn)
+        add_row.addWidget(_group_separator())
         load_elf_btn = QPushButton("Load ELF...")
         load_elf_btn.clicked.connect(self._on_load_elf_clicked)
         add_row.addWidget(load_elf_btn)
@@ -773,6 +800,22 @@ class ScopePage(QWidget):
         name_item = QTableWidgetItem(label)
         name_item.setData(Qt.UserRole, key)
         self.channel_table.setItem(row, COL_NAME, name_item)
+
+        # Source address (a T5 finding: with renamable labels and
+        # three ways to add a channel, the row should say where the
+        # data actually comes from): an addr-watch key carries its
+        # address; a register key resolves through the SVD model.
+        if key.startswith("@"):
+            addr_text = "0x%08X" % int(key[1:], 16)
+        else:
+            try:
+                addr_text = "0x%08X" % self.engine.model.resolve(key).address
+            except Exception:
+                addr_text = ""
+        addr_item = QTableWidgetItem(addr_text)
+        addr_item.setFont(MONO)
+        addr_item.setFlags(addr_item.flags() & ~Qt.ItemIsEditable)
+        self.channel_table.setItem(row, COL_ADDR, addr_item)
 
         type_combo = QComboBox()
         type_combo.addItems(TYPES)
@@ -1226,7 +1269,8 @@ class ScopePage(QWidget):
         (adding/removing channels) change. The sweep rate, and the
         low-rate warning keyed off it, live on the toolbar's poll
         label (MainWindow) instead of being repeated here."""
-        self.budget_label.setText("sweep %d reads" % self.engine.read_ops)
+        self.budget_label.setText(
+            "probe reads/sweep: %d" % self.engine.read_ops)
 
     # -- crosshair / Value column readout (feature 1, spec point 6) ---------
 

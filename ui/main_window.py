@@ -394,6 +394,7 @@ class MainWindow(QMainWindow):
             for ev in u.events:
                 self.scope_page.add_event_marker(
                     ev.t, "%s: %s" % (ev.flow, ev.msg))
+            self.scope_page.set_sweep_rate(u.snapshot.rate_hz)
         if self.frozen:
             return
         self._apply(u)

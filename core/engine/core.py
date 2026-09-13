@@ -101,6 +101,31 @@ class Engine:
     def on_state(self, cb: Callable[[str], None]) -> None:
         self._poller.on_state(cb)
 
+    @property
+    def read_ops(self) -> int:
+        """Number of block-read transactions the current sweep issues
+        - len(poller.plan), one entry per contiguous block
+        build_read_plan (readplan.py) merged the polled registers/
+        addr-watches into. A scattered address far from everything
+        else in the plan costs one whole read op by itself; addresses
+        that pack into the same struct (or otherwise sit within
+        merge_gap_words of each other) share one.
+
+        Reading a list reference's len() here is GIL-safe without a
+        lock: the poller thread only ever rebinds self._poller.plan
+        whole (_swap_plan's inner swap() does `poller.plan = plan`, a
+        single assignment - see also Poller.__init__'s `self.plan =
+        plan`) and never mutates the existing list object in place
+        (poller.py's _sweep() only iterates it with `for op in
+        self.plan`; grepping the codebase turns up no .append or
+        item-assignment against poller.plan anywhere). So a concurrent
+        _swap_plan can only ever be observed as either the old list
+        object or the new one, never a half-built one - this property
+        may be read from any thread. If that ever changes (e.g. the
+        plan becomes mutated in place instead of rebound), this
+        property would need its own lock."""
+        return len(self._poller.plan)
+
     def clear_badge(self, block_id: str) -> None:
         self._rules.clear_badge(block_id)
 

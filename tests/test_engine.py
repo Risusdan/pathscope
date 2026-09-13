@@ -194,6 +194,23 @@ def test_addr_watch_range_refused(rig):
         e.add_addr_watch(0x1_0000_0000, "big")
 
 
+def test_read_ops_reflects_scattered_addr_watch(rig):
+    """engine.read_ops is len(poller.plan) - the number of block-read
+    transactions one sweep issues. A scattered address (0x20000100,
+    far from every other polled entry - merge_gap_words is 8 words)
+    can never merge into an existing block, so adding it must grow
+    read_ops by exactly one; removing it must bring read_ops back to
+    the prior count. The swap to poller.plan happens on the poller
+    thread (Engine._swap_plan submits it), so wait_for is needed
+    rather than asserting immediately after add/remove_addr_watch."""
+    a, e, updates = rig
+    before = e.read_ops
+    key = e.add_addr_watch(0x20000100, "scattered")
+    assert wait_for(lambda: e.read_ops == before + 1)
+    e.remove_addr_watch(key)
+    assert wait_for(lambda: e.read_ops == before)
+
+
 def test_overlay_guards_needed_register(tmp_path):
     import shutil
     tdir = tmp_path / "t"

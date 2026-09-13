@@ -43,6 +43,23 @@ count - independent of whether refresh_plot() has run yet) and
 `curve_point_count(key)` (plotted point count, post gap-NaN-insertion)
 are part of this panel's produced interface.
 
+Bandwidth budget indicator: `budget_label`, next to the add-channel
+controls, reads "sweep N reads @ R Hz" - N is `engine.read_ops` (one
+block-read transaction per contiguous group build_read_plan merged the
+polled registers/addr-watches into), R is the live sweep rate last
+reported via `set_sweep_rate(hz)` (wired from MainWindow.apply_update,
+fed from EngineUpdate.snapshot.rate_hz). Before any rate has been
+received the label drops the "@ R Hz" suffix. When 0 < R < LOW_RATE_HZ
+the label is styled orange with a tooltip nudging towards contiguous
+addresses; otherwise it uses the default palette. `_update_budget_label`
+is called from refresh_plot() (every repaint) and also right after
+add_channel()/add_address_channel()/remove_channel() return, so the
+count does not wait for the next repaint tick to reflect a channel
+change - though since add_addr_watch()/remove_addr_watch()'s plan swap
+lands on the poller thread, an immediate read of engine.read_ops right
+after one of those calls can still show the pre-swap count until the
+next refresh.
+
 Cursor sync (event-log-to-scope focus): `jump_to(t)` places (or moves)
 a single cursor `pg.InfiniteLine` at t, styled distinctly from event
 markers (dashed blue vs. solid red) so the two are never confused, and
@@ -114,6 +131,15 @@ CROSSHAIR_PEN = "#9E9E9E"
 MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
+
+# Bandwidth budget indicator: below this live sweep rate, the label
+# calls out that the read count is the likely cause (spec: "R < 15.0
+# and R > 0").
+LOW_RATE_HZ = 15.0
+BUDGET_ORANGE = "#E65100"
+BUDGET_ORANGE_STYLE = "color: %s;" % BUDGET_ORANGE
+BUDGET_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
+                  "contiguous addresses")
 
 CURVE_COLORS = [
     "#1976D2", "#2E7D32", "#EF6C00", "#6A1B9A",
@@ -222,6 +248,10 @@ class ScopePage(QWidget):
         # lazily there, not at this module's top, so this attribute is
         # typed structurally rather than by importing the class.
         self.elf_symbols: Dict[str, tuple] = {}
+        # live sweep rate last reported via set_sweep_rate(), or None
+        # before MainWindow has ever fed one in - the budget label's
+        # "no rate yet" state.
+        self._sweep_rate: Optional[float] = None
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
@@ -285,6 +315,9 @@ class ScopePage(QWidget):
         add_addr_btn.clicked.connect(self._on_add_address_clicked)
         addr_row.addWidget(add_addr_btn)
         side.addLayout(addr_row)
+
+        self.budget_label = QLabel("")
+        side.addWidget(self.budget_label)
 
         side.addWidget(QLabel("ELF symbols"))
         elf_row = QHBoxLayout()
@@ -361,6 +394,8 @@ class ScopePage(QWidget):
         self._timer.timeout.connect(self.refresh_plot)
         self._timer.start()
 
+        self._update_budget_label()
+
     # -- freeze --------------------------------------------------------------
 
     def set_frozen(self, on: bool) -> None:
@@ -408,6 +443,7 @@ class ScopePage(QWidget):
         if label is None:
             label = self.engine.addr_watch_labels.get(key, key)
         self._add_channel_common(key, label)
+        self._update_budget_label()
 
     def add_address_channel(self, addr: int, label: str) -> str:
         """Add a fixed-address channel via engine.add_addr_watch().
@@ -425,6 +461,7 @@ class ScopePage(QWidget):
             self._relabel_channel(key, label)
         else:
             self._add_channel_common(key, label)
+        self._update_budget_label()
         return key
 
     def _relabel_channel(self, key: str, label: str) -> None:
@@ -450,6 +487,7 @@ class ScopePage(QWidget):
             # up so the poller stops reading it once nothing displays
             # it any more.
             self.engine.remove_addr_watch(key)
+        self._update_budget_label()
 
     def _add_channel_common(self, key: str, label: str) -> None:
         color = CURVE_COLORS[len(self._channels) % len(CURVE_COLORS)]
@@ -652,6 +690,38 @@ class ScopePage(QWidget):
             entry["rate"] = _effective_rate_hz(series, now)
             entry["item"].setText(self._row_text(key))
         self._prune_markers(now)
+        self._update_budget_label()
+
+    # -- bandwidth budget indicator -----------------------------------------
+
+    def set_sweep_rate(self, hz: float) -> None:
+        """Store the live sweep rate (fed by MainWindow.apply_update
+        from EngineUpdate.snapshot.rate_hz) and refresh the budget
+        label immediately - callers don't need to wait for the next
+        refresh_plot() tick to see a rate-triggered orange warning."""
+        self._sweep_rate = hz
+        self._update_budget_label()
+
+    def _update_budget_label(self) -> None:
+        """Rebuild budget_label's text and style from engine.read_ops
+        (N) and the last-reported sweep rate (R, self._sweep_rate).
+        Before any rate has been received (self._sweep_rate is None)
+        the "@ R Hz" suffix is dropped entirely. Orange + tooltip only
+        while 0 < R < LOW_RATE_HZ - R == 0 (a real, reported stall) or
+        R >= LOW_RATE_HZ both use the default palette."""
+        n = self.engine.read_ops
+        rate = self._sweep_rate
+        if rate is None:
+            text = "sweep %d reads" % n
+        else:
+            text = "sweep %d reads @ %.1f Hz" % (n, rate)
+        if rate is not None and 0 < rate < LOW_RATE_HZ:
+            self.budget_label.setStyleSheet(BUDGET_ORANGE_STYLE)
+            self.budget_label.setToolTip(BUDGET_TOOLTIP)
+        else:
+            self.budget_label.setStyleSheet("")
+            self.budget_label.setToolTip("")
+        self.budget_label.setText(text)
 
     # -- crosshair readout (feature 1) --------------------------------------
 

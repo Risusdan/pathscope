@@ -256,6 +256,59 @@ def test_scale_offset_transforms_curve(qtbot):
     assert item_text.endswith("= %d (0x%X)" % (200, 200))
 
 
+def test_budget_label_shows_no_rate_before_any_sweep_rate_received(qtbot):
+    """Before MainWindow ever calls set_sweep_rate() (no sweep has
+    reported a rate yet, e.g. right after the dock opens), the budget
+    label must show the read-op count without a rate suffix."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    page.refresh_plot()
+    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+    assert "E65100" not in page.budget_label.styleSheet()
+
+
+def test_set_sweep_rate_styles_label_orange_below_threshold(qtbot):
+    """set_sweep_rate(10.0) (below the 15 Hz budget threshold) must
+    show the rate in the label and style it orange (#E65100) with a
+    tooltip explaining why; a subsequent set_sweep_rate(38.0) (a
+    healthy rate, same as the real hardware validation figure in the
+    README) must clear both the color and the tooltip."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+
+    page.set_sweep_rate(10.0)
+    page.refresh_plot()
+    assert "10.0" in page.budget_label.text()
+    assert "E65100" in page.budget_label.styleSheet()
+    assert "prefer contiguous addresses" in page.budget_label.toolTip()
+
+    page.set_sweep_rate(38.0)
+    page.refresh_plot()
+    assert "38.0" in page.budget_label.text()
+    assert "E65100" not in page.budget_label.styleSheet()
+
+
+def test_budget_label_updates_immediately_after_add_and_remove_channel(
+        qtbot):
+    """The label must reflect a changed read-op count right after
+    add_channel()/remove_channel() returns, not only on the next
+    200 ms refresh_plot() timer tick. The timer is stopped here so the
+    check is deterministic - proof that the add/remove call sites
+    themselves refresh the label, not a lucky race with the timer."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    page._timer.stop()
+
+    page.add_channel("DMA2.S0NDTR")
+    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+
+    page.remove_channel("DMA2.S0NDTR")
+    assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
+
+
 def test_normalize_maps_to_unit_range(qtbot):
     """Normalize ignores scale/offset and maps the current window's
     min..max to 0..1; a flat (single-valued) series must map to 0.5

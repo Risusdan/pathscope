@@ -114,12 +114,23 @@ void ps_trace_init(void);
 /**
  * @brief Sample one record into the ring and publish it.
  * @details Call from exactly one periodic timer ISR, at
- *          PS_TRACE_PERIOD_US. On each call: if watch_count
- *          transitioned 0 -> N since the previous call, validates
- *          every watch_addrs[0..N-1] against ps_trace_whitelist -
- *          accept bumps generation and sets status OK, reject sets
- *          status (BAD_ADDR or BAD_COUNT if N > PS_TRACE_MAX_CH) and
- *          resets watch_count to 0. Then writes one record at
+ *          PS_TRACE_PERIOD_US. On each call: whenever watch_count != 0
+ *          AND the live table (count plus watch_addrs[0..count-1])
+ *          differs from the last ACCEPTED table, validates every
+ *          watch_addrs[0..count-1] against ps_trace_whitelist - accept
+ *          bumps generation and sets status OK, reject sets status
+ *          (BAD_ADDR or BAD_COUNT if count > PS_TRACE_MAX_CH) and
+ *          resets watch_count to 0. This gate is LEVEL-based rather
+ *          than edge-triggered on the watch_count == 0 -> N transition,
+ *          so a host whose count=0 write and count=N write both land
+ *          within a single sample period is still validated correctly
+ *          (an edge-triggered gate could miss that transition entirely
+ *          and start dereferencing an unvalidated table). Hosts
+ *          SHOULD still dwell at least one sample period after writing
+ *          count=0 before writing the new addresses, for a clean gap
+ *          in the record stream at the edit - the level-based gate
+ *          removes the correctness dependency on that dwell, not the
+ *          benefit of it. Then writes one record at
  *          wr_seq % PS_TRACE_RING_COUNT (seq, gen, watched slot
  *          values; unused slots 0) and increments wr_seq last, as
  *          the publish barrier the host's torn-read guard depends on.

@@ -91,6 +91,12 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
   updates correctly on confirm; fault badges, event log and recovery all
   behave as in the CLI validation; memory viewer refuses a guarded-range
   read as designed; freeze keeps the event log live while panels hold.
+- M6 (scope): channel table, type decode, Auto-lane, cursor readout,
+  per-page Run/Stop and event-marker sync validated live on hardware
+  across several UX iterations; the fault/replug/hold steps were not
+  re-run in full, as the polling acquisition path is being replaced by
+  a firmware trace-buffer sampler (M7) that guarantees same-instant
+  samples by construction.
 
 ## Probe notes
 

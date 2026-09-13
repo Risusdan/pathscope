@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from core.trace.contract import (WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
-                                 TraceRecord)
+from core.trace.contract import (RING_COUNT, WATCH_ADDRS_OFFSET,
+                                 WATCH_COUNT_OFFSET, TraceRecord)
 from core.trace.reader import TraceError, TraceReader, _filter_stable
 from tests.trace_sim import FakeTraceFirmware
 
@@ -35,21 +35,72 @@ def test_discover_and_drain_records():
         engine.stop()
 
 
+def test_refresh_steady_state_costs_two_adapter_reads(monkeypatch):
+    # THROUGHPUT (T11 hardware gate, fix round 1) regression: a real
+    # probe's per-command latency made the old three-commands-per-call
+    # refresh() (pre-read desc, record range, post-read desc) fall
+    # permanently behind on hardware - see the module docstring's
+    # "Reducing refresh's round trips" paragraph. The sim can't
+    # reproduce a genuinely CONCURRENT wr_seq advance (nothing but an
+    # explicit step() ever moves it, so a whole refresh() call always
+    # sees a frozen target) - but it can still exercise the "cache is
+    # stale but still behind the true current point" shape a real
+    # command-latency gap produces: r.status() below freshens the
+    # cache to wr_seq=5 while last_seq stays at -1 (nothing delivered
+    # yet), then a further step() moves the TRUE wr_seq to 10 without
+    # touching the cache - exactly what elapsed real-world command
+    # latency would do between one cycle's post-read and the next
+    # cycle's own reads. refresh() must then skip its own pre-read
+    # (first_undelivered=0 is already < the cached wr_seq=5, so there
+    # is no need to fall back to a fresh check) and cost exactly the 2
+    # remaining commands: the record range and the mandatory post-read.
+    #
+    # Counts calls to Engine.read_words specifically (not
+    # adapter.read_log) - _rig()'s poller thread sweeps its own plan
+    # directly against the adapter, unrelated to this reader, on its
+    # own 10ms interval, which would otherwise pollute a raw adapter-
+    # level read count with unrelated activity.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000])
+        fw.step(5)
+        r.status()                        # cache -> wr_seq=5
+        fw.step(5)                        # true wr_seq=10, cache stale at 5
+
+        calls = {"n": 0}
+        real_read_words = engine.read_words
+
+        def counting_read_words(*args, **kwargs):
+            calls["n"] += 1
+            return real_read_words(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "read_words", counting_read_words)
+        recs = r.refresh()
+
+        assert calls["n"] == 2
+        assert len(recs) == 5             # the cache's own window, [0, 5)
+        assert recs[-1].seq == 4
+    finally:
+        engine.stop()
+
+
 def test_overflow_counts_lost_and_resumes():
-    # ring_count is fixed at 256 (contract.RING_COUNT). Consuming 3
+    # ring_count is fixed at RING_COUNT (contract.py). Consuming 3
     # records first (seq 0,1,2) leaves last_seq=2, so the first
-    # undelivered seq is 3. Producing 256+K more records advances
-    # wr_seq to 3+256+K, making the oldest still-live seq
-    # wr_seq-256 = 3+K. Everything from 3 (inclusive) up to 3+K
-    # (exclusive) - exactly K records - was undelivered and then
+    # undelivered seq is 3. Producing RING_COUNT+K more records
+    # advances wr_seq to 3+RING_COUNT+K, making the oldest still-live
+    # seq wr_seq-RING_COUNT = 3+K. Everything from 3 (inclusive) up to
+    # 3+K (exclusive) - exactly K records - was undelivered and then
     # overwritten before refresh() ever asked for it: that is the
     # pre-read gap, K records.
     #
     # The read window refresh() then requests starts exactly at
     # 3+K - the ring's oldest still-live point. Nothing writes again
     # before refresh()'s post-read descriptor re-check, so that
-    # re-check sees the SAME wr_seq, making margin = wr_seq-256 =
-    # 3+K too: the very first record of the batch (seq 3+K) sits
+    # re-check sees the SAME wr_seq, making margin = wr_seq-RING_COUNT
+    # = 3+K too: the very first record of the batch (seq 3+K) sits
     # exactly at the margin. Per the torn-read guard's at-or-behind
     # rule, a record at the margin is not provably untorn (firmware's
     # next, still-unpublished write would land in that exact ring
@@ -62,7 +113,7 @@ def test_overflow_counts_lost_and_resumes():
         r.discover(fw.desc_addr)
         r.set_watch([0x20000000])
         fw.step(3); r.refresh()           # last_seq becomes 2
-        fw.step(256 + K)                  # > ring_count: oldest overwritten
+        fw.step(RING_COUNT + K)           # > ring_count: oldest overwritten
         recs = r.refresh()
         assert r.lost == K + 1
         assert recs[0].seq == 3 + K + 1   # resumed past the hole and
@@ -100,6 +151,38 @@ def test_naive_raw_count_write_pins_generation_but_set_watch_does_not():
         assert r.status().generation == 2
         r.set_watch([0x20000000])
         assert r.status().generation == 3
+    finally:
+        engine.stop()
+
+
+def test_refresh_caps_large_backlog_across_multiple_calls():
+    # THROUGHPUT (T11 hardware gate, fix round 1) regression: a large
+    # backlog is drained incrementally, at most RING_COUNT //
+    # _READ_CAP_DIVISOR records per call, rather than attempted in one
+    # large (and, on real hardware, dangerously slow) read - see
+    # _READ_CAP_DIVISOR and refresh()'s own comment. RING_COUNT // 2
+    # records - more than one cap's worth, but comfortably under a
+    # full ring so the pre-read clamp never fires - takes exactly 2
+    # calls to fully drain, gaplessly and without any loss.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000])
+        fw.step(RING_COUNT // 2)
+        cap = RING_COUNT // 4
+
+        recs1 = r.refresh()
+        assert len(recs1) == cap
+        assert recs1[0].seq == 0
+
+        recs2 = r.refresh()
+        assert len(recs2) == cap
+        assert recs2[0].seq == cap
+        assert recs2[-1].seq == RING_COUNT // 2 - 1
+
+        assert r.lost == 0
+        assert r.refresh() == []          # fully drained, nothing left
     finally:
         engine.stop()
 
@@ -289,22 +372,31 @@ def test_full_ring_pass_not_clobbered_by_desc_resync():
     # ring bytes again, this is where a clobbered record would show up
     # as garbage instead of the constant watched values.
     #
-    # 264 records are produced from a fresh discover() (last_seq=-1),
-    # so the pre-read clamp starts the batch at seq 264-256=8 - the
-    # ring's oldest still-live point at the time of the first
-    # descriptor read. The post-read re-check sees the same wr_seq (no
-    # further writes happen in between), so margin is also 8: seq 8
-    # sits exactly at the margin and is dropped by the torn-read
-    # guard's at-or-behind rule, leaving 255 records (seq 9..263).
+    # 2*RING_COUNT-10 records are produced from a fresh discover()
+    # (last_seq=-1), so the pre-read clamp starts the batch at seq
+    # (2*RING_COUNT-10)-RING_COUNT = RING_COUNT-10 - the ring's oldest
+    # still-live point at the time of the (fallback, cache-miss)
+    # descriptor read, deliberately placed just 10 seq short of a full
+    # lap. THROUGHPUT's per-call read cap (RING_COUNT // 4 - see
+    # _READ_CAP_DIVISOR) then bounds this read to RING_COUNT // 4
+    # records starting there, which - since RING_COUNT // 4 > 10 -
+    # still crosses the wrap point after only 10 of them, exactly what
+    # this test needs to exercise the wrap-split path in
+    # _read_records. The post-read re-check sees the same wr_seq (no
+    # further writes happen in between), so margin is also
+    # RING_COUNT-10: the batch's first record sits exactly at the
+    # margin and is dropped by the torn-read guard's at-or-behind rule,
+    # leaving RING_COUNT // 4 - 1 records (seq RING_COUNT-9 onward).
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
         r.discover(fw.desc_addr)
         r.set_watch([0x20000000, 0x20000004])
-        fw.step(256 + 8)                  # wraps the ring once, plus 8
+        fw.step(2 * RING_COUNT - 10)      # positions the clamp point 10
+                                           # seq short of a full lap
         recs = r.refresh()                # window spans the wrap point
-        assert len(recs) == 255
-        assert recs[0].seq == 9
+        assert len(recs) == RING_COUNT // 4 - 1
+        assert recs[0].seq == RING_COUNT - 9
         for rec in recs:
             assert rec.slots[0] == 111
             assert rec.slots[1] == 222
@@ -364,18 +456,27 @@ def test_filter_stable_drops_everything_when_margin_engulfs_batch():
 
 def test_refresh_drops_records_torn_by_wrap_during_read(monkeypatch):
     # Integration-level check that refresh() actually wires the
-    # post-read descriptor re-check to _filter_stable(): patch just
-    # the SECOND of refresh()'s two _read_desc() calls to report
-    # wr_seq advanced by a full ring_count, simulating firmware having
-    # wrapped the whole ring while the record reads were in flight.
-    # Every record just parsed then falls inside the overwrite margin
-    # even though nothing about the underlying data actually tore.
+    # post-read descriptor re-check to _filter_stable(): a fresh
+    # cache (see the r.status() call and reader.py's module docstring)
+    # means refresh() below makes exactly one _read_desc() call - the
+    # mandatory post-read - so patching THAT one call to report wr_seq
+    # advanced by a full ring_count simulates firmware having wrapped
+    # the whole ring while the record reads were in flight. Every
+    # record just parsed then falls inside the overwrite margin even
+    # though nothing about the underlying data actually tore.
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
         r.discover(fw.desc_addr)
         r.set_watch([0x20000000])
         fw.step(5)                        # seq 0..4, wr_seq=5
+        r.status()                        # freshen the cache to wr_seq=5,
+                                           # so refresh() below skips its
+                                           # own pre-read (see reader.py's
+                                           # module docstring) and the
+                                           # mocked _read_desc is called
+                                           # exactly once - the mandatory
+                                           # post-read.
 
         real_read_desc = r._read_desc
         calls = {"n": 0}
@@ -383,7 +484,7 @@ def test_refresh_drops_records_torn_by_wrap_during_read(monkeypatch):
         def fake_read_desc():
             calls["n"] += 1
             desc = real_read_desc()
-            if calls["n"] == 2:
+            if calls["n"] == 1:
                 desc = dataclasses.replace(
                     desc, wr_seq=desc.wr_seq + desc.ring_count)
             return desc
@@ -391,12 +492,15 @@ def test_refresh_drops_records_torn_by_wrap_during_read(monkeypatch):
         monkeypatch.setattr(r, "_read_desc", fake_read_desc)
         before_lost = r.lost
         recs = r.refresh()
-        # margin = new_wr_seq(261) - ring_count(256) = 5, one past the
-        # batch's last record (seq 4) - the batch never lands exactly
-        # on the margin here, so this count is unaffected by the
-        # at-or-behind vs. strictly-behind boundary fix; all 5 are
+        # margin = new_wr_seq(5+ring_count) - ring_count = 5, one past
+        # the batch's last record (seq 4) - the batch never lands
+        # exactly on the margin here, so this count is unaffected by
+        # the at-or-behind vs. strictly-behind boundary fix; all 5 are
         # dropped either way.
         assert recs == []
         assert r.lost == before_lost + 5
+        assert calls["n"] == 1            # confirms the pre-read was
+                                           # skipped - only the post-read
+                                           # touched the (mocked) target
     finally:
         engine.stop()

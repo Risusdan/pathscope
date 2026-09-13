@@ -51,6 +51,46 @@ refresh() (there is nothing to redeliver - the ring has moved past it
 by then in exactly the way self.lost already accounts for on the
 "before we even asked" side).
 
+Reducing refresh's round trips (T11 hardware gate, fix round 1): every
+Engine command is a submit-and-block round trip through the poller
+thread, and on a real probe each one costs real fixed overhead (tens
+of ms) on top of whatever it actually transfers - the sim never
+exercises this shape (wr_seq is frozen for the whole call, since
+nothing but an explicit step() advances it), so it never caught that
+the original three-commands-per-call refresh() (pre-read desc, record
+range, post-read desc) made hardware fall permanently behind: a large
+enough backlog produces a large enough read that its OWN transfer time
+lets the ring wrap underneath it before the post-read even runs,
+margin-dropping the entire batch, every cycle, forever - self.lost
+growing by more each cycle than firmware could possibly have produced
+in the caller's own sleep between calls, because the true gap being
+measured also includes the previous cycle's own (large, slow) attempt.
+refresh() below cuts this to 2 commands in steady state by never
+paying for its own pre-read: it reuses whatever descriptor the LAST
+read anywhere in this reader actually fetched (self._cached_desc - any
+_read_desc() call, including another refresh() call's mandatory post-
+read, updates it) as this cycle's starting reference, falling back to
+one real read only if that reference claims there is nothing new (see
+refresh()'s own comment - this keeps a long idle gap from ever being
+mistaken for "still caught up" forever). Every cycle still ends with
+exactly one fresh post-read, which both closes out THIS cycle's torn-
+read check and becomes the next cycle's cached reference - so a
+reader that is actually keeping up drains a small, quickly-transferred
+window every cycle instead of periodically attempting (and always
+losing) an entire ring's worth at once.
+
+Cutting round trips alone still leaves a real backlog free to grow
+arbitrarily large: RING_COUNT was also bumped 256 -> 1024 (see
+contract.py) for headroom, but a caller slow enough (or silent for
+long enough) can still accumulate a backlog whose OWN read would take
+long enough to transfer that it eats meaningfully into even a bigger
+ring's span - and a cycle slowed that way hands the NEXT cycle a
+bigger backlog still, a feedback loop measured directly on real
+hardware. refresh() below caps how much any ONE call ever attempts to
+read (_READ_CAP_DIVISOR) - the remainder simply stays live in the ring
+for a later call, still fully recoverable, rather than risking an
+unbounded transfer.
+
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
 written one word each, then the new count is written to request the
@@ -116,6 +156,15 @@ from .contract import (DESC_SIZE, STATUS_OK, WATCH_ADDRS_OFFSET,
                        record_word_addr, status_name)
 
 _DESC_WORDS = DESC_SIZE // 4
+# THROUGHPUT (T11 hardware gate, fix round 1): a single refresh() call
+# never attempts to read more than ring_count // _READ_CAP_DIVISOR
+# records - see refresh()'s own comment. A quarter of the ring keeps a
+# capped call's own transfer time a safe multiple below the ring's
+# span even under real per-command latency (measured directly against
+# hardware), while still being large enough that ordinary steady-state
+# traffic is virtually never actually capped (only a genuinely large
+# backlog is).
+_READ_CAP_DIVISOR = 4
 
 
 class TraceError(Exception):
@@ -180,51 +229,82 @@ class TraceReader:
         # see the module docstring and _filter_current_gen. Set at
         # discover() and on every successful set_watch().
         self._expected_gen = None  # type: Optional[int]
+        # THROUGHPUT (T11 hardware gate, fix round 1): the descriptor
+        # read that closes out a refresh() cycle doubles as the NEXT
+        # cycle's starting reference - see refresh()'s own comment and
+        # the module docstring's "Reducing refresh's round trips"
+        # paragraph. None until something has actually read the
+        # descriptor at least once.
+        self._cached_desc = None  # type: Optional[TraceDesc]
 
     def discover(self, desc_addr: int) -> TraceDesc:
         self.desc_addr = desc_addr
         desc = self._read_desc()
         self.desc = desc
+        self._cached_desc = desc
         self.last_seq = desc.wr_seq - 1
         self._expected_gen = desc.generation
         return desc
 
     def status(self) -> TraceDesc:
-        self.desc = self._read_desc()
-        return self.desc
-
-    def refresh(self) -> List[TraceRecord]:
         desc = self._read_desc()
         self.desc = desc
-        wr_seq = desc.wr_seq
-        ring_count = desc.ring_count
+        self._cached_desc = desc
+        return desc
 
-        # The ring only ever holds the most recent ring_count records,
-        # so the oldest still-live sequence number is wr_seq -
-        # ring_count regardless of what the reader has consumed.
-        # last_seq + 1 is the first record the reader hasn't delivered
-        # yet; whenever that lags behind the oldest still-live seq, the
-        # gap between them was both undelivered and overwritten.
-        first_live = wr_seq - ring_count
-        first_undelivered = self.last_seq + 1
-        if first_undelivered < first_live:
-            self.lost += first_live - first_undelivered
-            start = first_live
-        else:
-            start = first_undelivered
+    def refresh(self) -> List[TraceRecord]:
+        # THROUGHPUT: use the last descriptor ANY read actually fetched
+        # (typically the previous refresh() call's own post-read, a
+        # few hundred ms old at most) instead of paying for a fresh
+        # read here - see the module docstring. If that turns out to
+        # already be fully caught up (start >= wr_seq), it may simply
+        # be stale rather than truly current, so one fresh read
+        # confirms it before concluding there is nothing to drain -
+        # this is the only path that ever falls back to a real
+        # "pre-read".
+        desc = self._cached_desc if self._cached_desc is not None \
+            else self._read_desc()
+        start, wr_seq = self._clamp_start(desc)
 
         if start >= wr_seq:
-            self.last_seq = wr_seq - 1
-            return []
+            if desc is self._cached_desc:
+                desc = self._read_desc()
+                self._cached_desc = desc
+                start, wr_seq = self._clamp_start(desc)
+            if start >= wr_seq:
+                self.desc = desc
+                self.last_seq = wr_seq - 1
+                return []
 
-        raw_records = self._read_records(desc, start, wr_seq)
+        # THROUGHPUT: cap how much any ONE call ever attempts to
+        # transfer. Without this, a large enough backlog (a slow prior
+        # cycle, or simply having been away for a while) produces a
+        # large enough read that its OWN transfer time lets the ring
+        # wrap underneath it before the post-read even runs (see the
+        # module docstring) - and a cycle slowed that way produces an
+        # even bigger backlog for the NEXT cycle to attempt, a
+        # feedback loop this reader can spiral into under sustained
+        # load, confirmed directly against real hardware (T11 hardware
+        # gate, fix round 1). Capping the window read per call keeps
+        # every call's transfer time bounded, safely under the ring's
+        # span, regardless of how far behind the reader ever gets - the
+        # remainder simply stays live in the ring, still fully
+        # recoverable, for a later call to read in its own turn.
+        read_to = min(wr_seq, start + desc.ring_count // _READ_CAP_DIVISOR)
+        raw_records = self._read_records(desc, start, read_to)
 
         # The descriptor and record reads are non-atomic (see module
         # docstring) - re-read the descriptor once more and filter
         # anything that may have been torn while the record reads were
-        # in flight.
+        # in flight. THROUGHPUT: this same read becomes the CACHED
+        # reference the next refresh() call starts from, rather than
+        # that call paying for its own separate pre-read - together
+        # with the cached pre-read above, a steady-state refresh() (one
+        # that already finds new data waiting) costs exactly 2 Engine
+        # commands: this one and the one _read_records just made.
         post_desc = self._read_desc()
         self.desc = post_desc
+        self._cached_desc = post_desc
         kept, dropped = _filter_stable(raw_records, start, post_desc.wr_seq,
                                        post_desc.ring_count)
         self.lost += dropped
@@ -236,8 +316,32 @@ class TraceReader:
         kept, gen_dropped = _filter_current_gen(kept, self._expected_gen)
         self.lost += gen_dropped
 
-        self.last_seq = wr_seq - 1
+        self.last_seq = read_to - 1
         return kept
+
+    def _clamp_start(self, desc: TraceDesc) -> Tuple[int, int]:
+        """The pre-read clamp (module docstring): the ring only ever
+        holds the most recent ring_count records, so the oldest still-
+        live sequence number is wr_seq - ring_count regardless of what
+        the reader has consumed. last_seq + 1 is the first record the
+        reader hasn't delivered yet; whenever that lags behind the
+        oldest still-live seq, the gap between them was both
+        undelivered and overwritten - lost, added to self.lost here,
+        and the returned start clamped past it. Factored out of
+        refresh() so it can be applied to either the cached or a
+        freshly-read descriptor without duplicating the arithmetic;
+        called at most twice per refresh() (see there), so a caller
+        must not assume every call adds to self.lost - only whichever
+        call's clamp branch actually fires does (and, per the
+        arithmetic, at most one of the two ever can - see the module
+        docstring)."""
+        wr_seq = desc.wr_seq
+        first_live = wr_seq - desc.ring_count
+        first_undelivered = self.last_seq + 1
+        if first_undelivered < first_live:
+            self.lost += first_live - first_undelivered
+            return first_live, wr_seq
+        return first_undelivered, wr_seq
 
     def set_watch(self, addrs: List[int]) -> None:
         if self.desc is None:
@@ -305,6 +409,33 @@ class TraceReader:
         # next refresh() and be dropped as an honest gap instead of
         # rendered under a layout it no longer describes.
         self._expected_gen = desc.generation
+
+        # THROUGHPUT (T11 hardware gate, fix round 1): fast-forward past
+        # that same in-flight backlog NOW instead of leaving refresh()
+        # to read it and then drop it. Anything with seq in
+        # [last_seq+1, desc.wr_seq) was necessarily sampled before this
+        # accept (wr_seq only advances forward), so it is CERTAIN to
+        # carry the old generation and be dropped by
+        # _filter_current_gen the moment it's read - counting it lost
+        # here, without spending a read on it, matters beyond
+        # bandwidth: refresh()'s cached pre-read (see its own comment)
+        # means a backlog left in place here would only get read on
+        # the FOLLOWING refresh() call, by which point a second edit
+        # arriving before that call runs would bump self._expected_gen
+        # again first - so the backlog would STILL read as a mismatch
+        # and be dropped, but now it has also delayed discovery of the
+        # records that came after it, compounding indefinitely under
+        # back-to-back edits. Skipping it here, right when it becomes
+        # provably stale, keeps refresh() starting fresh from exactly
+        # this accept's own wr_seq every time. desc.wr_seq is this
+        # status() call's own reading - already at least as current as
+        # anything refresh() could have used anyway.
+        # (self._cached_desc is already `desc` here - self.status()
+        # above set it.)
+        skipped = desc.wr_seq - (self.last_seq + 1)
+        if skipped > 0:
+            self.lost += skipped
+        self.last_seq = desc.wr_seq - 1
 
     def _compose_addr_word(self, addr: int) -> int:
         """IMPORTANT 6: wire word for one watch_addrs[] uint32 slot,

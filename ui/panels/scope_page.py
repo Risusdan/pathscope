@@ -54,22 +54,19 @@ count - independent of whether refresh_plot() has run yet) and
 `curve_point_count(key)` (plotted point count, post gap-NaN-insertion)
 are part of this panel's produced interface.
 
-Bandwidth budget indicator: `budget_label`, next to the add-channel
-controls, reads "sweep N reads @ R Hz" - N is `engine.read_ops` (one
-block-read transaction per contiguous group build_read_plan merged the
-polled registers/addr-watches into), R is the live sweep rate last
-reported via `set_sweep_rate(hz)` (wired from MainWindow.apply_update,
-fed from EngineUpdate.snapshot.rate_hz). Before any rate has been
-received the label drops the "@ R Hz" suffix. When 0 < R < LOW_RATE_HZ
-the label is styled orange with a tooltip nudging towards contiguous
-addresses; otherwise it uses the default palette. `_update_budget_label`
-is called from refresh_plot() (every repaint) and also right after
-add_channel()/add_address_channel()/remove_channel() return, so the
-count does not wait for the next repaint tick to reflect a channel
-change - though since add_addr_watch()/remove_addr_watch()'s plan swap
-lands on the poller thread, an immediate read of engine.read_ops right
-after one of those calls can still show the pre-swap count until the
-next refresh.
+Bandwidth budget indicator: `budget_label`, in the Channels header,
+reads "sweep N reads" - N is `engine.read_ops` (one block-read
+transaction per contiguous group build_read_plan merged the polled
+registers/addr-watches into). The sweep RATE lives only in the
+toolbar's poll label (MainWindow owns it, including the orange
+low-rate warning) - the two used to show the same number twice.
+`_update_budget_label` is called from refresh_plot() (every repaint)
+and also right after add_channel()/add_address_channel()/
+remove_channel() return, so the count does not wait for the next
+repaint tick to reflect a channel change - though since
+add_addr_watch()/remove_addr_watch()'s plan swap lands on the poller
+thread, an immediate read of engine.read_ops right after one of those
+calls can still show the pre-swap count until the next refresh.
 
 Cursor sync (event-log-to-scope focus): `jump_to(t)` places (or moves)
 a single cursor `pg.InfiniteLine` at t, styled distinctly from event
@@ -117,8 +114,8 @@ from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton,
-                               QScrollArea, QSplitter, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QSplitter, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -155,9 +152,9 @@ MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 
 # Channel table columns (spec point 2).
-COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, COL_SCALE, \
-    COL_OFFSET = range(7)
-COLUMN_LABELS = ["", "Name", "Type", "Value", "Hz", "Scale", "Offset"]
+COL_REMOVE, COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, \
+    COL_SCALE, COL_OFFSET = range(8)
+COLUMN_LABELS = ["", "", "Name", "Type", "Value", "Hz", "Scale", "Offset"]
 
 # Type decode set (spec point 3): display-side only, core untouched.
 # Each spec is (bit width, signed?, shift-from-bit-0); f32 is handled
@@ -184,15 +181,6 @@ DEFAULT_TYPE = "u32"
 # briefly so the user sees why nothing changed.
 INVALID_EDIT_STYLE = "background-color: #FFCDD2;"
 INVALID_EDIT_FLASH_MS = 400
-
-# Bandwidth budget indicator: below this live sweep rate, the label
-# calls out that the read count is the likely cause (spec: "R < 15.0
-# and R > 0").
-LOW_RATE_HZ = 15.0
-BUDGET_ORANGE = "#E65100"
-BUDGET_ORANGE_STYLE = "color: %s;" % BUDGET_ORANGE
-BUDGET_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
-                  "contiguous addresses")
 
 CURVE_COLORS = [
     "#1976D2",  # blue
@@ -385,10 +373,6 @@ class ScopePage(QWidget):
         # lazily there, not at this module's top, so this attribute is
         # typed structurally rather than by importing the class.
         self.elf_symbols: Dict[str, tuple] = {}
-        # live sweep rate last reported via set_sweep_rate(), or None
-        # before MainWindow has ever fed one in - the budget label's
-        # "no rate yet" state.
-        self._sweep_rate: Optional[float] = None
         # Y axis follows the selected row (spec point 7) - None means
         # no selection, which hides the axis's tick numbers entirely
         # rather than showing a meaningless shared scale.
@@ -467,6 +451,7 @@ class ScopePage(QWidget):
             QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
         header = self.channel_table.horizontalHeader()
         header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        self.channel_table.setColumnWidth(COL_REMOVE, 28)
         self.channel_table.setColumnWidth(COL_SWATCH, 18)
         self.channel_table.setColumnWidth(COL_TYPE, 70)
         self.channel_table.setColumnWidth(COL_VALUE, 135)
@@ -476,16 +461,11 @@ class ScopePage(QWidget):
         self.channel_table.itemChanged.connect(self._on_item_changed)
         self.channel_table.itemSelectionChanged.connect(
             self._on_table_selection_changed)
+        # The table scrolls its own rows internally, so many channels
+        # never push the add-controls below out of sight; the minimum
+        # keeps a few rows visible even with the splitter dragged up.
+        self.channel_table.setMinimumHeight(80)
         side.addWidget(self.channel_table, 1)
-
-        # Removal is a channel-table operation, so it belongs directly
-        # under the table - both for locality and for reachability: on
-        # a short dock (see the QScrollArea wrap below), this keeps
-        # "Remove channel" visible without scrolling even when the ELF
-        # section further down is scrolled out of view.
-        self.remove_btn = QPushButton("Remove channel")
-        self.remove_btn.clicked.connect(self._on_remove_clicked)
-        side.addWidget(self.remove_btn)
 
         # Add-channel area (spec point 8): compact, 3 rows - register,
         # address, and the ELF header row (Load + the collapsible
@@ -548,26 +528,15 @@ class ScopePage(QWidget):
         self.elf_content.setVisible(False)
         side.addWidget(self.elf_content)
 
-        side_widget = QWidget()
-        side_widget.setLayout(side)
-
-        # The controls block's content (channel table, add rows, ELF
-        # section, Remove channel, window/budget labels) can exceed
-        # its splitter pane's height - without a scroll area, the
-        # bottom controls are pushed off-screen with no way to reach
-        # them (a hardware-session screenshot showed the panel cut
-        # off at "Add symbol"). setWidgetResizable(True) lets
-        # side_widget track the viewport's width (so its own child
-        # layouts still fill it horizontally) while its height is free
-        # to exceed the viewport and scroll. Full window width now -
-        # the old fixed side-column width went with the left-right
-        # layout.
-        self.side_scroll = QScrollArea()
-        self.side_scroll.setWidgetResizable(True)
-        self.side_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff)
-        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.side_scroll.setWidget(side_widget)
+        # No outer scroll area (a T5 finding: the controls block
+        # inside one let the splitter squeeze the add rows out of
+        # sight behind a subtle scrollbar - "where did Load ELF
+        # go?"). The block's only variable-height child is the
+        # channel table, and a QTableWidget scrolls its own rows, so
+        # the controls' minimum height is bounded and the splitter
+        # can never hide the add rows.
+        self.side_widget = QWidget()
+        self.side_widget.setLayout(side)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -585,7 +554,7 @@ class ScopePage(QWidget):
         # Controls over plot, user-draggable split; the plot pane gets
         # every extra pixel when the window grows.
         self.splitter = QSplitter(Qt.Vertical)
-        self.splitter.addWidget(self.side_scroll)
+        self.splitter.addWidget(self.side_widget)
         self.splitter.addWidget(self.plot_widget)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
@@ -775,6 +744,21 @@ class ScopePage(QWidget):
 
         row = self.channel_table.rowCount()
         self.channel_table.insertRow(row)
+
+        # Per-row remove (a T5 finding: a separate "Remove channel"
+        # button that acts on the selection is two steps and a whole
+        # row of vertical space; a "-" on the row itself is one).
+        minus_btn = QPushButton("-")
+        minus_btn.setFixedSize(20, 20)
+        minus_btn.setToolTip("Remove this channel")
+        minus_btn.clicked.connect(lambda _checked=False, k=key:
+                                  self.remove_channel(k))
+        minus_box = QWidget()
+        minus_layout = QHBoxLayout(minus_box)
+        minus_layout.setContentsMargins(0, 0, 0, 0)
+        minus_layout.setAlignment(Qt.AlignCenter)
+        minus_layout.addWidget(minus_btn)
+        self.channel_table.setCellWidget(row, COL_REMOVE, minus_box)
 
         swatch = QLabel()
         swatch.setFixedSize(12, 12)
@@ -1033,15 +1017,6 @@ class ScopePage(QWidget):
         self.addr_edit.clear()
         self.addr_label_edit.clear()
 
-    def _on_remove_clicked(self) -> None:
-        row = self.channel_table.currentRow()
-        if row < 0:
-            return
-        item = self.channel_table.item(row, COL_NAME)
-        if item is None:
-            return
-        self.remove_channel(item.data(Qt.UserRole))
-
     # -- ELF symbol picker -------------------------------------------------
 
     def load_elf(self, path: str) -> None:
@@ -1246,34 +1221,13 @@ class ScopePage(QWidget):
 
     # -- bandwidth budget indicator -----------------------------------------
 
-    def set_sweep_rate(self, hz: float) -> None:
-        """Store the live sweep rate (fed by MainWindow.apply_update
-        from EngineUpdate.snapshot.rate_hz) and refresh the budget
-        label immediately - callers don't need to wait for the next
-        refresh_plot() tick to see a rate-triggered orange warning."""
-        self._sweep_rate = hz
-        self._update_budget_label()
-
     def _update_budget_label(self) -> None:
-        """Rebuild budget_label's text and style from engine.read_ops
-        (N) and the last-reported sweep rate (R, self._sweep_rate).
-        Before any rate has been received (self._sweep_rate is None)
-        the "@ R Hz" suffix is dropped entirely. Orange + tooltip only
-        while 0 < R < LOW_RATE_HZ - R == 0 (a real, reported stall) or
-        R >= LOW_RATE_HZ both use the default palette."""
-        n = self.engine.read_ops
-        rate = self._sweep_rate
-        if rate is None:
-            text = "sweep %d reads" % n
-        else:
-            text = "sweep %d reads @ %.1f Hz" % (n, rate)
-        if rate is not None and 0 < rate < LOW_RATE_HZ:
-            self.budget_label.setStyleSheet(BUDGET_ORANGE_STYLE)
-            self.budget_label.setToolTip(BUDGET_TOOLTIP)
-        else:
-            self.budget_label.setStyleSheet("")
-            self.budget_label.setToolTip("")
-        self.budget_label.setText(text)
+        """Rebuild budget_label's text from engine.read_ops - the
+        transaction count is the thing this page's own actions
+        (adding/removing channels) change. The sweep rate, and the
+        low-rate warning keyed off it, live on the toolbar's poll
+        label (MainWindow) instead of being repeated here."""
+        self.budget_label.setText("sweep %d reads" % self.engine.read_ops)
 
     # -- crosshair / Value column readout (feature 1, spec point 6) ---------
 

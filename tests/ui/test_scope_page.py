@@ -5,6 +5,7 @@ import time
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -265,38 +266,16 @@ def test_scale_offset_transforms_curve(qtbot):
     assert value_text == format_value(200, DEFAULT_TYPE)
 
 
-def test_budget_label_shows_no_rate_before_any_sweep_rate_received(qtbot):
-    """Before MainWindow ever calls set_sweep_rate() (no sweep has
-    reported a rate yet, e.g. right after the dock opens), the budget
-    label must show the read-op count without a rate suffix."""
+def test_budget_label_shows_read_count_only(qtbot):
+    """The budget label carries only the transaction count - the sweep
+    rate (and its low-rate warning) lives on the toolbar's poll label
+    (MainWindow), not repeated here."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
     page.refresh_plot()
     assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
-    assert "E65100" not in page.budget_label.styleSheet()
-
-
-def test_set_sweep_rate_styles_label_orange_below_threshold(qtbot):
-    """set_sweep_rate(10.0) (below the 15 Hz budget threshold) must
-    show the rate in the label and style it orange (#E65100) with a
-    tooltip explaining why; a subsequent set_sweep_rate(38.0) (a
-    healthy rate, same as the real hardware validation figure in the
-    README) must clear both the color and the tooltip."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-
-    page.set_sweep_rate(10.0)
-    page.refresh_plot()
-    assert "10.0" in page.budget_label.text()
-    assert "E65100" in page.budget_label.styleSheet()
-    assert "prefer contiguous addresses" in page.budget_label.toolTip()
-
-    page.set_sweep_rate(38.0)
-    page.refresh_plot()
-    assert "38.0" in page.budget_label.text()
-    assert "E65100" not in page.budget_label.styleSheet()
+    assert "Hz" not in page.budget_label.text()
 
 
 def test_budget_label_updates_immediately_after_add_and_remove_channel(
@@ -374,35 +353,26 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     assert after_cursor.right() < 1000.0
 
 
-def test_side_panel_scrolls_and_remove_button_above_elf_section(qtbot):
-    """Hardware-session finding (carried into v2): at typical dock
-    heights the side panel's content (channel table, add rows, ELF
-    section, Remove channel, window/budget labels) exceeds the
-    available height with no scrollbar, pushing the bottom controls
-    off-screen and unreachable. The panel must scroll, and "Remove
-    channel" - a channel-table operation - must sit directly under the
-    table (above the ELF section), so it stays reachable even when the
-    ELF section further down is scrolled out of view."""
+def test_per_row_minus_button_removes_channel(qtbot):
+    """Each channel row's leftmost "-" button removes THAT channel
+    directly - no selection step, no separate Remove button (which no
+    longer exists)."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    page.resize(480, 150)
-    page.show()
-    qtbot.waitExposed(page)
+    page.add_channel("DMA2.S0NDTR")
+    page.add_channel("ADC1.SR")
+    assert page.channel_table.rowCount() == 2
+    assert not hasattr(page, "remove_btn")
 
-    # content taller than the viewport => a vertical scrollbar with
-    # room to move.
-    assert page.side_scroll.verticalScrollBar().maximum() > 0
-    assert (page.side_scroll.horizontalScrollBarPolicy()
-           == Qt.ScrollBarAlwaysOff)
+    row = page._row_for_key("DMA2.S0NDTR")
+    minus_box = page.channel_table.cellWidget(row, 0)
+    minus_btn = minus_box.findChild(QPushButton)
+    minus_btn.click()
 
-    side_layout = page.side_scroll.widget().layout()
-    remove_index = side_layout.indexOf(page.remove_btn)
-    elf_index = side_layout.indexOf(page.elf_content)
-    assert remove_index >= 0 and elf_index >= 0
-    assert remove_index < elf_index
-
-
+    assert "DMA2.S0NDTR" not in page._channels
+    assert page.channel_table.rowCount() == 1
+    assert "ADC1.SR" in page._channels
 def test_roll_mode_viewport_fixed(qtbot):
     """Roll mode (standard-scope style): the viewport must be pinned
     to a fixed (-window_s, 0) x-range on every refresh - identical
@@ -477,7 +447,7 @@ def test_channel_table_has_spec_columns_and_default_type(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    assert page.channel_table.columnCount() == 7
+    assert page.channel_table.columnCount() == 8
 
     key = "DMA2.S0NDTR"
     page.add_channel(key)

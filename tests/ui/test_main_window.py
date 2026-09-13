@@ -178,3 +178,26 @@ def test_tabs_switch_inspector_visibility(qtbot):
     # test_repaint_timer_stops_when_hidden for that half).
     assert win.scope_page is not None
     assert not win.scope_page.isVisible()
+
+
+def test_rate_label_turns_orange_below_low_rate_threshold(qtbot):
+    """The low sweep-rate warning lives on the toolbar's poll label
+    (moved from the scope budget label, which used to repeat the same
+    rate): 0 < rate < 15 Hz -> orange + tooltip; a healthy rate (or a
+    reported 0 stall, which is not a budget problem) clears both."""
+    engine = make_demo_engine("targets/f411")
+    bridge = EngineBridge(engine)
+    win = MainWindow(engine, bridge)
+    qtbot.addWidget(win)
+
+    win._update_rate_label(10.0)
+    assert "10.0" in win.rate_label.text()
+    assert "E65100" in win.rate_label.styleSheet()
+    assert "contiguous" in win.rate_label.toolTip()
+
+    win._update_rate_label(38.0)
+    assert "E65100" not in win.rate_label.styleSheet()
+    assert win.rate_label.toolTip() == ""
+
+    win._update_rate_label(0.0)
+    assert "E65100" not in win.rate_label.styleSheet()

@@ -32,6 +32,16 @@ from .panels.flow_page import FlowPage, build_flow_edge_map
 from .panels.memory_page import MemoryPage
 from .panels.register_page import RegisterPage
 
+# Low sweep-rate warning on the toolbar's poll label (moved here from
+# the scope page's budget label, which used to repeat the same rate):
+# below LOW_RATE_HZ - and above 0, a reported stall is not a budget
+# problem - the label turns orange with a tooltip naming the likely
+# cause. Global on purpose: a saturated read budget slows BOTH pages.
+LOW_RATE_HZ = 15.0
+RATE_ORANGE_STYLE = "color: #E65100;"
+RATE_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
+                "contiguous addresses")
+
 
 class _DiagramView(QGraphicsView):
     """QGraphicsView with wheel-to-zoom. The prototype overrode
@@ -491,13 +501,21 @@ class MainWindow(QMainWindow):
             for ev in u.events:
                 self.scope_page.add_event_marker(
                     ev.t, "%s: %s" % (ev.flow, ev.msg))
-            self.scope_page.set_sweep_rate(u.snapshot.rate_hz)
         if self._datapath_stopped:
             return
         self._apply(u)
 
+    def _update_rate_label(self, rate_hz: float) -> None:
+        self.rate_label.setText("poll %4.1f Hz  " % rate_hz)
+        if 0 < rate_hz < LOW_RATE_HZ:
+            self.rate_label.setStyleSheet(RATE_ORANGE_STYLE)
+            self.rate_label.setToolTip(RATE_TOOLTIP)
+        else:
+            self.rate_label.setStyleSheet("")
+            self.rate_label.setToolTip("")
+
     def _apply(self, u: EngineUpdate) -> None:
-        self.rate_label.setText("poll %4.1f Hz  " % u.snapshot.rate_hz)
+        self._update_rate_label(u.snapshot.rate_hz)
 
         active_edges: Set[str] = set()
         for name, edges in self._flow_edges.items():

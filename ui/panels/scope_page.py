@@ -132,6 +132,15 @@ MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 
+# Side panel width (also used by side_widget.setMaximumWidth() below) -
+# named here so the transform strip's Normalize-label fit check has a
+# stable budget to measure against, rather than a second copy of the
+# literal.
+SIDE_MAX_WIDTH = 260
+SPIN_MIN_WIDTH = 90
+NORMALIZE_LABEL_FULL = "Normalize (map window to 0..1)"
+NORMALIZE_LABEL_SHORT = "Normalize"
+
 # Bandwidth budget indicator: below this live sweep rate, the label
 # calls out that the read count is the likely cause (spec: "R < 15.0
 # and R > 0").
@@ -267,31 +276,60 @@ class ScopePage(QWidget):
         # (currentItemChanged fires with current=None when the list
         # goes empty of a selection, e.g. after removing the selected
         # row).
-        transform_row = QHBoxLayout()
-        transform_row.addWidget(QLabel("scale"))
+        #
+        # Two rows, not one - the ~260px side panel (SIDE_MAX_WIDTH)
+        # is too narrow to fit "scale" + spinbox + "offset" + spinbox
+        # + "Normalize" on a single hbox row without truncating (a
+        # hardware-session screenshot showed "Normalize" clipped to
+        # "Norr" and the offset spinbox's value clipped): row 1 is
+        # scale+offset, row 2 is Normalize alone with the full width
+        # to itself.
+        transform_row1 = QHBoxLayout()
+        transform_row1.addWidget(QLabel("scale"))
         self.scale_spin = QDoubleSpinBox()
         self.scale_spin.setRange(1e-6, 1e9)
         self.scale_spin.setDecimals(6)
         self.scale_spin.setValue(1.0)
-        transform_row.addWidget(self.scale_spin)
+        self.scale_spin.setMinimumWidth(SPIN_MIN_WIDTH)
+        transform_row1.addWidget(self.scale_spin, 1)
 
-        transform_row.addWidget(QLabel("offset"))
+        transform_row1.addWidget(QLabel("offset"))
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-1e9, 1e9)
         self.offset_spin.setDecimals(6)
-        transform_row.addWidget(self.offset_spin)
+        self.offset_spin.setMinimumWidth(SPIN_MIN_WIDTH)
+        transform_row1.addWidget(self.offset_spin, 1)
 
-        self.normalize_check = QCheckBox("Normalize")
-        transform_row.addWidget(self.normalize_check)
+        transform_row2 = QHBoxLayout()
+        # Prefer the fuller hint text, but only if it plausibly fits
+        # the side panel's width - falls back to the bare word rather
+        # than risk the exact truncation this strip exists to fix.
+        self.normalize_check = QCheckBox(NORMALIZE_LABEL_FULL)
+        fm = self.normalize_check.fontMetrics()
+        checkbox_overhead = 40          # indicator box + spacing/margins
+        if fm.horizontalAdvance(NORMALIZE_LABEL_FULL) > (
+                SIDE_MAX_WIDTH - checkbox_overhead):
+            self.normalize_check.setText(NORMALIZE_LABEL_SHORT)
+        transform_row2.addWidget(self.normalize_check)
+        transform_row2.addStretch(1)
+
+        transform_layout = QVBoxLayout()
+        transform_layout.setContentsMargins(0, 0, 0, 0)
+        transform_layout.addLayout(transform_row1)
+        transform_layout.addLayout(transform_row2)
 
         self.transform_strip = QWidget()
-        self.transform_strip.setLayout(transform_row)
+        self.transform_strip.setLayout(transform_layout)
         self.transform_strip.setVisible(False)
         side.addWidget(self.transform_strip)
 
         self.scale_spin.valueChanged.connect(self._on_transform_edited)
         self.offset_spin.valueChanged.connect(self._on_transform_edited)
         self.normalize_check.toggled.connect(self._on_transform_edited)
+        # Small honest-UI touch: while Normalize is checked, scale and
+        # offset are ignored by refresh_plot()'s transform, so grey
+        # them out rather than leave them editable-but-inert.
+        self.normalize_check.toggled.connect(self._set_scale_offset_enabled)
         self.channel_list.currentItemChanged.connect(
             self._on_channel_selected)
 
@@ -357,7 +395,7 @@ class ScopePage(QWidget):
 
         side_widget = QWidget()
         side_widget.setLayout(side)
-        side_widget.setMaximumWidth(260)
+        side_widget.setMaximumWidth(SIDE_MAX_WIDTH)
         outer.addWidget(side_widget)
 
         plot_side = QVBoxLayout()
@@ -821,7 +859,19 @@ class ScopePage(QWidget):
         self.normalize_check.setChecked(transform["normalize"])
         for w in spins:
             w.blockSignals(False)
+        # setChecked() above was signal-blocked (it must not re-fire
+        # _on_transform_edited and re-store the channel's own values
+        # back at itself), so the enabled/disabled state it would
+        # normally drive via toggled needs setting explicitly here too.
+        self._set_scale_offset_enabled(transform["normalize"])
         self.transform_strip.setVisible(True)
+
+    def _set_scale_offset_enabled(self, normalize_checked: bool) -> None:
+        """Grey out scale/offset while Normalize is checked - they are
+        ignored by _apply_transform() in that mode, so leaving them
+        editable would be dishonest UI."""
+        self.scale_spin.setEnabled(not normalize_checked)
+        self.offset_spin.setEnabled(not normalize_checked)
 
     def _on_transform_edited(self, _value=None) -> None:
         item = self.channel_list.currentItem()

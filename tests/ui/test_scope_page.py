@@ -8,7 +8,9 @@ from core.engine.core import Engine
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
 from ui.main_window import MainWindow
-from ui.panels.scope_page import ScopePage, _gapped_xy, value_at
+from ui.panels.scope_page import (NORMALIZE_LABEL_FULL,
+                                  NORMALIZE_LABEL_SHORT, ScopePage,
+                                  _gapped_xy, value_at)
 
 TARGET = "targets/f411"
 
@@ -394,3 +396,35 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     after_cursor = page.plot.vb.childrenBoundingRect()
     assert after_cursor == baseline
     assert after_cursor.right() < 1000.0
+
+
+def test_normalize_checkbox_full_label_and_disables_spinboxes(qtbot):
+    """Hardware-session finding: the transform strip's single hbox row
+    was too narrow for the ~260px side panel and visually truncated
+    "Normalize" to "Norr" (and clipped the offset spinbox's value).
+    The checkbox's text must remain the full word - not shortened by
+    some future rename - regardless of which of the two fit-checked
+    labels gets picked; and checking Normalize must grey out
+    scale/offset (they are ignored by the transform in that mode),
+    re-enabling them on uncheck."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+
+    text = page.normalize_check.text()
+    assert text.startswith("Normalize")
+    assert text in (NORMALIZE_LABEL_FULL, NORMALIZE_LABEL_SHORT)
+
+    page.channel_list.setCurrentRow(0)
+    assert page.scale_spin.isEnabled()
+    assert page.offset_spin.isEnabled()
+
+    page.normalize_check.setChecked(True)
+    assert not page.scale_spin.isEnabled()
+    assert not page.offset_spin.isEnabled()
+
+    page.normalize_check.setChecked(False)
+    assert page.scale_spin.isEnabled()
+    assert page.offset_spin.isEnabled()

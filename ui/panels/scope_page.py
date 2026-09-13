@@ -60,6 +60,20 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit,
 
 from core.engine.core import Engine, EngineError
 
+# pathscope is light-theme only by design (see ui/app.py's
+# app.styleHints().setColorScheme(Qt.ColorScheme.Light)) - pyqtgraph's
+# own defaults violate that twice over: a black plot background, and a
+# foreground of 'd' (a grey tuned to read on black, which axis/tick/
+# grid/legend text all key off). Both must be set here, at this
+# module's import site - the only place pyqtgraph is imported at all
+# (MainWindow imports this module lazily, from inside its "Scope"
+# toolbar toggle handler, specifically so pyqtgraph's import cost is
+# paid only on first open) - and before ScopePage.__init__ constructs
+# any PlotWidget below, since pyqtgraph bakes these options into each
+# new plot item at construction time.
+pg.setConfigOption("background", "w")
+pg.setConfigOption("foreground", "k")
+
 MONO = QFont()
 MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
 MONO.setPointSize(10)
@@ -184,12 +198,35 @@ class ScopePage(QWidget):
     def set_frozen(self, on: bool) -> None:
         """Called by MainWindow from its existing freeze toggle. Pauses
         (or resumes) the 200 ms repaint timer; refresh_plot() itself
-        stays callable regardless (tests call it directly)."""
+        stays callable regardless (tests call it directly). Resuming
+        only starts the timer if the page is currently visible -
+        unfreezing while the dock is hidden (tabbed away) must not
+        wake a timer that hideEvent() below deliberately paused;
+        showEvent() re-checks self.frozen when the dock is next shown,
+        so the timer still resumes correctly at that point."""
         self.frozen = on
         if on:
             self._timer.stop()
-        else:
+        elif self.isVisible():
             self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        """Stop the repaint timer while the page isn't shown - tabbed
+        away behind Event log, same bug class as memory_page.py's
+        auto-refresh: an invisible ScopePage has no reason to keep
+        redrawing a plot nobody sees every 200 ms forever."""
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:
+        """Resume the timer on redisplay, unless the user has frozen
+        the global display - set_frozen(True) wins over a plain
+        show/hide cycle, mirroring memory_page.py's
+        auto_check.isChecked() guard (there, the user's own
+        preference; here, MainWindow's freeze state)."""
+        if not self.frozen:
+            self._timer.start()
+        super().showEvent(event)
 
     # -- channel management ----------------------------------------------
 

@@ -224,3 +224,14 @@ def test_overlay_guards_needed_register(tmp_path):
     assert "ADC1.DR" in e.excluded          # svd readAction still guards
     assert 0x40012000 in e.guarded_addrs    # ADC1.SR address
     assert 0x4001204C in e.guarded_addrs    # ADC1.DR address
+
+
+def test_write_word_lands_in_target_memory_via_poller():
+    adapter = MockAdapter({0x20000100: 0})
+    engine = Engine.load("targets/f411", adapter, interval_s=0.01)
+    engine.start()
+    try:
+        engine.write_word(0x20000100, 0xCAFEF00D)
+        assert adapter.mem[0x20000100] == 0xCAFEF00D
+    finally:
+        engine.stop()

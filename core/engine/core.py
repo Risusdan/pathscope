@@ -262,6 +262,12 @@ class Engine:
         return self._exec(lambda ad: ad.read_block32(addr, count),
                           timeout_s)
 
+    def write_word(self, addr: int, value: int) -> None:
+        """Single-word write on the poller thread (command queue) -
+        the trace watch-table protocol's building block. Single-word
+        writes are atomic with respect to the target's ISR."""
+        self._exec(lambda ad: ad.write32(addr, value))
+
     def halt(self) -> None:
         self._exec(lambda ad: ad.halt())
 

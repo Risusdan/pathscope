@@ -568,15 +568,23 @@ def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
     """Hardware finding (Task 10 E2E suite): a fixed 500ms slow-drain
     interval is only safe for firmware slow enough that 500ms sits
     under the trace ring's own span (RING_COUNT * period_us) - a real
-    board sampling at 1 kHz (period_us=1000, a 256ms ring span) is
-    not, and would lose data on every stopped tick under the old fixed
-    interval. _discover_at() must derive the slow timer's interval
-    from the descriptor actually discovered
-    (_drain_interval_ms(ring_count, period_us): half the ring's span,
-    floored/capped) rather than use a constant - here that's half of
-    256ms = 128ms. Inspects the timer directly, no sleeps: discovery
-    (and the interval it sets) happens synchronously in ScopePage.__init__
-    once engine.start() has the poller thread up to service it."""
+    board sampling at 1 kHz (period_us=1000) with the ORIGINAL
+    RING_COUNT=256 (a 256ms span) was not, and would lose data on
+    every stopped tick under the old fixed interval. _discover_at()
+    must derive the slow timer's interval from the descriptor actually
+    discovered (_drain_interval_ms(ring_count, period_us): half the
+    ring's span, floored/capped) rather than use a constant - since the
+    T11 hardware gate bumped RING_COUNT to 1024 (a 1.024s span at
+    1 kHz), half that span (512ms) now exceeds DRAIN_MS_CAP, so the
+    real-firmware case that originally motivated this test now lands
+    on the SAME cap as test_slow_drain_interval_caps_at_default_for_
+    slower_firmware below - see
+    test_drain_interval_ms_lands_between_floor_and_cap for coverage of
+    the derived-not-constant computation actually landing strictly
+    between the two bounds. Inspects the timer directly, no sleeps:
+    discovery (and the interval it sets) happens synchronously in
+    ScopePage.__init__ once engine.start() has the poller thread up to
+    service it."""
     engine = _make_demo_like_engine(period_us=1000)
     engine.start()
     try:
@@ -585,10 +593,24 @@ def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
         assert page.desc is not None
         assert page.desc.period_us == 1000
         expected = _drain_interval_ms(page.desc.ring_count, 1000)
-        assert expected == 128
-        assert page._drain_timer.interval() == 128
+        assert expected == DRAIN_MS_CAP == 500
+        assert page._drain_timer.interval() == 500
     finally:
         engine.stop()
+
+
+def test_drain_interval_ms_lands_between_floor_and_cap():
+    """Pure-function coverage lost when the T11 hardware gate's
+    RING_COUNT bump (256 -> 1024) pushed the real firmware's own
+    period_us=1000 case from a mid-range result up onto DRAIN_MS_CAP
+    (see the previous test) - period_us=400 keeps half the ring's span
+    (1024 * 400 / 1000 / 2 = 204.8ms) strictly between DRAIN_MS_FLOOR
+    (50) and DRAIN_MS_CAP (500), proving _drain_interval_ms actually
+    computes a derived value rather than just picking one of its two
+    bounds."""
+    result = _drain_interval_ms(RING_COUNT, 400)
+    assert result == 204
+    assert 50 < result < DRAIN_MS_CAP
 
 
 def test_slow_drain_interval_caps_at_default_for_slower_firmware(qtbot):

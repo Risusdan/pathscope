@@ -22,8 +22,24 @@
 
 /** @brief Maximum number of watched channels (contract section 3.1). */
 #define PS_TRACE_MAX_CH      10u
-/** @brief Ring buffer depth, in records. */
-#define PS_TRACE_RING_COUNT  256u
+/** @brief Ring buffer depth, in records.
+ *  @details CONTRACT-VALUE CHANGE (T11 hardware gate, fix round 1):
+ *           256 -> 1024. A real probe's per-command latency (tens of
+ *           ms of fixed overhead plus real transfer time for a large
+ *           block read) made the 256-deep/256ms-span ring too small
+ *           to ever hold a stably-readable window once a host is more
+ *           than a command or two behind - every refresh() raced the
+ *           ring wrapping under it and lost the whole batch, every
+ *           cycle, on hardware (never reproduced by the same-thread
+ *           sim, where wr_seq is frozen for the whole read). 1024
+ *           records is 49152 bytes (1024 * PS_TRACE_RECORD_SIZE) of
+ *           the target's 128KB SRAM - comfortable alongside this
+ *           firmware's other statics (see main.c). This constant is
+ *           validated against core/trace/contract.py's RING_COUNT
+ *           (parse_desc rejects a mismatch) - both sides were bumped
+ *           together; the sim (core/trace/sim.py) and every test that
+ *           depends on the ring's size follow contract.py's constant. */
+#define PS_TRACE_RING_COUNT  1024u
 /** @brief Sample period in microseconds; the integrator's timer tick
  *         must fire at this rate for the wall-clock time axis to be
  *         correct on the host side. */

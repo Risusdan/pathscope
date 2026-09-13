@@ -2,13 +2,13 @@ import struct
 
 import pytest
 from core.trace.contract import (MAGIC, VERSION, MAX_CH, RECORD_SIZE,
-                                 ContractError, TraceDesc, encode_desc,
-                                 encode_record, parse_desc,
+                                 RING_COUNT, ContractError, TraceDesc,
+                                 encode_desc, encode_record, parse_desc,
                                  parse_records, record_word_addr)
 
 def _desc_words(endian):
     return encode_desc(period_us=1000, ring_addr=0x20001000,
-                       ring_count=256, wr_seq=7,
+                       ring_count=RING_COUNT, wr_seq=7,
                        watch_addrs=[0x20000000] * 3 + [0] * 7,
                        watch_count=3, generation=2, status=0,
                        endian=endian)
@@ -44,7 +44,7 @@ def test_bad_magic_and_version_raise():
     words = _desc_words("<")
     with pytest.raises(ContractError):
         parse_desc([0xDEADBEEF] + words[1:])
-    bad = encode_desc(period_us=1000, ring_addr=0, ring_count=256,
+    bad = encode_desc(period_us=1000, ring_addr=0, ring_count=RING_COUNT,
                       wr_seq=0, watch_addrs=[0] * 10, watch_count=0,
                       generation=0, status=0, endian="<", version=9)
     with pytest.raises(ContractError):
@@ -71,5 +71,5 @@ def test_bad_ring_count_raises():
 def test_record_word_addr_wraps():
     d = parse_desc(_desc_words("<"))
     assert record_word_addr(d, 0) == 0x20001000
-    assert record_word_addr(d, 256) == 0x20001000
+    assert record_word_addr(d, RING_COUNT) == 0x20001000
     assert record_word_addr(d, 5) == 0x20001000 + 5 * RECORD_SIZE

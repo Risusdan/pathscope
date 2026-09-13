@@ -21,7 +21,15 @@ from typing import List
 MAGIC = 0x50435350          # 'PSCP' read as little-endian u32
 VERSION = 1
 MAX_CH = 10
-RING_COUNT = 256
+# CONTRACT-VALUE CHANGE (T11 hardware gate, fix round 1): 256 -> 1024.
+# A real probe's per-command latency left the 256-deep/256ms-span ring
+# too small to ever hold a stably-readable window once a host fell
+# more than a command or two behind - see core/trace/reader.py's
+# module docstring. Validated against firmware/ps_trace/ps_trace.h's
+# PS_TRACE_RING_COUNT (parse_desc below rejects a mismatch) - bumped
+# together; the sim (sim.py) and every test tied to the ring's size
+# follow this constant, not a literal.
+RING_COUNT = 1024
 RECORD_SIZE = 8 + 4 * MAX_CH          # 48
 DESC_SIZE = 24 + 4 * MAX_CH + 4       # 68: header 24 + table 40 + tail 4
 STATUS_OK, STATUS_BAD_ADDR, STATUS_BAD_COUNT = 0, 1, 2

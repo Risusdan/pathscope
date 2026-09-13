@@ -85,16 +85,21 @@ _WR_SEQ_WORD_OFFSET = WATCH_ADDRS_OFFSET - 4
 
 
 class FakeTraceFirmware:
-    def __init__(self, adapter: MockAdapter, desc_addr: int = 0x20004000,
+    def __init__(self, adapter: MockAdapter, desc_addr: int = 0x20010000,
                  ring_addr: int = 0x20001000, period_us: int = 1000,
                  whitelist: Tuple[Tuple[int, int], ...] =
                  ((0x20000000, 0x20020000),), endian: str = "<"):
         # The ring physically spans RING_COUNT * RECORD_SIZE bytes from
-        # ring_addr (0x3000 bytes at the contract's current constants) -
-        # a desc_addr inside that span would have the descriptor's own
-        # resync silently clobbering whichever ring record(s) land on
-        # the same bytes. Guard it here instead of letting a future
-        # caller rediscover that the hard way.
+        # ring_addr (0xC000 bytes at the contract's current constants,
+        # since the T11 hardware gate's RING_COUNT bump to 1024 - was
+        # 0x3000 at the old 256) - a desc_addr inside that span would
+        # have the descriptor's own resync silently clobbering
+        # whichever ring record(s) land on the same bytes. Guard it
+        # here instead of letting a future caller rediscover that the
+        # hard way. The default desc_addr (0x20010000) sits well past
+        # the default ring's end (0x2000D000) for exactly this reason -
+        # it moved out from 0x20004000 (inside the old, smaller ring's
+        # span) when the ring grew.
         ring_end = ring_addr + RING_COUNT * RECORD_SIZE
         desc_end = desc_addr + DESC_SIZE
         if desc_addr < ring_end and ring_addr < desc_end:

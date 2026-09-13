@@ -28,8 +28,22 @@ STATUS_OK, STATUS_BAD_ADDR, STATUS_BAD_COUNT = 0, 1, 2
 
 # struct format bodies (endian prefix added by caller). Standard size,
 # no implicit alignment - the wire layout is the spec table verbatim.
-_DESC_FMT_BODY = "IHBBIHHII{0}IBB2x".format(MAX_CH)
+# _DESC_FMT_BODY is built from _HEADER_FMT rather than a second literal
+# so the offsets derived from it below can never drift from the format
+# actually used to pack/unpack the descriptor.
+_HEADER_FMT = "IHBBIHHII"                       # magic..wr_seq
+_DESC_FMT_BODY = _HEADER_FMT + "{0}IBB2x".format(MAX_CH)
 _RECORD_FMT_BODY = "IB3x{0}I".format(MAX_CH)
+
+# Byte offsets of the watch-table fields inside the descriptor - the
+# one place these are computed. Anything that pokes a single word or
+# byte into the descriptor directly (TraceReader's watch-table writes,
+# the trace_sim.py test double's write interception) imports these
+# instead of re-deriving them, so a future layout change can't leave
+# one copy silently out of sync with the format string above.
+WATCH_ADDRS_OFFSET = struct.calcsize("<" + _HEADER_FMT)          # 24
+WATCH_COUNT_OFFSET = WATCH_ADDRS_OFFSET + 4 * MAX_CH               # 64
+GENERATION_OFFSET = WATCH_COUNT_OFFSET + 1                         # 65
 
 
 class ContractError(Exception):

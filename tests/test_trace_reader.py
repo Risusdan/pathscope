@@ -1,7 +1,10 @@
+import dataclasses
+
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from core.trace.reader import TraceError, TraceReader
+from core.trace.contract import TraceRecord
+from core.trace.reader import TraceError, TraceReader, _filter_stable
 from tests.trace_sim import FakeTraceFirmware
 
 
@@ -111,5 +114,84 @@ def test_full_ring_pass_not_clobbered_by_desc_resync():
             assert rec.slots[0] == 111
             assert rec.slots[1] == 222
             assert rec.slots[2:] == (0,) * 8
+    finally:
+        engine.stop()
+
+
+def _rec(seq, gen=0):
+    return TraceRecord(seq=seq, gen=gen, slots=(0,) * 10)
+
+
+def test_filter_stable_keeps_records_matching_seq_above_margin():
+    records = [_rec(10), _rec(11), _rec(12)]
+    kept, dropped = _filter_stable(records, start=10, new_wr_seq=13,
+                                   ring_count=256)
+    assert kept == records
+    assert dropped == 0
+
+
+def test_filter_stable_drops_mismatched_embedded_seq():
+    # Position 1 was requested to be seq 11 but actually holds seq 99 -
+    # that ring slot was overwritten by a newer record during the read
+    # (layer 1: whole-record replacement).
+    records = [_rec(10), _rec(99), _rec(12)]
+    kept, dropped = _filter_stable(records, start=10, new_wr_seq=13,
+                                   ring_count=256)
+    assert [r.seq for r in kept] == [10, 12]
+    assert dropped == 1
+
+
+def test_filter_stable_drops_records_inside_overwrite_margin():
+    # Every embedded seq matches its expected position, but new_wr_seq
+    # (from the post-read descriptor re-check) has moved on far enough
+    # that seq 10 and 11 now sit at or behind the ring's oldest
+    # still-live point (margin = new_wr_seq - ring_count = 12) - torn
+    # mid-write even though layer 1 alone wouldn't have caught it.
+    records = [_rec(10), _rec(11), _rec(12)]
+    kept, dropped = _filter_stable(records, start=10, new_wr_seq=268,
+                                   ring_count=256)
+    assert [r.seq for r in kept] == [12]
+    assert dropped == 2
+
+
+def test_filter_stable_drops_everything_when_margin_engulfs_batch():
+    records = [_rec(10), _rec(11), _rec(12)]
+    kept, dropped = _filter_stable(records, start=10, new_wr_seq=270,
+                                   ring_count=256)   # margin = 14
+    assert kept == []
+    assert dropped == 3
+
+
+def test_refresh_drops_records_torn_by_wrap_during_read(monkeypatch):
+    # Integration-level check that refresh() actually wires the
+    # post-read descriptor re-check to _filter_stable(): patch just
+    # the SECOND of refresh()'s two _read_desc() calls to report
+    # wr_seq advanced by a full ring_count, simulating firmware having
+    # wrapped the whole ring while the record reads were in flight.
+    # Every record just parsed then falls inside the overwrite margin
+    # even though nothing about the underlying data actually tore.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000])
+        fw.step(5)                        # seq 0..4, wr_seq=5
+
+        real_read_desc = r._read_desc
+        calls = {"n": 0}
+
+        def fake_read_desc():
+            calls["n"] += 1
+            desc = real_read_desc()
+            if calls["n"] == 2:
+                desc = dataclasses.replace(
+                    desc, wr_seq=desc.wr_seq + desc.ring_count)
+            return desc
+
+        monkeypatch.setattr(r, "_read_desc", fake_read_desc)
+        before_lost = r.lost
+        recs = r.refresh()
+        assert recs == []
+        assert r.lost == before_lost + 5
     finally:
         engine.stop()

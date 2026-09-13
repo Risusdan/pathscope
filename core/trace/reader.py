@@ -21,6 +21,36 @@ an address that no longer holds what its sequence number would claim.
 The window is contiguous in ring order except when it straddles the
 wrap point, so at most two block reads cover it.
 
+Reading the descriptor and then the record range is two separate,
+non-atomic transactions - nothing stops firmware from advancing (or
+even wrapping) wr_seq while the record reads are in flight, which
+could otherwise hand back torn or stale data under a seq number that
+claims it is something it no longer is, with last_seq silently
+advancing past it as if it had been delivered cleanly. refresh() below
+guards against that with two layers, applied by _filter_stable() after
+the record reads complete:
+
+  1. Embedded-seq equality: record i of the batch was requested to be
+     seq start+i. If what's actually there carries a different seq,
+     that ring slot was completely overwritten by a newer record
+     during the read - whole-record replacement, caught by comparing
+     the record's own embedded seq field against what was asked for.
+  2. Overwrite margin: a record can still be torn mid-write even when
+     its seq field happens to read back matching, if firmware started
+     overwriting that same slot again before finishing. To catch that,
+     the descriptor is re-read once more after the record reads; any
+     record whose seq now falls at or behind the ring's current oldest
+     still-live point (new_wr_seq - ring_count) is no longer
+     trustworthy and is dropped too, even though it passed layer 1.
+
+A record surviving both layers was stably published for the entire
+read. Every dropped record - from either layer - adds to self.lost;
+last_seq still advances to the end of the originally requested window
+regardless, since a dropped record is never re-delivered on the next
+refresh() (there is nothing to redeliver - the ring has moved past it
+by then in exactly the way self.lost already accounts for on the
+"before we even asked" side).
+
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
 written one word each, then the new count is written to request the
@@ -29,23 +59,14 @@ the result by bumping generation (accepted) or setting a nonzero
 status (rejected) - set_watch polls status() for that instead of
 assuming success.
 """
-import struct
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ..engine.core import Engine
-from .contract import (DESC_SIZE, MAX_CH, STATUS_BAD_ADDR, STATUS_BAD_COUNT,
-                       STATUS_OK, ContractError, TraceDesc, TraceRecord,
-                       parse_desc, parse_records, record_word_addr)
-
-# Byte offsets of the watch-table fields inside the descriptor - see
-# core/trace/contract.py's _DESC_FMT_BODY ("IHBBIHHII{max_ch}IBB2x"):
-# 24 bytes of fixed header, then the MAX_CH-entry address table, then
-# the count/generation byte pair (which shares its word with two bytes
-# of tail padding).
-_HEADER_FMT = "IHBBIHHII"           # magic..wr_seq
-WATCH_ADDRS_OFFSET = struct.calcsize("<" + _HEADER_FMT)        # 24
-WATCH_COUNT_OFFSET = WATCH_ADDRS_OFFSET + 4 * MAX_CH            # 64
+from .contract import (DESC_SIZE, STATUS_BAD_ADDR, STATUS_BAD_COUNT,
+                       STATUS_OK, WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
+                       ContractError, TraceDesc, TraceRecord, parse_desc,
+                       parse_records, record_word_addr)
 
 _DESC_WORDS = DESC_SIZE // 4
 _STATUS_NAMES = {STATUS_BAD_ADDR: "BAD_ADDR", STATUS_BAD_COUNT: "BAD_COUNT"}
@@ -53,6 +74,34 @@ _STATUS_NAMES = {STATUS_BAD_ADDR: "BAD_ADDR", STATUS_BAD_COUNT: "BAD_COUNT"}
 
 class TraceError(Exception):
     pass
+
+
+def _filter_stable(records: List[TraceRecord], start: int, new_wr_seq: int,
+                   ring_count: int) -> Tuple[List[TraceRecord], int]:
+    """The two-layer torn-read guard described in the module docstring,
+    factored out as a pure function so it can be unit-tested directly
+    against crafted TraceRecord lists with no sim/engine machinery.
+
+    `records` is the batch parsed from the window requested as
+    [start, start + len(records)) at the time of the first descriptor
+    read. `new_wr_seq` is wr_seq from re-reading the descriptor AFTER
+    the record reads completed; `ring_count` is that same re-read's
+    ring_count (a fixed protocol constant, but taken from the same
+    read as new_wr_seq for consistency).
+
+    Returns (kept, dropped_count) - kept preserves the input order."""
+    margin = new_wr_seq - ring_count
+    kept = []
+    dropped = 0
+    for i, rec in enumerate(records):
+        expected_seq = start + i
+        if rec.seq != expected_seq:
+            dropped += 1              # layer 1: whole-record replacement
+        elif rec.seq < margin:
+            dropped += 1              # layer 2: torn mid-write
+        else:
+            kept.append(rec)
+    return kept, dropped
 
 
 class TraceReader:
@@ -98,9 +147,20 @@ class TraceReader:
             self.last_seq = wr_seq - 1
             return []
 
-        records = self._read_records(desc, start, wr_seq)
+        raw_records = self._read_records(desc, start, wr_seq)
+
+        # The descriptor and record reads are non-atomic (see module
+        # docstring) - re-read the descriptor once more and filter
+        # anything that may have been torn while the record reads were
+        # in flight.
+        post_desc = self._read_desc()
+        self.desc = post_desc
+        kept, dropped = _filter_stable(raw_records, start, post_desc.wr_seq,
+                                       post_desc.ring_count)
+        self.lost += dropped
+
         self.last_seq = wr_seq - 1
-        return records
+        return kept
 
     def set_watch(self, addrs: List[int]) -> None:
         if self.desc is None:

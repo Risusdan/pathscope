@@ -22,22 +22,15 @@ everything outside that range passes through unmodified to the
 original bound method, so ordinary register writes elsewhere still
 behave like a plain MockAdapter.
 """
-import struct
 from typing import Tuple
 
 from core.adapter.mock import MockAdapter
 from core.trace.contract import (DESC_SIZE, MAX_CH, RECORD_SIZE, RING_COUNT,
                                  STATUS_BAD_ADDR, STATUS_BAD_COUNT,
-                                 STATUS_OK, TraceDesc, VERSION, encode_desc,
-                                 encode_record, record_word_addr)
-
-# Byte offsets of the watch-table fields inside the descriptor, derived
-# the same way contract.py's own struct format is (standard size, no
-# implicit alignment): a 24-byte fixed header, then the MAX_CH-entry
-# address table, then the count/generation byte pair.
-_HEADER_FMT = "IHBBIHHII"           # magic..wr_seq
-WATCH_ADDRS_OFFSET = struct.calcsize("<" + _HEADER_FMT)        # 24
-WATCH_COUNT_OFFSET = WATCH_ADDRS_OFFSET + 4 * MAX_CH            # 64
+                                 STATUS_OK, TraceDesc, VERSION,
+                                 WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
+                                 encode_desc, encode_record,
+                                 record_word_addr)
 
 
 class FakeTraceFirmware:

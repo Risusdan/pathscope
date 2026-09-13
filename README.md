@@ -109,6 +109,14 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
   If firmware groups its debug variables in a single struct, a whole set
   of channels costs the same as one - a cheap habit that pays off in
   sample rate.
+- The same habit is what buys value coherence: a probe reads memory
+  transaction by transaction, so channels in different reads are
+  sampled fractions of a millisecond apart - the scope's "skew" meter
+  shows the spread, and only "skew: 0" (every channel inside one block
+  read) supports same-instant reasoning across channels. For true
+  simultaneity of computed values, have firmware fill the struct
+  atomically (e.g. in one interrupt handler) and let the scope read
+  the snapshot.
 
 ## License
 

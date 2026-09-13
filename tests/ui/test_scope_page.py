@@ -1,4 +1,5 @@
 import math
+import time
 
 import pyqtgraph as pg
 import pytest
@@ -205,7 +206,8 @@ def test_value_at():
 
 def test_crosshair_readout_shows_raw_values(qtbot):
     """_update_crosshair(view_t) takes plot-relative seconds (the same
-    domain mapSceneToView would hand it) and must update both the
+    domain mapSceneToView would hand it - roll mode: sample_t -
+    self._last_now, the last refresh's now) and must update both the
     channel row's raw-value suffix and the time label - reading only
     the per-channel series cached by the prior refresh_plot(), per the
     module's cheapness requirement. History.record() is called
@@ -226,7 +228,7 @@ def test_crosshair_readout_shows_raw_values(qtbot):
 
     item_text = page._channels[key]["item"].text()
     assert item_text.endswith("= %d (0x%X)" % (200, 200))
-    assert page.time_label.text() == "t=1.500 s"
+    assert page.time_label.text() == "t-now = 1.50 s"
 
 
 def test_scale_offset_transforms_curve(qtbot):
@@ -462,3 +464,56 @@ def test_side_panel_scrolls_and_remove_button_above_transform_strip(qtbot):
     strip_index = side_layout.indexOf(page.transform_strip)
     assert remove_index >= 0 and strip_index >= 0
     assert remove_index < strip_index
+
+
+def test_roll_mode_viewport_fixed(qtbot):
+    """Roll mode (standard-scope style): the viewport must be pinned
+    to a fixed (-window_s, 0) x-range on every refresh - identical
+    across refreshes, never sliding to track wall-clock time - and an
+    event marker (which stores an ABSOLUTE t) must reposition on every
+    refresh by exactly the elapsed real-time delta between refreshes,
+    scrolling left with its moment in history rather than sitting
+    still."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    window_s = engine.history.window_s
+
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    page.refresh_plot()
+    now1 = page._last_now
+
+    (x_min1, x_max1), _y_range1 = page.plot.vb.viewRange()
+    # padding=0.01 headroom on each side of the (-window_s, 0) range -
+    # not exactly those two numbers, but close, and identical between
+    # the two refreshes below (the "not sliding" requirement).
+    assert x_min1 == pytest.approx(-window_s, abs=window_s * 0.02)
+    assert x_max1 == pytest.approx(0.0, abs=window_s * 0.02)
+
+    marker_t = time.monotonic()
+    page.add_event_marker(marker_t, "evt")
+    _stored_t, line = page._markers[-1]
+    pos_before = line.value()
+    assert pos_before == pytest.approx(marker_t - now1)
+
+    time.sleep(0.05)
+    engine.history.record(key, t0 + 0.1, 200)
+    page.refresh_plot()
+    now2 = page._last_now
+    assert now2 > now1
+
+    (x_min2, x_max2), _y_range2 = page.plot.vb.viewRange()
+    assert x_min2 == pytest.approx(-window_s, abs=window_s * 0.02)
+    assert x_max2 == pytest.approx(0.0, abs=window_s * 0.02)
+    # the core "fixed viewport" assertion: identical, not sliding.
+    assert x_min2 == pytest.approx(x_min1, abs=1e-9)
+    assert x_max2 == pytest.approx(x_max1, abs=1e-9)
+
+    pos_after = line.value()
+    assert pos_after == pytest.approx(marker_t - now2)
+    # the marker scrolled left (more negative) by exactly the elapsed
+    # real-time delta between the two refreshes.
+    assert (pos_before - pos_after) == pytest.approx(now2 - now1, abs=1e-6)

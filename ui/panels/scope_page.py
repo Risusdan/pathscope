@@ -16,13 +16,24 @@ panel: removing the channel also calls engine.remove_addr_watch() so
 the poller stops reading it, since the scope was the one that asked
 for it).
 
-X axis: seconds relative to `self._t0`, captured as time.monotonic()
-at ScopePage construction. Note this is "dock-open time", not a true
-"engine start" timestamp - Engine (core/engine/core.py) exposes no
-such timestamp, and adding one is out of this task's scope. Samples
-already older than the panel's own t0 (History's 10 s window can
-predate a lazily-opened dock) simply plot at a negative x, which is
-harmless since the window is always <= History.window_s wide.
+X axis: ROLL MODE, standard-scope style. Every sample plots at
+sample_t - now, where now = time.monotonic() is captured once per
+refresh_plot() call and cached as `self._last_now`. The newest data
+always sits at x=0 (the view's right edge) and scrolls left as it
+ages, and the viewport itself never slides: x auto-range is disabled
+entirely (`self.plot.vb.enableAutoRange(x=False)`, set once in
+__init__) and every refresh pins it to exactly
+(-History.window_s, 0) via `setXRange(..., padding=0.01)` - the same
+two numbers every tick, so the axis never re-labels and the "data
+block marching across the view" artifact of an absolute time axis
+cannot occur. Y auto-range stays on (`enableAutoRange(y=True)`),
+adapting only to the currently-visible data. Event markers and the
+jump cursor (see "Cursor sync" below) store their ABSOLUTE
+time.monotonic t and are repositioned every refresh (t - now) so they
+scroll left with their moment in history, exactly like the data
+curves. `self._t0` (dock-open time, still captured at construction)
+is no longer used for axis positioning - only `self._last_now` is;
+it survives only as a convenience anchor for a few tests.
 
 Gap honesty (spec 6.7): consecutive samples more than 3x the median
 sample interval apart get a NaN inserted between them, and every curve
@@ -64,12 +75,15 @@ Cursor sync (event-log-to-scope focus): `jump_to(t)` places (or moves)
 a single cursor `pg.InfiniteLine` at t, styled distinctly from event
 markers (dashed blue vs. solid red) so the two are never confused, and
 flashes whichever marker in `_markers` is nearest to t so the user can
-see which annotation the cursor landed on. `t` is in the same
-time.monotonic domain as `self._t0` and `add_event_marker`'s own t -
-positioned the same way, `x = t - self._t0`. `cursor_time()` returns
-the raw t last passed to jump_to(), or None before the cursor has ever
-been placed - fed by MainWindow._on_log_time_focus, itself wired to
-EventLog's new on_event_time callback (an event-log row click).
+see which annotation the cursor landed on. `t` is an ABSOLUTE
+time.monotonic value, stored as-is - `cursor_time()` returns exactly
+this t back, never a relative one - and positioned the same way
+`add_event_marker`'s own t is, `x = t - self._last_now`, repositioned
+on every refresh_plot() tick the same way so it scrolls left with its
+moment in history, exactly like a real scope annotation. Before the
+cursor has ever been placed, `cursor_time()` returns None - fed by
+MainWindow._on_log_time_focus, itself wired to EventLog's new
+on_event_time callback (an event-log row click).
 
 ELF symbol picker: "Load ELF..." opens a
 QFileDialog (the one dialog this panel uses - everything else is
@@ -240,7 +254,13 @@ class ScopePage(QWidget):
         super().__init__(parent)
         self.engine = engine
         self.frozen = False
+        # _t0 (dock-open time) no longer drives axis positioning - see
+        # the module docstring's "X axis" paragraph for roll mode.
+        # Kept only as a construction-time anchor a few tests use for
+        # convenience; refresh_plot()/add_event_marker()/jump_to() all
+        # key off _last_now instead.
         self._t0 = time.monotonic()
+        self._last_now = self._t0
         self._channels: Dict[str, dict] = {}
         self._markers: List[Tuple[float, pg.InfiniteLine]] = []
         self._cursor_t: Optional[float] = None
@@ -421,14 +441,21 @@ class ScopePage(QWidget):
         outer.addWidget(self.side_scroll)
 
         plot_side = QVBoxLayout()
-        self.time_label = QLabel("t=-- s")
+        self.time_label = QLabel("t-now = -- s")
         plot_side.addWidget(self.time_label)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_widget.setLabel("bottom", "t", units="s")
+        self.plot_widget.setLabel("bottom", "t - now", units="s")
         self.plot = self.plot_widget.getPlotItem()
         self.plot.addLegend()
+        # Roll mode (standard-scope style): x auto-range is disabled
+        # entirely - refresh_plot() pins the viewport to a fixed
+        # (-window_s, 0) every tick instead, so the axis never
+        # re-labels and the view never "marches" as data ages. Y
+        # auto-range stays on, adapting only to the currently-visible
+        # data.
+        self.plot.vb.enableAutoRange(x=False, y=True)
         plot_side.addWidget(self.plot_widget, 1)
 
         plot_container = QWidget()
@@ -670,7 +697,14 @@ class ScopePage(QWidget):
     # -- event markers ---------------------------------------------------
 
     def add_event_marker(self, t: float, msg: str) -> None:
-        x = t - self._t0
+        # Roll mode: positioned in the same reference frame the
+        # currently-painted curves use (self._last_now, set by the
+        # most recent refresh_plot()) rather than a fresh
+        # time.monotonic() call - _prune_markers() below repositions
+        # every marker, this one included, on the very next refresh
+        # tick regardless, so this is only the placement seen for the
+        # brief window until that tick.
+        x = t - self._last_now
         short = msg if len(msg) <= 24 else msg[:21] + "..."
         line = pg.InfiniteLine(
             pos=x, angle=90, pen=pg.mkPen(color=MARKER_PEN, width=1),
@@ -686,12 +720,18 @@ class ScopePage(QWidget):
             self.plot.removeItem(oldest_line)
 
     def _prune_markers(self, now: float) -> None:
+        """Drop markers older than the History window, and - roll
+        mode - reposition every surviving one to t - now so it scrolls
+        left with its moment in history, exactly like the data curves
+        (markers store the ABSOLUTE t they were given; only their
+        on-screen x is relative-to-now)."""
         window = self.engine.history.window_s
         kept = []
         for t, line in self._markers:
             if now - t > window:
                 self.plot.removeItem(line)
             else:
+                line.setPos(t - now)
                 kept.append((t, line))
         self._markers = kept
 
@@ -699,13 +739,16 @@ class ScopePage(QWidget):
 
     def jump_to(self, t: float) -> None:
         """Place (or move) the scope cursor at t and flash the nearest
-        event marker. t is in the same time.monotonic domain as
-        self._t0 - positioned the same way add_event_marker positions
-        a marker, x = t - self._t0. The cursor's pen (dashed blue) is
-        deliberately distinct from a marker's (solid red) so the two
-        are never confused on the plot."""
+        event marker. t is an ABSOLUTE time.monotonic value, stored
+        as-is (cursor_time() returns exactly this t back) - positioned
+        the same way add_event_marker positions a marker, x = t -
+        self._last_now, and repositioned every refresh_plot() tick
+        the same way (t - now) so it scrolls left with its moment in
+        history, exactly like a real scope annotation. The cursor's
+        pen (dashed blue) is deliberately distinct from a marker's
+        (solid red) so the two are never confused on the plot."""
         self._cursor_t = t
-        x = t - self._t0
+        x = t - self._last_now
         if self._cursor_line is None:
             self._cursor_line = pg.InfiniteLine(
                 pos=x, angle=90,
@@ -747,15 +790,24 @@ class ScopePage(QWidget):
     def refresh_plot(self) -> None:
         self._refresh_reg_combo()
         now = time.monotonic()
+        self._last_now = now
         for key, entry in self._channels.items():
             series = self.engine.history.series(key)
             self._last_series[key] = series
-            x, y = _gapped_xy(series, self._t0)
+            x, y = _gapped_xy(series, now)
             y = _apply_transform(y, entry["transform"])
             entry["curve"].setData(x, y, connect="finite")
             entry["rate"] = _effective_rate_hz(series, now)
             entry["item"].setText(self._row_text(key))
         self._prune_markers(now)
+        if self._cursor_line is not None:
+            self._cursor_line.setPos(self._cursor_t - now)
+        # Roll mode: the viewport is pinned to a fixed window every
+        # tick rather than left to auto-range - x auto-range was
+        # disabled once, in __init__, so this setXRange is the only
+        # thing moving the x axis at all, and it moves the SAME two
+        # numbers every time (the axis never re-labels).
+        self.plot.setXRange(-self.engine.history.window_s, 0, padding=0.01)
         self._update_budget_label()
 
     # -- bandwidth budget indicator -----------------------------------------
@@ -800,7 +852,10 @@ class ScopePage(QWidget):
         entry = self._channels[key]
         text = "%s  (%.1f Hz)" % (entry["label"], entry["rate"])
         if self._crosshair_t is not None:
-            raw_t = self._crosshair_t + self._t0
+            # roll mode: the crosshair's x is relative to the last
+            # refresh's now, not the obsolete dock-open self._t0 - see
+            # the module docstring's "X axis" paragraph.
+            raw_t = self._crosshair_t + self._last_now
             value = value_at(self._last_series.get(key, []), raw_t)
             if value is None:
                 value_text = "--"
@@ -824,11 +879,13 @@ class ScopePage(QWidget):
 
     def _update_crosshair(self, view_t: float) -> None:
         """Move the crosshair to view_t - plot-relative seconds, the
-        same domain mapSceneToView's x is in (t - self._t0) - and
-        refresh every channel row's raw-value suffix plus the time
-        label. Reads only self._last_series, populated by the most
-        recent refresh_plot(): no engine.history.series() call here,
-        so a mouse-move event costs no History copy of its own."""
+        same domain mapSceneToView's x is in (roll mode: sample_t -
+        self._last_now, the last refresh's now; see the module
+        docstring's "X axis" paragraph) - and refresh every channel
+        row's raw-value suffix plus the time label. Reads only
+        self._last_series, populated by the most recent
+        refresh_plot(): no engine.history.series() call here, so a
+        mouse-move event costs no History copy of its own."""
         self._crosshair_t = view_t
         if self._crosshair_line is None:
             self._crosshair_line = pg.InfiniteLine(
@@ -843,7 +900,7 @@ class ScopePage(QWidget):
         else:
             self._crosshair_line.setPos(view_t)
         self._crosshair_line.show()
-        self.time_label.setText("t=%.3f s" % view_t)
+        self.time_label.setText("t-now = %.2f s" % view_t)
         for key in self._channels:
             self._channels[key]["item"].setText(self._row_text(key))
 

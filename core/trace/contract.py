@@ -100,6 +100,9 @@ def parse_desc(words: List[int]) -> TraceDesc:
 
     if version != VERSION:
         raise ContractError("unsupported trace version {0}".format(version))
+    if max_ch != MAX_CH:
+        raise ContractError(
+            "unsupported channel count {0}".format(max_ch))
 
     return TraceDesc(endian=endian, version=version, max_ch=max_ch,
                      status=status, period_us=period_us,

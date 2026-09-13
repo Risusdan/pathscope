@@ -1,3 +1,5 @@
+import struct
+
 import pytest
 from core.trace.contract import (MAGIC, VERSION, MAX_CH, RECORD_SIZE,
                                  ContractError, TraceDesc, encode_desc,
@@ -38,6 +40,17 @@ def test_bad_magic_and_version_raise():
                       generation=0, status=0, endian="<", version=9)
     with pytest.raises(ContractError):
         parse_desc(bad)
+
+def test_bad_max_ch_raises():
+    words = _desc_words("<")
+    # max_ch is the u8 at byte offset 6 of the descriptor, inside
+    # word index 1 (bytes 4-7), byte position 2 within that word.
+    word_idx, byte_pos = 6 // 4, 6 % 4
+    raw = bytearray(struct.pack("<I", words[word_idx]))
+    raw[byte_pos] = 12
+    words[word_idx] = struct.unpack("<I", bytes(raw))[0]
+    with pytest.raises(ContractError):
+        parse_desc(words)
 
 def test_record_word_addr_wraps():
     d = parse_desc(_desc_words("<"))

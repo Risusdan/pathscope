@@ -23,7 +23,7 @@ pathscope = "cli:main"
 
 [tool.setuptools]
 packages = [
-    "core", "core.adapter", "core.engine", "core.target",
+    "core", "core.adapter", "core.engine", "core.target", "core.trace",
     "ui", "ui.diagram", "ui.panels",
 ]
 py-modules = ["cli"]

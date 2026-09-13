@@ -34,9 +34,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "block (opens the register inspector on it) "
                         "before saving the frame")
     p.add_argument("--shot-scope", action="store_true",
-                   help="manual check only, requires --shot: open the "
-                        "Scope dock, add a DMA2.S0NDTR channel, and wait "
-                        "for samples before saving the frame")
+                   help="manual check only, requires --shot: switch to "
+                        "the Scope tab, add a DMA2.S0NDTR channel, and "
+                        "wait for samples before saving the frame")
     return p
 
 

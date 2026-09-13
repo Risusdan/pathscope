@@ -10,7 +10,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction, QPainter
 from PySide6.QtWidgets import (QDockWidget, QGraphicsView, QLabel,
                                QMainWindow, QSizePolicy, QStackedWidget,
-                               QToolBar, QWidget)
+                               QTabWidget, QToolBar, QWidget)
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
@@ -57,7 +57,9 @@ class MainWindow(QMainWindow):
         self.view = _DiagramView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
-        self.setCentralWidget(self.view)
+        # (central widget is set below, by _build_central_tabs() - the
+        # view becomes tab 0 of a Data Path/Scope QTabWidget rather
+        # than the window's sole central widget.)
 
         self._flow_edges = build_flow_edge_map(engine.topology,
                                                engine.flowspec)
@@ -66,10 +68,10 @@ class MainWindow(QMainWindow):
         self._mux_select_ref = self._find_mux_select(engine)
 
         self.scope_page = None
-        self.scope_dock = None
 
         self._build_toolbar()
         self._build_docks()
+        self._build_central_tabs()
         self.diagram_state.on_block_clicked = self._select_block
         self.diagram_state.on_edge_clicked = self._on_edge_clicked
         self.diagram_state.on_badge_clicked = self._on_badge_clicked
@@ -197,7 +199,14 @@ class MainWindow(QMainWindow):
         page (block clicks, Task 10), the flow page (edge clicks,
         Task 11), and the memory page (memory-kind block clicks, Task
         12). Bottom "Event log" dock: same size (140px) as the
-        prototype's `dock2`."""
+        prototype's `dock2`.
+
+        Inspector's visibility is now tied to which central tab is
+        active (_on_tab_changed, below - visible only on Data Path; a
+        full-page Scope has no room for it and it is irrelevant
+        there). Event log stays visible on both tabs - events matter
+        to both, and scope markers come from the same update stream -
+        so nothing here toggles log_dock."""
         self.reg_page = RegisterPage(self.engine)
         self.flow_page = FlowPage(self.engine)
         self.mem_page = MemoryPage(self.engine)
@@ -205,10 +214,10 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.reg_page)
         self.stack.addWidget(self.flow_page)
         self.stack.addWidget(self.mem_page)
-        dock = QDockWidget("Inspector", self)
-        dock.setWidget(self.stack)
-        dock.setMinimumWidth(300)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.inspector_dock = QDockWidget("Inspector", self)
+        self.inspector_dock.setWidget(self.stack)
+        self.inspector_dock.setMinimumWidth(300)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.inspector_dock)
 
         self.event_log = EventLog()
         self.log_dock = QDockWidget("Event log", self)
@@ -216,6 +225,31 @@ class MainWindow(QMainWindow):
         self.log_dock.setMinimumHeight(100)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
         self.resizeDocks([self.log_dock], [140], Qt.Vertical)
+
+    def _build_central_tabs(self) -> None:
+        """Central widget: two full-page tabs, "Data Path" (the
+        existing diagram QGraphicsView) and "Scope" - replacing the
+        old diagram-plus-docked-scope stack per a UX finding: when
+        watching the scope the diagram is irrelevant, and both were
+        cramped sharing the window.
+
+        The Scope tab starts as a plain placeholder label; the real
+        ScopePage (and its pyqtgraph import) is constructed lazily on
+        first activation, in _activate_scope_tab() - same "pay the
+        import cost only if the user ever visits it" rule the old
+        dock-based _toggle_scope used. currentChanged is connected
+        only after both tabs are added, so building this method's own
+        two initial tabs never fires _on_tab_changed (which reaches
+        into self.inspector_dock/self.scope_act - both must already
+        exist; _build_docks() and _build_toolbar() run before this in
+        __init__)."""
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.view, "Data Path")
+        self._scope_placeholder = QLabel("Loading Scope...")
+        self._scope_placeholder.setAlignment(Qt.AlignCenter)
+        self.tabs.addTab(self._scope_placeholder, "Scope")
+        self.setCentralWidget(self.tabs)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def fit_view(self) -> None:
         rect = self.scene.itemsBoundingRect()
@@ -244,39 +278,60 @@ class MainWindow(QMainWindow):
             self._apply(self.last_update)
 
     def _toggle_scope(self, on: bool) -> None:
-        """Wired to the toolbar's "Scope" action. Lazy dock creation
-        (per the M6 scope-view plan): the pyqtgraph-importing module is
-        only imported here, on first open, not at MainWindow import time -
-        pyqtgraph's import cost is paid only if the user ever opens
-        the scope. Docked bottom-tabbed next to the event log."""
-        if self.scope_dock is None:
-            from .panels.scope_page import ScopePage
-            self.scope_page = ScopePage(self.engine)
-            self.scope_page.set_frozen(self.frozen)
-            self.scope_dock = QDockWidget("Scope", self)
-            self.scope_dock.setWidget(self.scope_page)
-            self.scope_dock.setMinimumHeight(200)
-            self.addDockWidget(Qt.BottomDockWidgetArea, self.scope_dock)
-            self.tabifyDockWidget(self.log_dock, self.scope_dock)
-            self.scope_dock.visibilityChanged.connect(
-                self._on_scope_visibility_changed)
-        self.scope_dock.setVisible(on)
-        if on:
-            self.scope_dock.raise_()
+        """Wired to the toolbar's "Scope" action - now a tab shortcut
+        rather than a dock-visibility toggle (the old dock-stack
+        layout was replaced by full-page Data Path/Scope tabs).
+        Checking it switches to the Scope tab; unchecking switches
+        back to Data Path. _on_tab_changed mirrors the action's
+        checked state back the other way too, for a plain tab-bar
+        click, so the two stay in sync regardless of entry point."""
+        self.tabs.setCurrentIndex(1 if on else 0)
 
-    def _on_scope_visibility_changed(self, visible: bool) -> None:
-        """Wired to scope_dock.visibilityChanged so the toolbar's
-        Scope action tracks the dock's actual visibility, including
-        when the user closes it via its titlebar X - which hides the
-        dock without going through _toggle_scope, leaving scope_act
-        checked with no dock showing (two clicks needed to reopen).
-        blockSignals guards against recursion: without it,
-        setChecked() below would re-fire scope_act.toggled ->
-        _toggle_scope -> scope_dock.setVisible(), re-entering this
-        slot."""
+    def _on_tab_changed(self, index: int) -> None:
+        """Wired to self.tabs.currentChanged. Keeps the Inspector dock
+        visible only on the Data Path tab (index 0) - a full-page
+        Scope has no room for it and it is irrelevant there - and the
+        toolbar's Scope action's checked state mirroring whichever tab
+        is active, including a plain tab-bar click (not just the
+        toolbar action). blockSignals guards against recursion: an
+        unblocked setChecked() would re-fire scope_act.toggled ->
+        _toggle_scope -> tabs.setCurrentIndex(), re-entering this slot.
+        Event log dock is untouched here - it stays visible on both
+        tabs. Lazily constructs the real ScopePage the first time the
+        Scope tab is activated."""
+        on_scope = index == 1
+        self.inspector_dock.setVisible(not on_scope)
         self.scope_act.blockSignals(True)
-        self.scope_act.setChecked(visible)
+        self.scope_act.setChecked(on_scope)
         self.scope_act.blockSignals(False)
+        if on_scope and self.scope_page is None:
+            self._activate_scope_tab()
+
+    def _activate_scope_tab(self) -> None:
+        """Lazy construction (per the M6 scope-view plan): the
+        pyqtgraph-importing module is only imported here, on first
+        activation of the Scope tab, not at MainWindow import time -
+        pyqtgraph's import cost is paid only if the user ever visits
+        it. Swaps the placeholder widget _build_central_tabs() inserted
+        for a real ScopePage at the same tab index (1).
+
+        removeTab() on the then-current placeholder tab makes Qt
+        switch currentIndex away and back as this runs (to index 0,
+        since index 1 is being removed, then back to 1 via the
+        explicit setCurrentIndex below), re-entering _on_tab_changed
+        twice more along the way. Both re-entries are harmless: the
+        dock-visible/action-checked state they set is overwritten by
+        the next step, and the `scope_page is None` guard above (set
+        non-None before either removeTab or insertTab run) prevents a
+        second construction - the method converges on Scope, active,
+        with the real page in place."""
+        from .panels.scope_page import ScopePage
+        self.scope_page = ScopePage(self.engine)
+        self.scope_page.set_frozen(self.frozen)
+        self.tabs.removeTab(1)
+        self.tabs.insertTab(1, self.scope_page, "Scope")
+        self.tabs.setCurrentIndex(1)
+        self._scope_placeholder = None
 
     def _toggle_tint(self, on: bool) -> None:
         self.diagram_state.tinted = on
@@ -371,9 +426,9 @@ class MainWindow(QMainWindow):
     def _on_log_time_focus(self, t: float) -> None:
         """Wired to event_log.on_event_time (EventLog row click, for a
         row that carries an event time - the event-to-scope cursor
-        sync). Routes to the scope dock's cursor; a no-op if the Scope
-        dock has never been opened, same "dock may not exist yet" guard
-        apply_update() already uses for add_event_marker."""
+        sync). Routes to the scope page's cursor; a no-op if the Scope
+        tab has never been activated, same "page may not exist yet"
+        guard apply_update() already uses for add_event_marker."""
         if self.scope_page is not None:
             self.scope_page.jump_to(t)
 

@@ -47,38 +47,49 @@ def _compile(ev: Evaluator, expr: str, where: str) -> CompiledExpr:
         raise FlowError("%s: %s" % (where, e))
 
 
+def _required(mapping, key: str, where: str):
+    try:
+        return mapping[key]
+    except KeyError:
+        raise FlowError("%s: missing required key %r" % (where, key))
+
+
 def load_flows(path: str, evaluator: Evaluator,
                topology: Topology) -> FlowSpec:
     with open(path) as f:
         doc = yaml.safe_load(f)
     activities: List[Activity] = []
     for raw in doc.get("activities", []):
-        name = raw["name"]
-        act_path = raw["path"]
+        where = "activity %s" % raw.get("name", "<name?>")
+        name = _required(raw, "name", where)
+        act_path = _required(raw, "path", where)
         for bid in act_path:
             if bid not in topology.blocks:
-                raise FlowError("activity %s: unknown block %r"
-                                % (name, bid))
-        active = _compile(evaluator, raw["active_when"],
-                          "activity %s active_when" % name)
+                raise FlowError("%s: unknown block %r"
+                                % (where, bid))
+        active_when = _required(raw, "active_when", where)
+        active = _compile(evaluator, active_when,
+                          "%s active_when" % where)
         progress = raw.get("progress")
         if progress is not None:
             try:
                 progress = evaluator.model.resolve(progress).reg_key
             except SvdError as e:
-                raise FlowError("activity %s progress: %s" % (name, e))
+                raise FlowError("%s progress: %s" % (where, e))
         rules: List[Rule] = []
         for r in raw.get("anomalies", []):
-            target = r["target"]
+            rule_expr = _required(r, "rule", where)
+            msg = _required(r, "msg", where)
+            target = _required(r, "target", where)
             if target not in topology.blocks:
-                raise FlowError("activity %s rule target unknown: %r"
-                                % (name, target))
+                raise FlowError("%s rule target unknown: %r"
+                                % (where, target))
             rules.append(Rule(
-                expr=r["rule"], msg=r["msg"], target=target,
-                compiled=_compile(evaluator, r["rule"],
-                                  "activity %s rule" % name)))
+                expr=rule_expr, msg=msg, target=target,
+                compiled=_compile(evaluator, rule_expr,
+                                  "%s rule" % where)))
         activities.append(Activity(
-            name=name, path=act_path, active_when=raw["active_when"],
+            name=name, path=act_path, active_when=active_when,
             active_compiled=active, progress=progress, rules=rules))
     force = []
     for ref in (doc.get("poll", {}) or {}).get("force_poll", []) or []:

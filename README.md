@@ -65,7 +65,7 @@ code.
            active_when: "DMA2.S0CR.EN == 1"
            progress: "DMA2.S0NDTR"
            anomalies:
-             - {rule: "ADC1.SR.OVR == 1", msg: "ADC overrun, data lost"}
+             - {rule: "ADC1.SR.OVR == 1", msg: "ADC overrun, data lost", target: adc1}
        poll:
          guarded: ["ADC1.DR"]   # has a read side effect; never auto-polled
 

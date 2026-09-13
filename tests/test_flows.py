@@ -72,3 +72,19 @@ def test_guarded_overlay_unknown_ref_rejected(env):
                          "force_poll: []\n  guarded: [\"GHOST.REG\"]")
     with pytest.raises(FlowError):
         _load(env, text)
+
+
+def test_missing_anomaly_target_rejected(env):
+    text = FLOWS.replace(
+        '{rule: "ADC1.SR.OVR == 1", msg: "ADC overrun", target: adc1}',
+        '{rule: "ADC1.SR.OVR == 1", msg: "ADC overrun"}')
+    with pytest.raises(FlowError):
+        _load(env, text)
+
+
+def test_missing_active_when_rejected(env):
+    text = FLOWS.replace(
+        '    active_when: "DMA2.S0CR.EN == 1 and DMA2.S0CR.CHSEL == 0"\n',
+        '')
+    with pytest.raises(FlowError):
+        _load(env, text)

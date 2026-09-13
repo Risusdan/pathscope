@@ -122,6 +122,11 @@ void ps_trace_sample(void)
 
     /* Publish barrier: every other field of this record has been
        written above; wr_seq is the host's torn-read guard, so it must
-       be the last store this function makes. */
+       be the last store this function makes. The DMB below is
+       required alongside the ordering: the debug probe is an
+       independent bus master (ARM AN321), so without it the record
+       writes could still sit in the CPU's write buffer, undrained to
+       SRAM, at the moment wr_seq becomes visible over SWD/DAP. */
+    __asm volatile ("dmb" ::: "memory");
     ps_trace_desc.wr_seq++;
 }

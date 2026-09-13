@@ -342,6 +342,14 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
 
 ## 11. Out of Scope for MVP (recorded for later)
 
+- Fault snapshot: on an anomaly rule's rising edge, attach the engine's
+  current Snapshot (the very data the rule fired on) to the AnomalyEvent;
+  clicking the event-log row shows the register state at fault time even
+  after the condition has passed. The engine already holds the snapshot
+  at detection time, so the cost is plumbing plus a read-only inspector
+  view; high debugging value for transient faults. (Hardware-session
+  request, 2026-09-13.)
+
 - Additional block kinds. The topology `kind` set (peripheral, dma,
   memory, cpu, interconnect, mux, pin) is an extensible whitelist: a
   kind only drives load-time validation, diagram styling, and the

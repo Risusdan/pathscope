@@ -477,7 +477,7 @@ def test_channel_table_has_spec_columns_and_default_type(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    assert page.channel_table.columnCount() == 8
+    assert page.channel_table.columnCount() == 7
 
     key = "DMA2.S0NDTR"
     page.add_channel(key)
@@ -619,29 +619,6 @@ def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
     assert page.symbol_list.count() == 1
 
 
-def test_fit_button_toggles_fill_own_label(qtbot):
-    """Per-row Fit toggle (spec point 4): starts at "fill" (button
-    text "Fill") and flips to "own" ("Own") and back on each click -
-    the actual lane math lands with Auto-lane in a later commit, but
-    the per-row state and its label already exist here."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    entry = page._channels[key]
-    assert entry["fit"] == "fill"
-    assert entry["fit_btn"].text() == "Fill"
-
-    entry["fit_btn"].click()
-    assert entry["fit"] == "own"
-    assert entry["fit_btn"].text() == "Own"
-
-    entry["fit_btn"].click()
-    assert entry["fit"] == "fill"
-    assert entry["fit_btn"].text() == "Fill"
-
-
 def test_rename_channel_via_table_updates_label_and_legend(qtbot):
     """Name is inline-editable too (spec point 2: "ALL
     inline-editable") - committing an edit to the Name cell updates
@@ -690,47 +667,36 @@ def test_fit_scale_offset_flat_window_centers_on_band():
     assert (0.0 - offset) * scale == pytest.approx(0.5)
 
 
-def test_auto_lane_fills_and_stacks_own_channels(qtbot):
-    """Auto-lane (spec point 4): a "fill" channel's own window maps to
-    the full [0, 1] view; "own" channels split [0, 1] into as many
-    equal bands as there are "own" channels, each mapping its own
-    window into just its band, in table (add) order."""
+def test_auto_lane_stacks_every_channel_into_own_lane(qtbot):
+    """Auto-lane (spec point 4, simplified - the per-row Fill/Own Fit
+    column is gone): every channel gets one equal band of the [0, 1]
+    view, in add order, its own window min..max mapped into just its
+    band."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
     t0 = page._t0
 
-    fill_key = "DMA2.S0NDTR"
-    page.add_channel(fill_key)
+    key1 = "DMA2.S0NDTR"
+    page.add_channel(key1)
     for i, v in enumerate([100, 200, 300]):
-        engine.history.record(fill_key, t0 + i * 0.1, v)
+        engine.history.record(key1, t0 + i * 0.1, v)
 
-    own_key1 = "SCOPE.OWN1"
-    page.add_channel(own_key1)
-    page._channels[own_key1]["fit_btn"].click()
-    for i, v in enumerate([0, 100]):
-        engine.history.record(own_key1, t0 + i * 0.1, v)
-
-    own_key2 = "SCOPE.OWN2"
-    page.add_channel(own_key2)
-    page._channels[own_key2]["fit_btn"].click()
+    key2 = "SCOPE.LANE2"
+    page.add_channel(key2)
     for i, v in enumerate([1000, 2000]):
-        engine.history.record(own_key2, t0 + i * 0.1, v)
+        engine.history.record(key2, t0 + i * 0.1, v)
 
     page.auto_lane_check.setChecked(True)
     page.refresh_plot()
 
-    fill_ys = page.curve_y(fill_key)
-    assert min(fill_ys) == pytest.approx(0.0)
-    assert max(fill_ys) == pytest.approx(1.0)
+    ys1 = page.curve_y(key1)
+    assert min(ys1) == pytest.approx(0.0)
+    assert max(ys1) == pytest.approx(0.5)
 
-    own1_ys = page.curve_y(own_key1)
-    assert min(own1_ys) == pytest.approx(0.0)
-    assert max(own1_ys) == pytest.approx(0.5)
-
-    own2_ys = page.curve_y(own_key2)
-    assert min(own2_ys) == pytest.approx(0.5)
-    assert max(own2_ys) == pytest.approx(1.0)
+    ys2 = page.curve_y(key2)
+    assert min(ys2) == pytest.approx(0.5)
+    assert max(ys2) == pytest.approx(1.0)
 
 
 def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
@@ -754,31 +720,6 @@ def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
     page.auto_lane_check.setChecked(False)
     page.refresh_plot()
     assert page._channels[key]["transform"] == computed
-
-
-def test_fit_click_does_one_shot_pass_even_with_auto_lane_off(qtbot):
-    """T5 hardware finding: clicking a row's Fit button must perform
-    one fit pass right now (a scope autoset), even while Auto-lane is
-    unchecked - not just silently regroup for a computation that
-    never runs."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
-    engine.history.record(key, t0 + 0.1, 300)
-
-    assert not page.auto_lane_check.isChecked()
-    assert page._channels[key]["transform"] == {"scale": 1.0,
-                                                "offset": 0.0}
-
-    page._channels[key]["fit_btn"].click()
-    computed = dict(page._channels[key]["transform"])
-    assert computed != {"scale": 1.0, "offset": 0.0}
-    # and the computed values landed in the editable fields.
-    assert page._channels[key]["scale_edit"].text() != "1"
 
 
 def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):

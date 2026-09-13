@@ -117,8 +117,8 @@ from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton,
-                               QScrollArea, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QScrollArea, QSplitter, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -154,18 +154,10 @@ MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 
-# Side panel width (also used by side_widget.setMaximumWidth() below).
-# v2's channel table is the hero of this panel (spec point 2: 8
-# columns - swatch/name/type/Value/Hz/scale/offset/Fit) and needs
-# meaningfully more width than the old list+strip design's 260px to
-# stay readable; the plot area still gets the rest of the window via
-# outer's stretch factor.
-SIDE_MAX_WIDTH = 600
-
 # Channel table columns (spec point 2).
 COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, COL_SCALE, \
-    COL_OFFSET, COL_FIT = range(8)
-COLUMN_LABELS = ["", "Name", "Type", "Value", "Hz", "Scale", "Offset", "Fit"]
+    COL_OFFSET = range(7)
+COLUMN_LABELS = ["", "Name", "Type", "Value", "Hz", "Scale", "Offset"]
 
 # Type decode set (spec point 3): display-side only, core untouched.
 # Each spec is (bit width, signed?, shift-from-bit-0); f32 is handled
@@ -354,7 +346,7 @@ def _apply_transform(ys: List[float], transform: dict) -> List[float]:
     (see _gapped_xy): y' = (y - offset) * scale. NaN gap placeholders
     pass through untouched, since a gap's midpoint carries no real
     sample to scale. Normalize (the old single-channel-only 0..1
-    mapping) is gone (spec point 4) - Fit/Auto-lane replace it by
+    mapping) is gone (spec point 4) - Auto-lane replaces it by
     computing this same scale/offset pair instead of a separate
     transform mode (see _fit_scale_offset). Pure python lists
     throughout - no numpy dependency."""
@@ -401,19 +393,61 @@ class ScopePage(QWidget):
         # no selection, which hides the axis's tick numbers entirely
         # rather than showing a meaningless shared scale.
         self._selected_key: Optional[str] = None
-        # Auto-lane (spec point 4): while on, every refresh_plot() tick
-        # recomputes scale/offset for all channels from their per-row
-        # Fit setting (see _apply_auto_lane) instead of leaving
-        # whatever was last typed into the scale/offset cells.
+        # Auto-lane (spec point 4, simplified after the per-row Fit
+        # column was dropped as redundant with hand-tuned
+        # scale/offset): while on, every refresh_plot() tick stacks
+        # ALL channels into equal horizontal bands (one lane each, in
+        # add order - see _apply_auto_lane), writing the computed
+        # scale/offset into the editable cells; while off, the cells
+        # are whatever was last computed or typed.
         self._auto_lane = False
 
-        outer = QHBoxLayout(self)
+        # Top-bottom layout (a T5 hardware finding replacing the
+        # original left-right split): the channel table needs the
+        # window's full width to show its 7 columns comfortably, so
+        # the controls block sits ON TOP of the plot, the two joined
+        # by a draggable vertical splitter. The page's first row is
+        # the time label + big Run/Stop - keeping Run/Stop at the
+        # page's top-right, the same spot as the Data Path page's.
+        outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
+
+        top_row = QHBoxLayout()
+        self.time_label = QLabel("t-now = -- s")
+        top_row.addWidget(self.time_label)
+        # Inline error surface (never a dialog, per the class-level
+        # convention) - lives on the always-visible top row, NOT
+        # inside the scrollable controls block, so an error can't be
+        # scrolled out of sight.
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #C62828;")
+        top_row.addWidget(self.error_label, 1)
+        # The scope page's own big Run/Stop button (spec point 1),
+        # this page's only run/stop control besides spacebar
+        # (keyPressEvent below) - checkable so its own pressed-look
+        # tracks state too.
+        self.run_stop_btn = QPushButton("Stop")
+        self.run_stop_btn.setCheckable(True)
+        self.run_stop_btn.setMinimumHeight(36)
+        self.run_stop_btn.setMinimumWidth(100)
+        self.run_stop_btn.clicked.connect(self._on_run_stop_clicked)
+        top_row.addWidget(self.run_stop_btn)
+        outer.addLayout(top_row)
 
         side = QVBoxLayout()
         channels_header = QHBoxLayout()
         channels_header.addWidget(QLabel("Channels"))
         channels_header.addStretch(1)
+        # window/budget moved up from the block's bottom (spec point
+        # 8 predates the top-bottom layout): at the bottom of a
+        # scrollable block they were the first thing scrolled out of
+        # sight, and the budget indicator is exactly what should stay
+        # visible while channels are added.
+        self.window_label = QLabel(
+            "window: %.0f s (History)" % engine.history.window_s)
+        channels_header.addWidget(self.window_label)
+        self.budget_label = QLabel("")
+        channels_header.addWidget(self.budget_label)
         self.auto_lane_check = QCheckBox("Auto-lane")
         self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
         channels_header.addWidget(self.auto_lane_check)
@@ -439,7 +473,6 @@ class ScopePage(QWidget):
         self.channel_table.setColumnWidth(COL_HZ, 48)
         self.channel_table.setColumnWidth(COL_SCALE, 64)
         self.channel_table.setColumnWidth(COL_OFFSET, 64)
-        self.channel_table.setColumnWidth(COL_FIT, 44)
         self.channel_table.itemChanged.connect(self._on_item_changed)
         self.channel_table.itemSelectionChanged.connect(
             self._on_table_selection_changed)
@@ -515,67 +548,26 @@ class ScopePage(QWidget):
         self.elf_content.setVisible(False)
         side.addWidget(self.elf_content)
 
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #C62828;")
-        self.error_label.setWordWrap(True)
-        side.addWidget(self.error_label)
-
-        self.window_label = QLabel(
-            "window: %.0f s (History)" % engine.history.window_s)
-        side.addWidget(self.window_label)
-
-        # Bandwidth budget indicator (spec point 8: "budget label
-        # bottom") - last widget in the side column.
-        self.budget_label = QLabel("")
-        side.addWidget(self.budget_label)
-
         side_widget = QWidget()
         side_widget.setLayout(side)
 
-        # The side panel's content (channel table, add rows, ELF
+        # The controls block's content (channel table, add rows, ELF
         # section, Remove channel, window/budget labels) can exceed
-        # the dock's height at typical sizes - without a scroll area,
-        # the bottom controls are pushed off-screen with no way to
-        # reach them (a hardware-session screenshot showed the panel
-        # cut off at "Add symbol"). setWidgetResizable(True) lets
+        # its splitter pane's height - without a scroll area, the
+        # bottom controls are pushed off-screen with no way to reach
+        # them (a hardware-session screenshot showed the panel cut
+        # off at "Add symbol"). setWidgetResizable(True) lets
         # side_widget track the viewport's width (so its own child
         # layouts still fill it horizontally) while its height is free
-        # to exceed the viewport and scroll.
+        # to exceed the viewport and scroll. Full window width now -
+        # the old fixed side-column width went with the left-right
+        # layout.
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarAlwaysOff)
         self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.side_scroll.setWidget(side_widget)
-        # A QScrollArea's own sizeHint doesn't grow to fit its content
-        # even with setWidgetResizable(True) - only setMaximumWidth
-        # left the layout free to squeeze it down to a small default,
-        # which is exactly what left the channel table showing 2-3 of
-        # its 8 columns behind a horizontal scrollbar in practice.
-        # Fixing min==max makes this a genuinely fixed-width column
-        # sized to fit the table (spec point 2's "hero" column widths
-        # above sum to it), not just capped from growing further.
-        self.side_scroll.setMinimumWidth(SIDE_MAX_WIDTH)
-        self.side_scroll.setMaximumWidth(SIDE_MAX_WIDTH)
-        outer.addWidget(self.side_scroll)
-
-        plot_side = QVBoxLayout()
-
-        top_row = QHBoxLayout()
-        self.time_label = QLabel("t-now = -- s")
-        top_row.addWidget(self.time_label, 1)
-        # The scope page's own big Run/Stop button (spec point 1),
-        # this page's only run/stop control besides spacebar
-        # (keyPressEvent below) - checkable so its own pressed-look
-        # tracks state too. Sits top-right, the same position as the
-        # Data Path page's own Run/Stop, deliberately.
-        self.run_stop_btn = QPushButton("Stop")
-        self.run_stop_btn.setCheckable(True)
-        self.run_stop_btn.setMinimumHeight(36)
-        self.run_stop_btn.setMinimumWidth(100)
-        self.run_stop_btn.clicked.connect(self._on_run_stop_clicked)
-        top_row.addWidget(self.run_stop_btn)
-        plot_side.addLayout(top_row)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -589,11 +581,16 @@ class ScopePage(QWidget):
         # auto-range stays on, adapting only to the currently-visible
         # data.
         self.plot.vb.enableAutoRange(x=False, y=True)
-        plot_side.addWidget(self.plot_widget, 1)
 
-        plot_container = QWidget()
-        plot_container.setLayout(plot_side)
-        outer.addWidget(plot_container, 1)
+        # Controls over plot, user-draggable split; the plot pane gets
+        # every extra pixel when the window grows.
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.addWidget(self.side_scroll)
+        self.splitter.addWidget(self.plot_widget)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([260, 460])
+        outer.addWidget(self.splitter, 1)
 
         # Crosshair (feature 1): a light-grey dashed vertical line,
         # deliberately distinct from the cursor's dashed blue
@@ -814,26 +811,19 @@ class ScopePage(QWidget):
         offset_edit = self._make_number_edit(key, "offset", 0.0)
         self.channel_table.setCellWidget(row, COL_OFFSET, offset_edit)
 
-        fit_btn = QPushButton("Fill")
-        fit_btn.clicked.connect(lambda _checked=False, k=key:
-                                self._on_fit_clicked(k))
-        self.channel_table.setCellWidget(row, COL_FIT, fit_btn)
-
         # transform: display-only scale/offset, identity by default;
         # rate: last-computed effective Hz. The widgets are kept on
         # the entry too so later methods (type change, transform
-        # commit, fit toggle, removal) don't have to re-locate the row
-        # by scanning the table every time.
+        # commit, removal) don't have to re-locate the row by
+        # scanning the table every time.
         self._channels[key] = {
             "label": label, "curve": curve, "color": color,
             "type": type_name,
             "transform": {"scale": 1.0, "offset": 0.0},
-            "fit": "fill",
             "rate": 0.0,
             "name_item": name_item, "value_item": value_item,
             "hz_item": hz_item, "type_combo": type_combo,
             "scale_edit": scale_edit, "offset_edit": offset_edit,
-            "fit_btn": fit_btn,
         }
 
     # -- inline table editing (spec point 2) --------------------------------
@@ -908,65 +898,32 @@ class ScopePage(QWidget):
         edit.setStyleSheet(INVALID_EDIT_STYLE)
         QTimer.singleShot(INVALID_EDIT_FLASH_MS, lambda: edit.setStyleSheet(""))
 
-    def _on_fit_clicked(self, key: str) -> None:
-        """Per-row Fit toggle (spec point 4): switches this channel
-        between the two lane targets - "fill" (this channel alone
-        fills the whole view) or "own" (it gets one band of a
-        multi-channel stack) - and ALWAYS performs one fit pass right
-        now, like a real scope's autoset button, writing the computed
-        scale/offset of every channel into the editable fields. (A T5
-        hardware finding: with the one-shot pass gated on Auto-lane,
-        clicking Fit with Auto-lane off visibly did nothing.)
-        Auto-lane's checkbox is the CONTINUOUS version of the same
-        computation - while it is on, refresh_plot() re-runs the pass
-        every tick anyway, so the explicit call is skipped."""
-        entry = self._channels.get(key)
-        if entry is None:
-            return
-        entry["fit"] = "own" if entry["fit"] == "fill" else "fill"
-        entry["fit_btn"].setText("Own" if entry["fit"] == "own" else "Fill")
-        if not self._auto_lane:
-            # The pass reads _last_series - the data currently ON
-            # SCREEN, deliberately (fitting while stopped must fit
-            # what is displayed, not silently pull newer samples).
-            # Only a never-refreshed page (empty cache) primes it
-            # with one refresh first.
-            if not self._last_series:
-                self.refresh_plot()
-            self._apply_auto_lane()
-        self.refresh_plot()
-
     # -- Auto-lane (spec point 4) --------------------------------------------
 
     def _on_auto_lane_toggled(self, on: bool) -> None:
-        """While on, every refresh_plot() tick recomputes scale/offset
-        for every channel from its per-row Fit setting (see
-        _apply_auto_lane) - turning it off just stops the recompute,
-        leaving whatever scale/offset was last computed in the
-        (still-editable) fields for hand-tuning."""
+        """While on, every refresh_plot() tick restacks every channel
+        into its own lane (see _apply_auto_lane) - turning it off
+        just stops the recompute, leaving whatever scale/offset was
+        last computed in the (still-editable) fields for
+        hand-tuning. The per-row Fill/Own Fit column this once
+        grouped channels by was dropped as redundant: Auto-lane
+        stacks everything, and any other arrangement is a hand-tuned
+        scale/offset away."""
         self._auto_lane = on
         if on:
             self.refresh_plot()
 
     def _apply_auto_lane(self) -> None:
-        """Compute scale/offset for every channel from its stored Fit
-        setting (spec point 4): "fill" channels each map their own
-        current-window min..max to the full [0, 1] view; "own"
-        channels split [0, 1] into as many equal bands as there are
-        "own" channels and each maps its own min..max into just its
-        band, in table order. Reads self._last_series (this tick's
-        already-fetched samples - refresh_plot() runs this before
-        decoding/plotting, see its own comment) rather than calling
-        engine.history.series() again."""
-        own_keys = [k for k, e in self._channels.items() if e["fit"] == "own"]
-        fill_keys = [k for k, e in self._channels.items()
-                    if e["fit"] == "fill"]
-        for key in fill_keys:
-            lo, hi = self._window_min_max(key)
-            scale, offset = _fit_scale_offset(lo, hi, 0.0, 1.0)
-            self.set_channel_transform(key, scale, offset)
-        n = len(own_keys)
-        for i, key in enumerate(own_keys):
+        """Stack ALL channels into equal horizontal bands of the
+        [0, 1] view (one lane per channel, in add order), mapping
+        each channel's current-window min..max into its own band.
+        Reads self._last_series (this tick's already-fetched samples
+        - refresh_plot() runs this before decoding/plotting, see its
+        own comment) rather than calling engine.history.series()
+        again."""
+        keys = list(self._channels)
+        n = len(keys)
+        for i, key in enumerate(keys):
             band_lo, band_hi = i / n, (i + 1) / n
             lo, hi = self._window_min_max(key)
             scale, offset = _fit_scale_offset(lo, hi, band_lo, band_hi)

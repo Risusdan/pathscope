@@ -492,16 +492,15 @@ class MainWindow(QMainWindow):
         # This also means resuming Data Path (which replays
         # self.last_update through _apply() to restore the display)
         # can no longer double-log that update's events, since
-        # _apply() itself never touches the log. Scope's own markers/
-        # sweep rate are likewise unconditional here - Scope's stop
-        # flag only pauses ITS repaint timer (ScopePage.set_stopped),
-        # not this feed.
+        # _apply() itself never touches the log. Scope's own event
+        # markers are likewise unconditional here - Scope's stop flag
+        # only pauses ITS repaint timer (ScopePage.set_stopped), not
+        # this feed.
         self.event_log.add_events(u.events)
         if self.scope_page is not None:
             for ev in u.events:
                 self.scope_page.add_event_marker(
                     ev.t, "%s: %s" % (ev.flow, ev.msg))
-            self.scope_page.update_sweep_skew(u.snapshot)
         if self._datapath_stopped:
             return
         self._apply(u)

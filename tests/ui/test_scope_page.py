@@ -5,23 +5,138 @@ import time
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QPushButton
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
+from core.trace.contract import MAX_CH
+from core.trace.reader import TraceError, TraceReader
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
 from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
-from ui.panels.scope_page import (COL_NAME, COL_VALUE, CURVE_COLORS,
-                                  DEFAULT_TYPE, TYPES, ScopePage,
-                                  _default_type_for_size, _fit_scale_offset,
-                                  _gapped_xy, decode_value, format_value,
-                                  value_at)
+from ui.panels.scope_page import (COL_NAME, COL_SWATCH, COL_VALUE,
+                                  CURVE_COLORS, DEFAULT_TYPE, NO_SOURCE_TEXT,
+                                  TYPES, ScopePage, _default_type_for_size,
+                                  _fit_scale_offset, _gapped_xy, decode_value,
+                                  format_value, value_at)
 
 TARGET = "targets/f411"
 
 
+def _make_plain_engine():
+    """An Engine with no trace target at all - no engine.trace_desc_addr
+    attribute (real engines don't have one; only ui/demo.py's
+    make_demo_engine sets it) - and no poller thread ever started.
+    Construction stays in NO_SOURCE and never calls engine.read_words,
+    so these tests (channel-independent plumbing: crosshair, roll
+    mode, event markers, the ELF picker) never need the poller
+    running."""
+    adapter = MockAdapter({})
+    return Engine.load(TARGET, adapter, interval_s=0.01)
+
+
+# -- page states & trace discovery (spec point 1, M7 rework) ---------------
+
+def test_scope_shows_no_source_state_without_trace(qtbot):
+    """Neither a demo engine.trace_desc_addr nor a loaded ELF symbol
+    exists for a plain engine - the page starts, and stays, in
+    NO_SOURCE."""
+    engine = _make_plain_engine()
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    assert page.error_label.text() == NO_SOURCE_TEXT
+    assert "ps_trace" in page.error_label.text()
+    assert page.rate_label_text() == ""
+    assert page.channel_table.rowCount() == MAX_CH
+
+
+def test_scope_discovers_demo_trace_and_shows_rate(qtbot):
+    """Demo mode (engine.trace_desc_addr, see ui/demo.py) discovers
+    automatically at construction - reaching READY needs the poller
+    thread actually running to service the descriptor read, so
+    engine.start() runs first, same as any other test exercising a
+    real read through the engine."""
+    engine = make_demo_engine(TARGET)
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.channel_table.rowCount() == MAX_CH
+        assert "Hz (firmware)" in page.rate_label_text()
+        assert page.error_label.text() == ""
+        assert page.desc is not None
+    finally:
+        engine.stop()
+
+
+def test_scope_shows_trace_error_state_from_bad_descriptor(qtbot, monkeypatch):
+    """A TraceError from discover() (bad magic, unsupported version,
+    bad geometry - core/trace/contract.py's ContractError, wrapped by
+    TraceReader) renders its message verbatim in error_label, never a
+    dialog. Monkeypatching TraceReader.discover directly (rather than
+    pointing trace_desc_addr at genuinely empty memory) keeps this
+    test independent of the poller thread entirely - discover() is
+    never actually called through the engine."""
+    def _boom(self, addr):
+        raise TraceError("unsupported trace version 2")
+    monkeypatch.setattr(TraceReader, "discover", _boom)
+
+    engine = make_demo_engine(TARGET)     # has trace_desc_addr
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    assert page.error_label.text() == "unsupported trace version 2"
+    assert page.desc is None
+    assert page.rate_label_text() == ""
+    assert page.channel_table.rowCount() == MAX_CH
+
+
+# -- fixed MAX_CH-row channel table skeleton (spec point 2) ----------------
+
+def test_channel_table_is_fixed_max_ch_rows_with_placeholder_slots(qtbot):
+    """The table ALWAYS has exactly MAX_CH rows (8 columns now - the
+    old per-channel Hz column is gone, see the module docstring), one
+    permanently-colored swatch per row regardless of the NO_SOURCE
+    state this plain engine leaves the page in, and every slot starts
+    as a grey, non-editable "-" placeholder."""
+    engine = _make_plain_engine()
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+
+    from PySide6.QtWidgets import QLabel
+
+    assert page.channel_table.columnCount() == 8
+    assert page.channel_table.rowCount() == MAX_CH
+    assert len(CURVE_COLORS) == MAX_CH
+    for row in range(MAX_CH):
+        name_item = page.channel_table.item(row, COL_NAME)
+        assert name_item.text() == "-"
+        assert not (name_item.flags() & Qt.ItemIsEditable)
+        swatch_box = page.channel_table.cellWidget(row, COL_SWATCH)
+        assert swatch_box is not None
+        swatch = swatch_box.findChild(QLabel)
+        assert CURVE_COLORS[row] in swatch.styleSheet()
+
+
+def test_channel_table_row_count_is_max_ch_in_every_page_state(qtbot):
+    """Spec point: "ALWAYS exactly MAX_CH rows" - true in NO_SOURCE, in
+    the TraceError state, and once READY alike."""
+    no_source_page = ScopePage(_make_plain_engine())
+    qtbot.addWidget(no_source_page)
+    assert no_source_page.channel_table.rowCount() == MAX_CH
+
+    engine = make_demo_engine(TARGET)
+    engine.start()
+    try:
+        ready_page = ScopePage(engine)
+        qtbot.addWidget(ready_page)
+        assert ready_page.channel_table.rowCount() == MAX_CH
+    finally:
+        engine.stop()
+
+
+# -- v2 (M6): channel/plot behavior - lands in Task 8 -----------------------
+
+@pytest.mark.skip(reason="channels land in T8")
 def test_scope_plots_polled_register(qtbot):
     engine = make_demo_engine("targets/f411")
     engine.start()
@@ -38,6 +153,7 @@ def test_scope_plots_polled_register(qtbot):
         engine.stop()
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_scope_addr_channel_via_engine(qtbot):
     engine = make_demo_engine("targets/f411")
     engine.start()
@@ -51,6 +167,7 @@ def test_scope_addr_channel_via_engine(qtbot):
         engine.stop()
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_add_address_channel_relabels_existing(qtbot):
     """Re-adding the same fixed address with a different label (the
     engine's add_addr_watch() already re-sets its own label
@@ -99,9 +216,10 @@ def test_event_marker_hard_cap_guards_unbounded_growth(qtbot):
     """add_event_marker's list must never grow past MARKER_HARD_CAP
     even when nothing is calling refresh_plot()'s window-based
     _prune_markers (dock hidden or stopped) - the primary pruning
-    mechanism, which this cap only backstops."""
-    engine = make_demo_engine("targets/f411")
-    page = ScopePage(engine)
+    mechanism, which this cap only backstops. Channel-independent
+    (event markers survive the M7 rework verbatim), so a plain engine
+    is enough."""
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
     for i in range(250):
         page.add_event_marker(float(i), "evt %d" % i)
@@ -148,7 +266,9 @@ def _make_overrun_engine():
     tests/ui/test_flow_and_log.py's _make_overrun_engine: the ADC
     overrun anomaly (f411.flows.yaml's "ADC1.SR.OVR == 1" rule) is
     already firing on the very first sweep, so this test doesn't have
-    to wait out the demo's normal-streaming window."""
+    to wait out the demo's normal-streaming window. Not demo mode (no
+    trace_desc_addr attribute), so ScopePage construction here stays
+    in NO_SOURCE and never touches the poller for a trace read."""
     mem = {S0CR: 1, ADC_SR: 0x30}          # OVR bit set
     adapter = MockAdapter(mem)
     return Engine.load(TARGET, adapter, interval_s=0.01)
@@ -209,6 +329,7 @@ def test_value_at():
     assert value_at([], 5) is None
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_crosshair_readout_shows_raw_values(qtbot):
     """_update_crosshair(view_t) takes plot-relative seconds (the same
     domain mapSceneToView would hand it - roll mode: sample_t -
@@ -236,6 +357,7 @@ def test_crosshair_readout_shows_raw_values(qtbot):
     assert page.time_label.text() == "t-now = 1.50 s"
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_scale_offset_transforms_curve(qtbot):
     """set_channel_transform() is the programmatic surface the table's
     scale/offset text fields drive; refresh_plot() must apply y' =
@@ -266,41 +388,6 @@ def test_scale_offset_transforms_curve(qtbot):
     assert value_text == format_value(200, DEFAULT_TYPE)
 
 
-def test_budget_label_shows_read_count_only(qtbot):
-    """The budget label carries only the transaction count - the sweep
-    rate (and its low-rate warning) lives on the toolbar's poll label
-    (MainWindow), not repeated here."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    page.refresh_plot()
-    assert page.budget_label.text() == \
-        "probe reads/sweep: %d" % engine.read_ops
-    assert "Hz" not in page.budget_label.text()
-
-
-def test_budget_label_updates_immediately_after_add_and_remove_channel(
-        qtbot):
-    """The label must reflect a changed read-op count right after
-    add_channel()/remove_channel() returns, not only on the next
-    200 ms refresh_plot() timer tick. The timer is stopped here so the
-    check is deterministic - proof that the add/remove call sites
-    themselves refresh the label, not a lucky race with the timer."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    page._timer.stop()
-
-    page.add_channel("DMA2.S0NDTR")
-    assert page.budget_label.text() == \
-        "probe reads/sweep: %d" % engine.read_ops
-
-    page.remove_channel("DMA2.S0NDTR")
-    assert page.budget_label.text() == \
-        "probe reads/sweep: %d" % engine.read_ops
-
-
-
 def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     """Hardware-session regression: the crosshair (and, identically,
     jump_to()'s cursor) must never itself contribute to the plot's
@@ -318,21 +405,16 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
        moving the mouse (no clicks) would recompute and visibly
        rescale/jitter the view on every event.
 
-    Asserting the ViewBox's childrenBoundingRect() is byte-for-byte
-    unchanged after placing a crosshair (or cursor) far outside the
-    plotted data's span - and unchanged again after moving it further
-    still - demonstrates both: an included item would have moved the
-    rect's edge to track it, so an unmoved rect proves the item is
-    excluded from bounds, not merely that its effect happens to be
-    small."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    This is crosshair/cursor plumbing, independent of any channel
+    data (a plain engine, no channels, is enough) - asserting the
+    ViewBox's childrenBoundingRect() is byte-for-byte unchanged after
+    placing a crosshair (or cursor) far outside the origin - and
+    unchanged again after moving it further still - demonstrates both:
+    an included item would have moved the rect's edge to track it, so
+    an unmoved rect proves the item is excluded from bounds, not
+    merely that its effect happens to be small."""
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    for i, v in enumerate([100, 200, 300]):
-        engine.history.record(key, t0 + i * 0.1, v)
     page.refresh_plot()
 
     baseline = page.plot.vb.childrenBoundingRect()
@@ -347,15 +429,14 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     page._update_crosshair(5000.0)
     after_second_move = page.plot.vb.childrenBoundingRect()
     assert after_second_move == baseline
-    assert after_second_move.right() < 1000.0
 
     # cursor (jump_to): same exclusion, same reasoning.
-    page.jump_to(t0 + 9000.0)
+    page.jump_to(page._t0 + 9000.0)
     after_cursor = page.plot.vb.childrenBoundingRect()
     assert after_cursor == baseline
-    assert after_cursor.right() < 1000.0
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_per_row_minus_button_removes_channel(qtbot):
     """Each channel row's leftmost "-" button removes THAT channel
     directly - no selection step, no separate Remove button (which no
@@ -370,12 +451,15 @@ def test_per_row_minus_button_removes_channel(qtbot):
 
     row = page._row_for_key("DMA2.S0NDTR")
     minus_box = page.channel_table.cellWidget(row, 0)
+    from PySide6.QtWidgets import QPushButton
     minus_btn = minus_box.findChild(QPushButton)
     minus_btn.click()
 
     assert "DMA2.S0NDTR" not in page._channels
     assert page.channel_table.rowCount() == 1
     assert "ADC1.SR" in page._channels
+
+
 def test_roll_mode_viewport_fixed(qtbot):
     """Roll mode (standard-scope style): the viewport must be pinned
     to a fixed (-window_s, 0) x-range on every refresh - identical
@@ -383,16 +467,13 @@ def test_roll_mode_viewport_fixed(qtbot):
     event marker (which stores an ABSOLUTE t) must reposition on every
     refresh by exactly the elapsed real-time delta between refreshes,
     scrolling left with its moment in history rather than sitting
-    still."""
-    engine = make_demo_engine(TARGET)
+    still. Channel-independent (roll mode/event markers survive the
+    M7 rework verbatim), so a plain engine is enough."""
+    engine = _make_plain_engine()
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
     window_s = engine.history.window_s
 
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
     page.refresh_plot()
     now1 = page._last_now
 
@@ -410,7 +491,6 @@ def test_roll_mode_viewport_fixed(qtbot):
     assert pos_before == pytest.approx(marker_t - now1)
 
     time.sleep(0.05)
-    engine.history.record(key, t0 + 0.1, 200)
     page.refresh_plot()
     now2 = page._last_now
     assert now2 > now1
@@ -441,27 +521,6 @@ def test_curve_colors_has_ten_distinct_entries_not_sharing_marker_or_cursor():
     assert len(set(CURVE_COLORS)) == 10
     assert MARKER_PEN not in CURVE_COLORS
     assert CURSOR_PEN not in CURVE_COLORS
-
-
-def test_channel_table_has_spec_columns_and_default_type(qtbot):
-    """The table replaces the old list+strip (spec point 2): 8 columns
-    (swatch/name/type/Value/Hz/scale/offset/Fit), and a freshly added
-    channel starts at the default type (u32, spec point 3)."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    assert page.channel_table.columnCount() == 9
-
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    row = page._row_for_key(key)
-    assert row is not None
-    assert page._channels[key]["type"] == DEFAULT_TYPE
-    type_combo = page._channels[key]["type_combo"]
-    assert type_combo.currentText() == DEFAULT_TYPE
-    assert list(type_combo.itemText(i) for i in range(type_combo.count())) \
-        == TYPES
-    assert len(TYPES) == 11
 
 
 @pytest.mark.parametrize("raw,type_name,expected_decoded,expected_text", [
@@ -498,6 +557,7 @@ def test_default_type_for_size():
     assert _default_type_for_size(16) == "u32"
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_type_change_updates_curve_and_value_column(qtbot):
     """Changing a row's type combo re-decodes both the plotted curve
     and the Value column readout - display-side only, core untouched
@@ -521,6 +581,7 @@ def test_type_change_updates_curve_and_value_column(qtbot):
     assert page._channels[key]["value_item"].text() == "-1 (0xFFFFFFFF)"
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_scale_offset_text_field_commit_and_invalid_revert(qtbot):
     """Scale/offset cells are plain text fields (spec point 2), not
     spinboxes - Enter commits a valid numeric entry (including
@@ -545,6 +606,7 @@ def test_scale_offset_text_field_commit_and_invalid_revert(qtbot):
     assert entry["scale_edit"].text() == "%g" % 25.0
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_add_symbol_channel_preselects_type_by_size(qtbot):
     """ELF preselect (spec point 3): a channel added from a loaded
     symbol starts at a type chosen from the symbol's declared size,
@@ -571,9 +633,11 @@ def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
     """Add-channel area is compact (spec point 8): the ELF symbol
     picker starts collapsed, and load_elf() auto-expands it once
     symbols actually land - no reason to show an empty list before
-    anything is loaded, but no reason to hide it once something is."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    anything is loaded, but no reason to hide it once something is.
+    The ELF group survives the M7 rework as the page's only add-source
+    control, so this stays a real (not skipped) test - a plain engine
+    is enough since it doesn't need discovery to succeed."""
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
     # isVisibleTo(page), not isVisible(): the test never shows the
     # page on screen, and plain isVisible() always reads False for an
@@ -592,6 +656,7 @@ def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
     assert page.symbol_list.count() == 1
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_rename_channel_via_table_updates_label_and_legend(qtbot):
     """Name is inline-editable too (spec point 2: "ALL
     inline-editable") - committing an edit to the Name cell updates
@@ -640,6 +705,7 @@ def test_fit_scale_offset_flat_window_centers_on_band():
     assert (0.0 - offset) * scale == pytest.approx(0.5)
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_auto_lane_stacks_every_channel_into_own_lane(qtbot):
     """Auto-lane (spec point 4, simplified - the per-row Fill/Own Fit
     column is gone): every channel gets one equal band of the [0, 1]
@@ -672,6 +738,7 @@ def test_auto_lane_stacks_every_channel_into_own_lane(qtbot):
     assert max(ys2) == pytest.approx(1.0)
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
     """Turning Auto-lane off stops the recompute but does not reset
     scale/offset - they stay exactly as last computed, still plain
@@ -695,6 +762,7 @@ def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
     assert page._channels[key]["transform"] == computed
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
     """Spec point 7: no selection hides the axis tick numbers; a
     selected row titles the axis with that channel's name/color and
@@ -730,6 +798,7 @@ def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
     assert axis.style["showValues"] is False
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_removing_selected_channel_clears_y_axis(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
@@ -748,6 +817,7 @@ def test_removing_selected_channel_clears_y_axis(qtbot):
 
 # -- v2: two-state cursor readout, no PIN (spec point 5) -------------------
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_value_column_shows_newest_sample_when_mouse_off_plot(qtbot):
     """State 1 (mouse off the plot, the default - no PIN, no third
     "locked" state): the Value column shows each channel's newest
@@ -767,6 +837,7 @@ def test_value_column_shows_newest_sample_when_mouse_off_plot(qtbot):
     assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == "Value"
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_value_column_switches_to_hover_value_and_header_on_crosshair(qtbot):
     """State 2 (mouse on the plot): the Value column shows the value
     at the crosshair's time and the header switches to "Value @
@@ -794,6 +865,7 @@ def test_value_column_switches_to_hover_value_and_header_on_crosshair(qtbot):
         format_value(300, DEFAULT_TYPE)
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
@@ -819,14 +891,12 @@ def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot):
 def test_leave_event_on_plot_widget_clears_crosshair(qtbot):
     """The mouse can leave plot_widget without a trailing sigMouseMoved
     inside the scene (e.g. a fast move straight off an edge) -
-    eventFilter's Leave handling is the backstop for that case."""
+    eventFilter's Leave handling is the backstop for that case. Pure
+    crosshair-state plumbing, independent of channel data."""
     from PySide6.QtCore import QEvent
 
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
     page._update_crosshair(0.5)
     assert page._crosshair_t is not None
 
@@ -835,6 +905,7 @@ def test_leave_event_on_plot_widget_clears_crosshair(qtbot):
     assert page._crosshair_t is None
 
 
+@pytest.mark.skip(reason="channels land in T8")
 def test_event_log_click_only_moves_cursor_line_not_value_column(qtbot):
     """spec point 5: an event-log click (jump_to) is a purely visual
     cursor-line move - it must never touch the Value column or its
@@ -872,8 +943,7 @@ def test_set_stopped_and_hidden_timer_matrix(qtbot):
     stopping while hidden must not let a later show() wake the timer
     back up (set_stopped(True) has to win over a plain show/hide
     cycle, same as the old set_frozen(True))."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
 
     page.show()
@@ -902,8 +972,7 @@ def test_set_stopped_and_hidden_timer_matrix(qtbot):
 
 
 def test_run_stop_button_toggles_label_and_state(qtbot):
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
 
     assert page.run_stop_btn.text() == "Stop"
@@ -921,8 +990,7 @@ def test_run_stop_button_toggles_label_and_state(qtbot):
 def test_spacebar_toggles_run_stop(qtbot):
     """spec point 1: spacebar is a scope-focus shortcut for the same
     big Run/Stop button, not a global app-wide binding."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
     assert not page.is_stopped()
 
@@ -931,30 +999,3 @@ def test_spacebar_toggles_run_stop(qtbot):
 
     qtbot.keyClick(page, Qt.Key_Space)
     assert not page.is_stopped()
-
-
-def test_sweep_skew_meter_reads_channel_sample_times(qtbot):
-    """Hard requirement (T5): the user must be able to SEE whether
-    this page's values came from one instant. Zero spread across the
-    page's own channels' per-op timestamps reads "coherent"; a spread
-    shows in ms; other keys in the sweep don't enter the meter."""
-    from core.engine.snapshot import Sample, Snapshot
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    page.add_channel("DMA2.S0NDTR")
-    page.add_channel("ADC1.SR")
-
-    t0 = 100.0
-    snap = Snapshot(values={"DMA2.S0NDTR": Sample(5, t0),
-                            "ADC1.SR": Sample(6, t0),
-                            "OTHER.REG": Sample(7, t0 + 5.0)},
-                    t=t0, rate_hz=38.0)
-    page.update_sweep_skew(snap)
-    assert page.skew_label.text() == "skew: 0 (coherent)"
-
-    snap = Snapshot(values={"DMA2.S0NDTR": Sample(5, t0),
-                            "ADC1.SR": Sample(6, t0 + 0.0012)},
-                    t=t0, rate_hz=38.0)
-    page.update_sweep_skew(snap)
-    assert page.skew_label.text() == "skew: 1.2 ms"

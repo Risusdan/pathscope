@@ -35,8 +35,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "before saving the frame")
     p.add_argument("--shot-scope", action="store_true",
                    help="manual check only, requires --shot: switch to "
-                        "the Scope tab, add a DMA2.S0NDTR channel, and "
-                        "wait for samples before saving the frame")
+                        "the Scope tab before saving the frame (channel "
+                        "wiring lands in Task 8)")
     return p
 
 
@@ -85,16 +85,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 while time.monotonic() < select_deadline:
                     app.processEvents()
             if args.shot_scope:
+                # Channel wiring (watching an address on a trace slot,
+                # plotting its curve) lands in Task 8 - for now this
+                # flag only exercises trace discovery and the fixed
+                # slot table skeleton (Task 7).
                 win.tabs.setCurrentIndex(1)
-                win.scope_page.add_channel("DMA2.S0NDTR")
-                # the demo's S0NDTR sawtooth (ui/demo.py) has a ~1.4 s
-                # period (1000 counts, -37 per 50 ms tick) - wait out a
-                # full period plus margin so the ramp-and-wrap is
-                # actually visible in the captured frame, not just its
-                # first few samples.
-                scope_deadline = time.monotonic() + 2.5
-                while time.monotonic() < scope_deadline:
-                    app.processEvents()
+                app.processEvents()
                 win.scope_page.refresh_plot()
             app.processEvents()
             win.grab().save(args.shot)

@@ -58,30 +58,39 @@ def test_run_stop_acts_on_scope_tab_independently_of_data_path(qtbot):
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
-    win.tabs.setCurrentIndex(1)             # switch to Scope
-    assert win.tabs.currentIndex() == 1
-    assert not win.scope_page.is_stopped()
+    # M7: activating the Scope tab now discovers the trace target
+    # synchronously (ScopePage.__init__), which needs the poller
+    # thread actually running to service the read - see
+    # tests/ui/test_scope_page.py's discovery tests for the same
+    # requirement in isolation.
+    engine.start()
+    try:
+        win.tabs.setCurrentIndex(1)             # switch to Scope
+        assert win.tabs.currentIndex() == 1
+        assert not win.scope_page.is_stopped()
 
-    win.scope_page.run_stop_btn.click()
-    assert win.scope_page.is_stopped()
-    assert not win._datapath_stopped
-    assert win.dp_run_stop_btn.text() == "Stop"
-    assert not win.dp_run_stop_btn.isChecked()
+        win.scope_page.run_stop_btn.click()
+        assert win.scope_page.is_stopped()
+        assert not win._datapath_stopped
+        assert win.dp_run_stop_btn.text() == "Stop"
+        assert not win.dp_run_stop_btn.isChecked()
 
-    # switching back to Data Path: ITS OWN (still running) button is
-    # untouched by Scope's stopped state.
-    win.tabs.setCurrentIndex(0)
-    assert win.tabs.currentIndex() == 0
-    assert not win.dp_run_stop_btn.isChecked()
-    assert win.dp_run_stop_btn.text() == "Stop"
+        # switching back to Data Path: ITS OWN (still running) button
+        # is untouched by Scope's stopped state.
+        win.tabs.setCurrentIndex(0)
+        assert win.tabs.currentIndex() == 0
+        assert not win.dp_run_stop_btn.isChecked()
+        assert win.dp_run_stop_btn.text() == "Stop"
 
-    # and switching back to Scope shows it still stopped.
-    win.tabs.setCurrentIndex(1)
-    assert win.scope_page.is_stopped()
-    assert win.scope_page.run_stop_btn.text() == "Run"
+        # and switching back to Scope shows it still stopped.
+        win.tabs.setCurrentIndex(1)
+        assert win.scope_page.is_stopped()
+        assert win.scope_page.run_stop_btn.text() == "Run"
 
-    win.scope_page.run_stop_btn.click()
-    assert not win.scope_page.is_stopped()
+        win.scope_page.run_stop_btn.click()
+        assert not win.scope_page.is_stopped()
+    finally:
+        engine.stop()
 
 
 def test_page_switch_buttons_mirror_current_page(qtbot):
@@ -93,23 +102,30 @@ def test_page_switch_buttons_mirror_current_page(qtbot):
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
-    assert win.datapath_page_btn.isChecked()
-    assert not win.scope_page_btn.isChecked()
+    # M7: see test_run_stop_acts_on_scope_tab_independently_of_data_path
+    # above - Scope tab activation now discovers the trace target
+    # synchronously, which needs the poller thread running.
+    engine.start()
+    try:
+        assert win.datapath_page_btn.isChecked()
+        assert not win.scope_page_btn.isChecked()
 
-    win.scope_page_btn.click()
-    assert win.tabs.currentIndex() == 1
-    assert win.scope_page is not None
-    assert win.scope_page_btn.isChecked()
-    assert not win.datapath_page_btn.isChecked()
+        win.scope_page_btn.click()
+        assert win.tabs.currentIndex() == 1
+        assert win.scope_page is not None
+        assert win.scope_page_btn.isChecked()
+        assert not win.datapath_page_btn.isChecked()
 
-    win.datapath_page_btn.click()
-    assert win.tabs.currentIndex() == 0
+        win.datapath_page_btn.click()
+        assert win.tabs.currentIndex() == 0
 
-    # programmatic switch mirrors back into the buttons.
-    win.tabs.setCurrentIndex(1)
-    assert win.scope_page_btn.isChecked()
-    win.tabs.setCurrentIndex(0)
-    assert win.datapath_page_btn.isChecked()
+        # programmatic switch mirrors back into the buttons.
+        win.tabs.setCurrentIndex(1)
+        assert win.scope_page_btn.isChecked()
+        win.tabs.setCurrentIndex(0)
+        assert win.datapath_page_btn.isChecked()
+    finally:
+        engine.stop()
 
 
 def test_target_lost_stops_animating_and_recovers(qtbot):
@@ -155,29 +171,35 @@ def test_tabs_switch_inspector_visibility(qtbot):
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
+    # M7: activating the Scope tab now discovers the trace target
+    # synchronously (ScopePage.__init__), which needs the poller
+    # thread actually running to service the read.
+    engine.start()
+    try:
+        assert win.tabs.currentIndex() == 0
+        assert win.inspector_dock.isVisible()
+        assert win.log_dock.isVisible()
 
-    assert win.tabs.currentIndex() == 0
-    assert win.inspector_dock.isVisible()
-    assert win.log_dock.isVisible()
+        win.tabs.setCurrentIndex(1)
+        assert win.tabs.currentIndex() == 1
+        assert not win.inspector_dock.isVisible()
+        assert win.log_dock.isVisible()
+        # lazy construction: the Scope tab's page is real now.
+        assert win.scope_page is not None
+        assert win.scope_page.isVisible()
 
-    win.tabs.setCurrentIndex(1)
-    assert win.tabs.currentIndex() == 1
-    assert not win.inspector_dock.isVisible()
-    assert win.log_dock.isVisible()
-    # lazy construction: the Scope tab's page is real now.
-    assert win.scope_page is not None
-    assert win.scope_page.isVisible()
-
-    win.tabs.setCurrentIndex(0)
-    assert win.tabs.currentIndex() == 0
-    assert win.inspector_dock.isVisible()
-    assert win.log_dock.isVisible()
-    # the page persists across tabs away/back - not destroyed, just
-    # hidden (its own hideEvent/showEvent, unchanged, handle pausing
-    # its repaint timer - see test_scope_page.py's
-    # test_repaint_timer_stops_when_hidden for that half).
-    assert win.scope_page is not None
-    assert not win.scope_page.isVisible()
+        win.tabs.setCurrentIndex(0)
+        assert win.tabs.currentIndex() == 0
+        assert win.inspector_dock.isVisible()
+        assert win.log_dock.isVisible()
+        # the page persists across tabs away/back - not destroyed, just
+        # hidden (its own hideEvent/showEvent, unchanged, handle pausing
+        # its repaint timer - see test_scope_page.py's
+        # test_repaint_timer_stops_when_hidden for that half).
+        assert win.scope_page is not None
+        assert not win.scope_page.isVisible()
+    finally:
+        engine.stop()
 
 
 def test_rate_label_turns_orange_below_low_rate_threshold(qtbot):

@@ -158,9 +158,9 @@ def test_naive_raw_count_write_pins_generation_but_set_watch_does_not():
 def test_refresh_caps_large_backlog_across_multiple_calls():
     # THROUGHPUT (T11 hardware gate, fix round 1) regression: a large
     # backlog is drained incrementally, at most RING_COUNT //
-    # _READ_CAP_DIVISOR records per call, rather than attempted in one
+    # READ_CAP_DIVISOR records per call, rather than attempted in one
     # large (and, on real hardware, dangerously slow) read - see
-    # _READ_CAP_DIVISOR and refresh()'s own comment. RING_COUNT // 2
+    # READ_CAP_DIVISOR and refresh()'s own comment. RING_COUNT // 2
     # records - more than one cap's worth, but comfortably under a
     # full ring so the pre-read clamp never fires - takes exactly 2
     # calls to fully drain, gaplessly and without any loss.
@@ -378,7 +378,7 @@ def test_full_ring_pass_not_clobbered_by_desc_resync():
     # still-live point at the time of the (fallback, cache-miss)
     # descriptor read, deliberately placed just 10 seq short of a full
     # lap. THROUGHPUT's per-call read cap (RING_COUNT // 4 - see
-    # _READ_CAP_DIVISOR) then bounds this read to RING_COUNT // 4
+    # READ_CAP_DIVISOR) then bounds this read to RING_COUNT // 4
     # records starting there, which - since RING_COUNT // 4 > 10 -
     # still crosses the wrap point after only 10 of them, exactly what
     # this test needs to exercise the wrap-split path in

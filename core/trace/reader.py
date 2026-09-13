@@ -87,9 +87,23 @@ long enough to transfer that it eats meaningfully into even a bigger
 ring's span - and a cycle slowed that way hands the NEXT cycle a
 bigger backlog still, a feedback loop measured directly on real
 hardware. refresh() below caps how much any ONE call ever attempts to
-read (_READ_CAP_DIVISOR) - the remainder simply stays live in the ring
+read (READ_CAP_DIVISOR) - the remainder simply stays live in the ring
 for a later call, still fully recoverable, rather than risking an
 unbounded transfer.
+
+READ_CAP_DIVISOR is exported (not module-private) because it is half
+of a two-sided contract with whoever drives refresh() on a timer: a
+per-call cap bounds how much any one refresh() can drain, so the
+CALLER's own drain cadence must keep steady-state demand (however many
+records accumulate between calls) under that same cap, or a slow-
+draining caller (e.g. a UI's Stop path, which only runs the slow timer)
+will silently rebuild the exact backlog this module fixed on its own
+side - see ui/panels/scope_page.py's _drain_interval_ms, which reads
+this constant for exactly that reason (T11 hardware gate, fix round 2:
+the round-1 fix alone still let a >1kHz-at-256-cap Stop hold reopen
+self.lost growth once held long enough, because the drain interval
+that round derived was sized only against the ring's own span, not
+against this per-call read cap at all).
 
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
@@ -157,14 +171,16 @@ from .contract import (DESC_SIZE, STATUS_OK, WATCH_ADDRS_OFFSET,
 
 _DESC_WORDS = DESC_SIZE // 4
 # THROUGHPUT (T11 hardware gate, fix round 1): a single refresh() call
-# never attempts to read more than ring_count // _READ_CAP_DIVISOR
+# never attempts to read more than ring_count // READ_CAP_DIVISOR
 # records - see refresh()'s own comment. A quarter of the ring keeps a
 # capped call's own transfer time a safe multiple below the ring's
 # span even under real per-command latency (measured directly against
 # hardware), while still being large enough that ordinary steady-state
 # traffic is virtually never actually capped (only a genuinely large
-# backlog is).
-_READ_CAP_DIVISOR = 4
+# backlog is). Public (not module-private) - see the module docstring's
+# note on why a caller's own drain cadence must be sized against this
+# same constant (fix round 2).
+READ_CAP_DIVISOR = 4
 
 
 class TraceError(Exception):
@@ -290,7 +306,7 @@ class TraceReader:
         # span, regardless of how far behind the reader ever gets - the
         # remainder simply stays live in the ring, still fully
         # recoverable, for a later call to read in its own turn.
-        read_to = min(wr_seq, start + desc.ring_count // _READ_CAP_DIVISOR)
+        read_to = min(wr_seq, start + desc.ring_count // READ_CAP_DIVISOR)
         raw_records = self._read_records(desc, start, read_to)
 
         # The descriptor and record reads are non-atomic (see module

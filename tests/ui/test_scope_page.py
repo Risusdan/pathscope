@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine, EngineError
 from core.trace.contract import MAX_CH, RING_COUNT, TraceDesc, TraceRecord
-from core.trace.reader import TraceError, TraceReader
+from core.trace.reader import READ_CAP_DIVISOR, TraceError, TraceReader
 from core.trace.sim import FakeTraceFirmware
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR
@@ -489,9 +489,9 @@ def test_drain_timer_stays_active_when_hidden_or_stopped(qtbot):
 
 def test_stop_and_hidden_drain_keeps_reader_lost_from_growing(qtbot):
     """spec point 5: Run/Stop and page visibility are DISPLAY-only -
-    the ring (RING_COUNT=256 records) must never overflow just because
-    nobody is looking. Simulates the always-on slow drain timer's
-    periodic ticks by calling its handler (_drain_once) directly
+    the ring (RING_COUNT records - contract.py) must never overflow
+    just because nobody is looking. Simulates the always-on slow
+    drain timer's periodic ticks by calling its handler (_drain_once) directly
     between step() bursts, each comfortably under RING_COUNT, so no
     single gap between drains ever exceeds the ring - this proves the
     PERIODIC cadence (not any single call) is what keeps the reader
@@ -572,19 +572,25 @@ def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
     RING_COUNT=256 (a 256ms span) was not, and would lose data on
     every stopped tick under the old fixed interval. _discover_at()
     must derive the slow timer's interval from the descriptor actually
-    discovered (_drain_interval_ms(ring_count, period_us): half the
-    ring's span, floored/capped) rather than use a constant - since the
-    T11 hardware gate bumped RING_COUNT to 1024 (a 1.024s span at
-    1 kHz), half that span (512ms) now exceeds DRAIN_MS_CAP, so the
-    real-firmware case that originally motivated this test now lands
-    on the SAME cap as test_slow_drain_interval_caps_at_default_for_
-    slower_firmware below - see
-    test_drain_interval_ms_lands_between_floor_and_cap for coverage of
-    the derived-not-constant computation actually landing strictly
-    between the two bounds. Inspects the timer directly, no sleeps:
-    discovery (and the interval it sets) happens synchronously in
-    ScopePage.__init__ once engine.start() has the poller thread up to
-    service it."""
+    discovered rather than use a constant.
+
+    T11 hardware gate, fix round 2: bumping RING_COUNT to 1024 made
+    half the ring's own span (512ms) exceed DRAIN_MS_CAP, which
+    _drain_interval_ms's fix round 1 form would have read as "the cap
+    binds, 500ms" - but TraceReader.refresh() itself never drains more
+    than ring_count // READ_CAP_DIVISOR (256) records per call, and a
+    500ms interval at this 1 kHz rate lets ~500 records accumulate per
+    tick: more than one refresh() call can ever drain, a backlog that
+    compounds and silently reopens TraceReader.lost growth during a
+    long enough Stop hold (the round-1 hw test's ~1s Stop window was
+    too short to expose it - see tests/hw/test_trace_hw.py's now-
+    lengthened one). _drain_interval_ms now also bounds the interval to
+    DRAIN_CAP_SLACK of how long firmware takes to PRODUCE one cap's
+    worth of records (256 * 1ms * 0.8 = 204.8ms here) - the tighter of
+    the two real constraints, landing this real-firmware case at 204ms.
+    Inspects the timer directly, no sleeps: discovery (and the interval
+    it sets) happens synchronously in ScopePage.__init__ once
+    engine.start() has the poller thread up to service it."""
     engine = _make_demo_like_engine(period_us=1000)
     engine.start()
     try:
@@ -593,33 +599,48 @@ def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
         assert page.desc is not None
         assert page.desc.period_us == 1000
         expected = _drain_interval_ms(page.desc.ring_count, 1000)
-        assert expected == DRAIN_MS_CAP == 500
-        assert page._drain_timer.interval() == 500
+        assert expected == 204
+        assert page._drain_timer.interval() == 204
+
+        # The invariant fix round 2 exists to preserve: what a single
+        # drain interval lets accumulate must stay under what one
+        # refresh() call can actually drain.
+        cap_records = page.desc.ring_count // READ_CAP_DIVISOR
+        assert expected * 1000 / page.desc.period_us < cap_records
     finally:
         engine.stop()
 
 
 def test_drain_interval_ms_lands_between_floor_and_cap():
-    """Pure-function coverage lost when the T11 hardware gate's
-    RING_COUNT bump (256 -> 1024) pushed the real firmware's own
-    period_us=1000 case from a mid-range result up onto DRAIN_MS_CAP
-    (see the previous test) - period_us=400 keeps half the ring's span
-    (1024 * 400 / 1000 / 2 = 204.8ms) strictly between DRAIN_MS_FLOOR
-    (50) and DRAIN_MS_CAP (500), proving _drain_interval_ms actually
-    computes a derived value rather than just picking one of its two
-    bounds."""
+    """Pure-function coverage proving _drain_interval_ms actually
+    computes a derived value rather than just picking DRAIN_MS_FLOOR or
+    DRAIN_MS_CAP. T11 hardware gate, fix round 2: with
+    READ_CAP_DIVISOR=4 and DRAIN_CAP_SLACK=0.8, the per-call-read-cap
+    span (ring_count // 4 * period_us / 1000 * 0.8, which works out to
+    0.2 * the ring's own span) is ALWAYS tighter than half the ring's
+    own span (0.5 * the span) - so the cap constraint is what lands
+    period_us=400 strictly between the two bounds here
+    (cap_records=1024//4=256, 256 * 400us/1000 * 0.8 = 81.92ms), not
+    the ring-span constraint (1024 * 400us/1000 / 2 = 204.8ms) that
+    used to bind this same case pre-round-2."""
     result = _drain_interval_ms(RING_COUNT, 400)
-    assert result == 204
+    assert result == 81
     assert 50 < result < DRAIN_MS_CAP
+
+    cap_records = RING_COUNT // READ_CAP_DIVISOR
+    assert result * 1000 / 400 < cap_records
 
 
 def test_slow_drain_interval_caps_at_default_for_slower_firmware(qtbot):
     """The other half of the same fix: a firmware slow enough that
-    half its ring span would exceed DRAIN_MS_CAP (500ms) still drains
-    at that cap, not slower - the demo target's own default
-    (period_us=5000, a 1.28s ring span) is exactly this case, and was
-    already safe under the old fixed 500ms constant; this pins that
-    the cap - not an ever-growing interval - is what binds for it."""
+    BOTH half its ring span AND its own per-call-read-cap span (T11
+    hardware gate, fix round 2 - see _drain_interval_ms's docstring)
+    would exceed DRAIN_MS_CAP (500ms) still drains at that cap, not
+    slower - the demo target's own default (period_us=5000, a 5.12s
+    ring span at RING_COUNT=1024, a 1.024s per-call-read-cap span) is
+    exactly this case, and was already safe under the old fixed 500ms
+    constant; this pins that the cap - not an ever-growing interval -
+    is what binds for it."""
     engine = _make_demo_like_engine()   # default period_us=5000
     engine.start()
     try:
@@ -630,6 +651,12 @@ def test_slow_drain_interval_caps_at_default_for_slower_firmware(qtbot):
         expected = _drain_interval_ms(page.desc.ring_count, 5000)
         assert expected == DRAIN_MS_CAP == 500
         assert page._drain_timer.interval() == 500
+
+        # This IS the "slow firmware where the 500 cap still binds"
+        # case - the invariant still holds even though DRAIN_MS_CAP,
+        # not the cap span itself, is what's actually binding here.
+        cap_records = page.desc.ring_count // READ_CAP_DIVISOR
+        assert expected * 1000 / page.desc.period_us < cap_records
     finally:
         engine.stop()
 

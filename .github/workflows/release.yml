@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Create virtual environment
+        run: python -m venv .venv
+        shell: pwsh
+        # packaging/build.ps1 assumes .venv already exists and installs
+        # the ui+build extras into it itself.
+
+      - name: Build release package
+        run: packaging/build.ps1
+        shell: pwsh
+
+      - name: Publish GitHub release
+        run: gh release create "$env:GITHUB_REF_NAME" dist/*.zip --generate-notes
+        shell: pwsh

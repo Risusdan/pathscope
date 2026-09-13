@@ -14,9 +14,17 @@ page (register_page.py, memory_page.py):
   NO_SOURCE - neither `engine.trace_desc_addr` (demo mode) nor a
     loaded ELF's `ps_trace_desc` symbol exists yet. error_label reads
     NO_SOURCE_TEXT.
-  TraceError - TraceReader.discover() raised (bad magic, unsupported
-    version, bad geometry - core/trace/contract.py's ContractError,
-    wrapped by reader.py) - error_label renders str(e) verbatim.
+  TraceError/EngineError - TraceReader.discover() raised, from either
+    of two exception families - error_label renders str(e) verbatim
+    either way, and self.desc stays None: TraceError (bad magic,
+    unsupported version, bad geometry - core/trace/contract.py's
+    ContractError, wrapped by reader.py) and EngineError (the poller
+    thread isn't running yet, a command timed out, or the target was
+    lost mid-discovery - Engine._exec's own failure mode; the
+    real-world trigger is a user opening the Scope tab against
+    unplugged/still-connecting hardware). Both are caught at the same
+    boundary, `_discover_at()` below, so neither can ever escape
+    ScopePage construction or load_elf() uncaught.
   READY - discover() succeeded: `self.desc` is set, error_label is
     clear, and `rate_label` shows the firmware's own sample rate,
     "%d Hz (firmware)" % round(1e6 / desc.period_us) - a property of
@@ -121,7 +129,7 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QHBoxLayout, QLabel,
                                QPushButton, QSplitter, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from core.engine.core import Engine
+from core.engine.core import Engine, EngineError
 from core.trace.contract import MAX_CH
 from core.trace.reader import TraceError, TraceReader
 
@@ -670,16 +678,26 @@ class ScopePage(QWidget):
     def _discover_at(self, addr: int) -> bool:
         """Attempt trace discovery at addr and update this page's
         state: READY (self.desc set, rate_label shows the firmware's
-        own period, error_label cleared) on success, or the TraceError
-        state (str(e) rendered verbatim in error_label, self.desc left
-        None) on failure - covers bad magic, unsupported version, and
-        bad geometry alike, since TraceReader.discover()/parse_desc()
-        report all three as one TraceError. Returns whether discovery
-        succeeded, for callers (load_elf(), __init__) that branch on
-        it."""
+        own period, error_label cleared) on success, or an inline
+        error state (str(e) rendered verbatim in error_label,
+        self.desc left None) on failure. Two exception families land
+        here, both from Engine.read_words underneath
+        TraceReader.discover(): TraceError (bad magic, unsupported
+        version, bad geometry - core/trace/contract.py's
+        ContractError, wrapped by reader.py) and EngineError (the
+        poller isn't running yet, a command timed out, or the target
+        was lost mid-discovery - Engine._exec's own failure mode).
+        Both are genuine "no usable trace target right now" outcomes
+        from this page's point of view, and neither may ever escape
+        this method uncaught: the real-world path is a user switching
+        to the Scope tab against unplugged/still-connecting hardware,
+        where MainWindow's lazy construction (_activate_scope_tab)
+        must not crash - the page has to stay alive and simply show
+        why. Returns whether discovery succeeded, for callers
+        (load_elf(), __init__) that branch on it."""
         try:
             self.desc = self.reader.discover(addr)
-        except TraceError as e:
+        except (TraceError, EngineError) as e:
             self.desc = None
             self.rate_label.setText("")
             self.error_label.setText(str(e))

@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtCore import Qt
 
 from core.adapter.mock import MockAdapter
-from core.engine.core import Engine
+from core.engine.core import Engine, EngineError
 from core.trace.contract import MAX_CH
 from core.trace.reader import TraceError, TraceReader
 from ui.bridge import EngineBridge
@@ -85,6 +85,38 @@ def test_scope_shows_trace_error_state_from_bad_descriptor(qtbot, monkeypatch):
     page = ScopePage(engine)
     qtbot.addWidget(page)
     assert page.error_label.text() == "unsupported trace version 2"
+    assert page.desc is None
+    assert page.rate_label_text() == ""
+    assert page.channel_table.rowCount() == MAX_CH
+
+
+def test_scope_discovery_survives_engine_error_inline(qtbot, monkeypatch):
+    """The real-world trigger: hardware unplugged (or still
+    connecting) when the user switches to the Scope tab - lazy
+    construction (MainWindow._activate_scope_tab) must not crash.
+    Underneath TraceReader.discover(), Engine.read_words() raises
+    EngineError - not TraceError - when the poller thread isn't
+    draining its command queue yet (not started), a command times
+    out, or the target is lost mid-discovery; _discover_at() must
+    catch that alongside TraceError, at the same boundary, rendering
+    str(e) inline exactly like the TraceError state rather than
+    letting it escape ScopePage.__init__/load_elf() uncaught.
+
+    The literal real path - engine.trace_desc_addr set, engine.start()
+    never called - reproduces this for real (Engine._exec's q.get()
+    blocks for its full 2 s timeout, then raises EngineError("command
+    timed out")), but paying that 2 s in this test would be slow;
+    monkeypatching TraceReader.discover to raise EngineError directly
+    exercises the same catch-and-render path deterministically and
+    fast."""
+    def _lost(self, addr):
+        raise EngineError("command timed out")
+    monkeypatch.setattr(TraceReader, "discover", _lost)
+
+    engine = make_demo_engine(TARGET)     # has trace_desc_addr
+    page = ScopePage(engine)              # must not raise
+    qtbot.addWidget(page)
+    assert page.error_label.text() == "command timed out"
     assert page.desc is None
     assert page.rate_label_text() == ""
     assert page.channel_table.rowCount() == MAX_CH

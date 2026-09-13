@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pathscope"
-version = "0.0.1"
+version = "0.1.0"
 description = "Live data-path observer for MCU/SoC bring-up and debugging"
 requires-python = ">=3.9"
 dependencies = [

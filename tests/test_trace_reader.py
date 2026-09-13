@@ -39,9 +39,19 @@ def test_overflow_counts_lost_and_resumes():
     # wr_seq to 3+256+K, making the oldest still-live seq
     # wr_seq-256 = 3+K. Everything from 3 (inclusive) up to 3+K
     # (exclusive) - exactly K records - was undelivered and then
-    # overwritten before refresh() ever asked for it, so lost must
-    # equal K exactly and the resumed read must start exactly at
-    # seq 3+K.
+    # overwritten before refresh() ever asked for it: that is the
+    # pre-read gap, K records.
+    #
+    # The read window refresh() then requests starts exactly at
+    # 3+K - the ring's oldest still-live point. Nothing writes again
+    # before refresh()'s post-read descriptor re-check, so that
+    # re-check sees the SAME wr_seq, making margin = wr_seq-256 =
+    # 3+K too: the very first record of the batch (seq 3+K) sits
+    # exactly at the margin. Per the torn-read guard's at-or-behind
+    # rule, a record at the margin is not provably untorn (firmware's
+    # next, still-unpublished write would land in that exact ring
+    # slot) and is dropped as well - one more record lost, and the
+    # resumed read effectively starts one past it.
     K = 8
     adapter, fw, engine = _rig()
     try:
@@ -51,8 +61,9 @@ def test_overflow_counts_lost_and_resumes():
         fw.step(3); r.refresh()           # last_seq becomes 2
         fw.step(256 + K)                  # > ring_count: oldest overwritten
         recs = r.refresh()
-        assert r.lost == K
-        assert recs[0].seq == 3 + K       # resumed exactly past the hole
+        assert r.lost == K + 1
+        assert recs[0].seq == 3 + K + 1   # resumed past the hole and
+                                           # the unprovable margin slot
     finally:
         engine.stop()
 
@@ -102,6 +113,14 @@ def test_full_ring_pass_not_clobbered_by_desc_resync():
     # what was watched - if the descriptor's own resync ever lands on
     # ring bytes again, this is where a clobbered record would show up
     # as garbage instead of the constant watched values.
+    #
+    # 264 records are produced from a fresh discover() (last_seq=-1),
+    # so the pre-read clamp starts the batch at seq 264-256=8 - the
+    # ring's oldest still-live point at the time of the first
+    # descriptor read. The post-read re-check sees the same wr_seq (no
+    # further writes happen in between), so margin is also 8: seq 8
+    # sits exactly at the margin and is dropped by the torn-read
+    # guard's at-or-behind rule, leaving 255 records (seq 9..263).
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
@@ -109,7 +128,8 @@ def test_full_ring_pass_not_clobbered_by_desc_resync():
         r.set_watch([0x20000000, 0x20000004])
         fw.step(256 + 8)                  # wraps the ring once, plus 8
         recs = r.refresh()                # window spans the wrap point
-        assert len(recs) == 256
+        assert len(recs) == 255
+        assert recs[0].seq == 9
         for rec in recs:
             assert rec.slots[0] == 111
             assert rec.slots[1] == 222
@@ -141,15 +161,20 @@ def test_filter_stable_drops_mismatched_embedded_seq():
     assert dropped == 1
 
 
-def test_filter_stable_drops_records_inside_overwrite_margin():
-    # Every embedded seq matches its expected position, but new_wr_seq
-    # (from the post-read descriptor re-check) has moved on far enough
-    # that seq 10 and 11 now sit at or behind the ring's oldest
-    # still-live point (margin = new_wr_seq - ring_count = 12) - torn
-    # mid-write even though layer 1 alone wouldn't have caught it.
+def test_filter_stable_drops_records_at_or_inside_overwrite_margin():
+    # Every embedded seq matches its expected position. margin =
+    # new_wr_seq - ring_count = 11: seq 10 is fully behind it (already
+    # overwritten by the time of the post-read check), and seq 12 is
+    # safely ahead of it. seq 11 sits EXACTLY at the margin - that
+    # ring slot is exactly the one firmware's next, still-unpublished
+    # write (seq new_wr_seq) would land on. That write may already be
+    # in flight the instant new_wr_seq becomes visible to us, so a
+    # record sitting exactly at the margin is not provably untorn
+    # either - it must be dropped too, not just records strictly
+    # behind it.
     records = [_rec(10), _rec(11), _rec(12)]
-    kept, dropped = _filter_stable(records, start=10, new_wr_seq=268,
-                                   ring_count=256)
+    kept, dropped = _filter_stable(records, start=10, new_wr_seq=267,
+                                   ring_count=256)   # margin = 11
     assert [r.seq for r in kept] == [12]
     assert dropped == 2
 
@@ -191,6 +216,11 @@ def test_refresh_drops_records_torn_by_wrap_during_read(monkeypatch):
         monkeypatch.setattr(r, "_read_desc", fake_read_desc)
         before_lost = r.lost
         recs = r.refresh()
+        # margin = new_wr_seq(261) - ring_count(256) = 5, one past the
+        # batch's last record (seq 4) - the batch never lands exactly
+        # on the margin here, so this count is unaffected by the
+        # at-or-behind vs. strictly-behind boundary fix; all 5 are
+        # dropped either way.
         assert recs == []
         assert r.lost == before_lost + 5
     finally:

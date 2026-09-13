@@ -97,7 +97,7 @@ def _filter_stable(records: List[TraceRecord], start: int, new_wr_seq: int,
         expected_seq = start + i
         if rec.seq != expected_seq:
             dropped += 1              # layer 1: whole-record replacement
-        elif rec.seq < margin:
+        elif rec.seq <= margin:
             dropped += 1              # layer 2: torn mid-write
         else:
             kept.append(rec)

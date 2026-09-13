@@ -41,6 +41,7 @@ import pytest
 from core.adapter.pyocd_swd import PyOCDAdapter
 from core.engine.core import Engine
 from core.engine.poller import PollerState
+from core.trace.contract import RING_COUNT
 from ui.bridge import EngineBridge
 from ui.main_window import MainWindow
 
@@ -59,10 +60,15 @@ ARTIFACT_DIR = Path(__file__).parent / "artifacts"
 # the host's alignment/guarded-address checks.
 SRAM_PROBE_ADDR = 0x2001F000
 
-# 1.5x the trace ring's span at the firmware's 1 kHz rate (RING_COUNT
-# (256, core/trace/contract.py) * 1 sample/ms = 256 ms) - see
-# test_run_stop_no_data_loss.
-RING_SPAN_S = 0.256
+# T11 hardware gate, fix round 2: a stale literal (0.256, RING_COUNT=256
+# * 1 sample/ms at the ORIGINAL ring depth) here would silently stop
+# tracking reality the next time either RING_COUNT or the firmware's own
+# sample rate changes - test_run_stop_no_data_loss below derives the
+# ring's actual span from RING_COUNT (core/trace/contract.py, live from
+# this same test run) and the DISCOVERED descriptor's own period_us,
+# not a hardcoded number.
+def _ring_span_s(period_us: int) -> float:
+    return RING_COUNT * period_us / 1e6
 
 
 def _shot(win: MainWindow, name: str) -> None:
@@ -235,14 +241,20 @@ def test_table_edit_under_load(qtbot):
 def test_run_stop_no_data_loss(qtbot):
     """Run/Stop is display-only (module docstring, ui/panels/
     scope_page.py, spec point 5): set_stopped() pauses only the 200ms
-    fast repaint timer, never the always-on 500ms slow drain timer, so
-    the trace ring (256 records - RING_COUNT, core/trace/contract.py)
-    must never overflow just because the display is held. Stops the
-    page, waits ~1s (comfortably over 1.5x the ring's own span at this
-    firmware's 1 kHz rate - RING_SPAN_S above, 256ms), and asserts
-    reader.lost did not grow across that wait; then resumes and
-    confirms streaming actually continues, rather than merely not
-    having crashed."""
+    fast repaint timer, never the always-on slow drain timer, so the
+    trace ring (RING_COUNT records - core/trace/contract.py) must never
+    overflow just because the display is held. Stops the page, waits at
+    least 3 seconds (T11 hardware gate, fix round 2: a ~1s window here,
+    built from a stale RING_SPAN_S=0.256 literal, was too short to
+    expose fix round 1's own consequence bug - a drain interval sized
+    only against the ring's own span, ignoring TraceReader.refresh()'s
+    separate per-call read cap, let a backlog compound at roughly
+    (demand - cap) records per tick and only overflow the ring, and so
+    only reopen reader.lost growth, after several ticks' worth of
+    compounding - short windows never ran long enough to accumulate
+    that much), and asserts reader.lost did not grow across that wait;
+    then resumes and confirms streaming actually continues, rather than
+    merely not having crashed."""
     engine, adapter = _live_engine()
     win = None
     try:
@@ -259,12 +271,15 @@ def test_run_stop_no_data_loss(qtbot):
         assert page.is_stopped()
 
         lost_before = page.reader.lost
-        qtbot.wait(int(1.5 * RING_SPAN_S * 1000) + 600)   # ~1s
+        # >= 3s, derived from the ring's own live span rather than a
+        # hardcoded number - see _ring_span_s and the docstring above.
+        stop_wait_s = max(3.0, 4.0 * _ring_span_s(page.desc.period_us))
+        qtbot.wait(int(stop_wait_s * 1000))
         lost_after_stop = page.reader.lost
         assert lost_after_stop == lost_before, (
-            "reader.lost grew from %d to %d while stopped - the slow "
-            "drain timer fell behind the trace ring during Stop"
-            % (lost_before, lost_after_stop))
+            "reader.lost grew from %d to %d while stopped over %.1fs - "
+            "the slow drain timer fell behind the trace ring during Stop"
+            % (lost_before, lost_after_stop, stop_wait_s))
 
         page.set_stopped(False)
         assert not page.is_stopped()

@@ -104,6 +104,11 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
 - USB transaction latency dominates on a clone ST-Link (roughly 0.5-1 ms
   per transaction); the poller batches reads per peripheral to keep the
   snapshot rate up.
+- Scope channels at scattered addresses each cost one debug-probe
+  transaction per sweep; contiguous addresses merge into one block read.
+  If firmware groups its debug variables in a single struct, a whole set
+  of channels costs the same as one - a cheap habit that pays off in
+  sample rate.
 
 ## License
 

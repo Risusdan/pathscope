@@ -342,6 +342,12 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
 
 ## 11. Out of Scope for MVP (recorded for later)
 
+- Layout edit mode: blocks draggable in the running tool, "Export
+  layout" writes coordinates back to the topology file; the existing
+  auto-grid fallback seeds positions for new targets, optionally a
+  graphviz-dot first draft. Removes the hand-written absolute
+  coordinates pain for large SoC scenario files. (Hardware-session
+  request, 2026-09-13.)
 - Fault snapshot: on an anomaly rule's rising edge, attach the engine's
   current Snapshot (the very data the rule fired on) to the AnomalyEvent;
   clicking the event-log row shows the register state at fault time even

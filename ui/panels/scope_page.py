@@ -83,7 +83,13 @@ on every refresh_plot() tick the same way so it scrolls left with its
 moment in history, exactly like a real scope annotation. Before the
 cursor has ever been placed, `cursor_time()` returns None - fed by
 MainWindow._on_log_time_focus, itself wired to EventLog's new
-on_event_time callback (an event-log row click).
+on_event_time callback (an event-log row click). This is purely
+visual (spec point 5) - no PIN, no value-locking: an event-log click
+only ever moves this line, and never touches the Value column or its
+"Value"/"Value @ -X.Xs" header (see `_value_text_for`'s two-state
+readout below), which stays governed solely by the mouse's own
+on/off-plot state. To read the value at an event's moment: stop and
+hover the cursor's x by eye.
 
 ELF symbol picker: "Load ELF..." opens a
 QFileDialog (the one dialog this panel uses - everything else is
@@ -106,7 +112,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QDoubleValidator, QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -577,6 +583,11 @@ class ScopePage(QWidget):
         self._crosshair_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30,
             slot=self._on_mouse_moved)
+        # Belt-and-braces "mouse off plot" detection (spec point 5):
+        # sigMouseMoved only fires on an in-scene move, so a mouse
+        # that exits plot_widget without one last move inside the
+        # scene needs this Leave event instead - see eventFilter().
+        self.plot_widget.installEventFilter(self)
 
         self._timer = QTimer(self)
         self._timer.setInterval(REFRESH_MS)
@@ -1248,21 +1259,28 @@ class ScopePage(QWidget):
     # -- crosshair / Value column readout (feature 1, spec point 6) ---------
 
     def _value_text_for(self, key: str) -> str:
-        """The Value column's text for one channel: the type-decoded,
-        dual-radix reading (spec point 6) at the crosshair's time if
-        the crosshair has ever moved, RAW (undecoded is wrong - it is
-        decode()'d, just never scale/offset'd - "Readouts always
-        decoded raw domain", spec point 4) rather than the
-        scaled/fit display value on the curve, which is the whole
-        point of this readout existing alongside the curve."""
+        """The Value column's text for one channel - two states, no
+        PIN, no third "locked" state (spec point 5): mouse off the
+        plot (self._crosshair_t is None) shows the newest sample;
+        mouse on the plot shows the value at the crosshair's time.
+        Either way the reading is the type-decoded, dual-radix value
+        (spec point 6), RAW (decode()'d, but never scale/offset'd -
+        "Readouts always decoded raw domain", spec point 4) rather
+        than the scaled/fit display value on the curve, which is the
+        whole point of this readout existing alongside the curve.
+        jump_to()'s cursor line never reaches this method at all - an
+        event-log click only moves that line, per spec point 5; to
+        read the value at an event's moment, stop and hover."""
         entry = self._channels[key]
+        series = self._last_series.get(key, [])
         if self._crosshair_t is None:
-            return "--"
-        # roll mode: the crosshair's x is relative to the last
-        # refresh's now, not the obsolete dock-open self._t0 - see the
-        # module docstring's "X axis" paragraph.
-        raw_t = self._crosshair_t + self._last_now
-        raw = value_at(self._last_series.get(key, []), raw_t)
+            raw = series[-1][1] if series else None
+        else:
+            # roll mode: the crosshair's x is relative to the last
+            # refresh's now, not the obsolete dock-open self._t0 - see
+            # the module docstring's "X axis" paragraph.
+            raw_t = self._crosshair_t + self._last_now
+            raw = value_at(series, raw_t)
         if raw is None:
             return "--"
         return format_value(decode_value(raw, entry["type"]), entry["type"])
@@ -1270,23 +1288,46 @@ class ScopePage(QWidget):
     def _on_mouse_moved(self, evt) -> None:
         pos = evt[0]
         if not self.plot.sceneBoundingRect().contains(pos):
-            # mouse left the plot viewport - hide the crosshair rather
-            # than leaving it frozen at its last x (readout rows keep
-            # their last values, which is fine; only the line itself
-            # needs to disappear).
-            if self._crosshair_line is not None:
-                self._crosshair_line.hide()
+            # mouse left the plot viewport via a move that's still
+            # technically within the scene - eventFilter's Leave
+            # handler below is the other, more reliable path for this
+            # (the mouse can also leave without a trailing move event
+            # inside the scene at all).
+            self._clear_crosshair()
             return
         view_point = self.plot.vb.mapSceneToView(pos)
         self._update_crosshair(view_point.x())
+
+    def eventFilter(self, obj, event) -> bool:
+        """Installed on plot_widget only, to catch the mouse leaving
+        the plot widget entirely (spec point 5's "mouse off plot"
+        state) - sigMouseMoved (the SignalProxy above) only fires on
+        an actual move *within* the graphics scene, so a mouse that
+        exits the widget without a trailing in-scene move never
+        reaches _on_mouse_moved's own out-of-bounds check."""
+        if obj is self.plot_widget and event.type() == QEvent.Type.Leave:
+            self._clear_crosshair()
+        return super().eventFilter(obj, event)
+
+    def _clear_crosshair(self) -> None:
+        """Two-state cursor readout (spec point 5): "mouse off plot" -
+        hides the crosshair line, and the Value column reverts to
+        showing each channel's newest sample (via _value_text_for,
+        which already falls back to that when self._crosshair_t is
+        None) under the plain "Value" header."""
+        self._crosshair_t = None
+        if self._crosshair_line is not None:
+            self._crosshair_line.hide()
+        self._refresh_value_column()
 
     def _update_crosshair(self, view_t: float) -> None:
         """Move the crosshair to view_t - plot-relative seconds, the
         same domain mapSceneToView's x is in (roll mode: sample_t -
         self._last_now, the last refresh's now; see the module
         docstring's "X axis" paragraph) - and refresh every channel
-        row's raw-value suffix plus the time label. Reads only
-        self._last_series, populated by the most recent
+        row's Value cell plus the time label and Value column header
+        (spec point 5's "mouse on plot" state: "Value @ -X.Xs").
+        Reads only self._last_series, populated by the most recent
         refresh_plot(): no engine.history.series() call here, so a
         mouse-move event costs no History copy of its own."""
         self._crosshair_t = view_t
@@ -1304,6 +1345,22 @@ class ScopePage(QWidget):
             self._crosshair_line.setPos(view_t)
         self._crosshair_line.show()
         self.time_label.setText("t-now = %.2f s" % view_t)
+        self._refresh_value_column()
+
+    def _refresh_value_column(self) -> None:
+        """Rebuilds the Value cell text for every channel and the
+        column header text, from the current two-state cursor
+        (self._crosshair_t: None -> newest sample, "Value" header; set
+        -> value at that plot-relative time, "Value @ -X.Xs" header) -
+        the single place both _clear_crosshair and _update_crosshair
+        delegate to so the two states can never drift apart."""
+        if self._crosshair_t is None:
+            header_text = "Value"
+        else:
+            header_text = "Value @ %.1fs" % self._crosshair_t
+        header_item = self.channel_table.horizontalHeaderItem(COL_VALUE)
+        if header_item is not None:
+            header_item.setText(header_text)
         for key in self._channels:
             self._channels[key]["value_item"].setText(
                 self._value_text_for(key))

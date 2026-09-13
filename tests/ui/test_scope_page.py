@@ -12,10 +12,11 @@ from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
 from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
-from ui.panels.scope_page import (COL_NAME, CURVE_COLORS, DEFAULT_TYPE,
-                                  TYPES, ScopePage, _default_type_for_size,
-                                  _fit_scale_offset, _gapped_xy, decode_value,
-                                  format_value, value_at)
+from ui.panels.scope_page import (COL_NAME, COL_VALUE, CURVE_COLORS,
+                                  DEFAULT_TYPE, TYPES, ScopePage,
+                                  _default_type_for_size, _fit_scale_offset,
+                                  _gapped_xy, decode_value, format_value,
+                                  value_at)
 
 TARGET = "targets/f411"
 
@@ -804,3 +805,117 @@ def test_removing_selected_channel_clears_y_axis(qtbot):
     assert page._selected_key is None
     axis = page.plot.getAxis("left")
     assert axis.style["showValues"] is False
+
+
+# -- v2: two-state cursor readout, no PIN (spec point 5) -------------------
+
+def test_value_column_shows_newest_sample_when_mouse_off_plot(qtbot):
+    """State 1 (mouse off the plot, the default - no PIN, no third
+    "locked" state): the Value column shows each channel's newest
+    sample and the column header reads plain "Value"."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    engine.history.record(key, t0 + 1.0, 200)
+    page.refresh_plot()
+
+    assert page._channels[key]["value_item"].text() == \
+        format_value(200, DEFAULT_TYPE)
+    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == "Value"
+
+
+def test_value_column_switches_to_hover_value_and_header_on_crosshair(qtbot):
+    """State 2 (mouse on the plot): the Value column shows the value
+    at the crosshair's time and the header switches to "Value @
+    -X.Xs"."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    page.refresh_plot()
+    now = page._last_now
+    engine.history.record(key, now - 2.0, 100)
+    engine.history.record(key, now - 1.0, 200)
+    engine.history.record(key, now - 0.5, 300)
+    page.refresh_plot()
+
+    page._update_crosshair(-0.4)
+
+    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == \
+        "Value @ -0.4s"
+    # -0.4s relative to the last refresh's now is just after the
+    # newest (now-0.5) sample - value_at finds the newest sample at or
+    # before that absolute time, which is 300.
+    assert page._channels[key]["value_item"].text() == \
+        format_value(300, DEFAULT_TYPE)
+
+
+def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot):
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    engine.history.record(key, t0 + 1.0, 200)
+    page.refresh_plot()
+
+    page._update_crosshair(0.5)
+    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() != "Value"
+
+    page._clear_crosshair()
+
+    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == "Value"
+    assert page._channels[key]["value_item"].text() == \
+        format_value(200, DEFAULT_TYPE)
+    assert page._crosshair_t is None
+
+
+def test_leave_event_on_plot_widget_clears_crosshair(qtbot):
+    """The mouse can leave plot_widget without a trailing sigMouseMoved
+    inside the scene (e.g. a fast move straight off an edge) -
+    eventFilter's Leave handling is the backstop for that case."""
+    from PySide6.QtCore import QEvent
+
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    page._update_crosshair(0.5)
+    assert page._crosshair_t is not None
+
+    page.eventFilter(page.plot_widget, QEvent(QEvent.Type.Leave))
+
+    assert page._crosshair_t is None
+
+
+def test_event_log_click_only_moves_cursor_line_not_value_column(qtbot):
+    """spec point 5: an event-log click (jump_to) is a purely visual
+    cursor-line move - it must never touch the Value column or its
+    header (no value-locking, no PIN); cursor_time() still returns
+    exactly the t passed in, unchanged from the pre-v2 contract."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    page.refresh_plot()
+    page._update_crosshair(0.0)
+
+    header_before = page.channel_table.horizontalHeaderItem(COL_VALUE).text()
+    value_before = page._channels[key]["value_item"].text()
+
+    page.jump_to(t0 + 50.0)
+
+    assert page.cursor_time() == t0 + 50.0
+    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == header_before
+    assert page._channels[key]["value_item"].text() == value_before

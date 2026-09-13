@@ -115,6 +115,45 @@ class TraceStore:
     def latest_gen(self) -> int:
         return self._last_gen if self._last_gen is not None else 0
 
+    def clear_slot(self, slot: int) -> None:
+        """Wipe one column to NaN across the whole buffer - called by
+        the page right when it occupies a slot (ScopePage.
+        add_address_slot), before that slot's first real append.
+        Columns are positional and every record's `slots` tuple always
+        carries a real value (typically 0, never NaN) for every
+        channel index the firmware ISN'T currently watching - so a
+        newly-occupied slot's history, prior to the moment it started
+        being watched, is not empty by default, it is full of
+        meaningless placeholder values from whatever the wire actually
+        sent there. Without this, TraceStore.series()/newest() would
+        show that placeholder history under the new channel's name
+        instead of starting clean. A no-op against an empty buffer."""
+        if self._buf.size:
+            self._buf["slots"][:, slot] = float("nan")
+
+    def remove_slot(self, slot: int) -> None:
+        """Mirror ScopePage's slot-table compaction (remove_channel):
+        delete column `slot` and shift every higher column down by
+        one, so a channel's history follows it to its new column
+        exactly the way ScopePage._slots follows it to its new row.
+        The freed tail column becomes NaN. Columns are purely
+        positional (series()/newest() index by slot number) and this
+        store has no notion of "which columns are logically occupied"
+        of its own - without this, a middle-slot removal would leave
+        every later channel's curve reading the REMOVED channel's old
+        column, one slot off from where the page now thinks it lives.
+        `.copy()` on the source before assigning: the source and
+        destination slices overlap (shifted by one column), and numpy
+        does not guarantee overlapping basic-slice assignment produces
+        the same result as an element-by-element shift across every
+        numpy version/backend. A no-op against an empty buffer."""
+        if self._buf.size == 0:
+            return
+        n = self._buf["slots"].shape[1]
+        shifted = self._buf["slots"][:, slot + 1:n].copy()
+        self._buf["slots"][:, slot:n - 1] = shifted
+        self._buf["slots"][:, n - 1] = float("nan")
+
     def clear(self) -> None:
         self._buf = np.empty(0, dtype=_DTYPE)
         self._last_seq = None

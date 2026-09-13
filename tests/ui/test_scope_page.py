@@ -341,6 +341,92 @@ def test_remove_channel_compacts_table_and_rebinds_color(qtbot, monkeypatch):
         CURVE_COLORS[0].lower()
 
 
+def test_remove_middle_slot_store_history_follows_compaction(qtbot, monkeypatch):
+    """The bug the table-only test above cannot see: TraceStore columns
+    are positional, independent of ScopePage._slots. Add A, B, C with
+    DISTINCT data on real per-record slots (not just per-channel keys),
+    remove the middle (B), and assert the SURVIVING channels' curves
+    show only their OWN values afterward - not lengths, actual
+    y-values - proving TraceStore.remove_slot's column shift actually
+    ran alongside the table compaction."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    a = page.add_address_slot(0x20000000, "A")
+    b = page.add_address_slot(0x20000004, "B")
+    c = page.add_address_slot(0x20000008, "C")
+    records = []
+    for i in range(3):
+        slots = [0] * MAX_CH
+        slots[a], slots[b], slots[c] = 100 + i, 200 + i, 300 + i
+        records.append(TraceRecord(seq=i, gen=0, slots=tuple(slots)))
+    page.store.append(records)
+
+    page.remove_channel(b)          # middle removal - C compacts to slot 1
+
+    assert page.channel_slots()[0]["label"] == "A"
+    assert page.channel_slots()[1]["label"] == "C"
+    _t, y0 = page.store.series(0)
+    _t, y1 = page.store.series(1)
+    assert list(y0) == [100.0, 101.0, 102.0]     # A - untouched
+    assert list(y1) == [300.0, 301.0, 302.0]     # C shifted in, not B's data
+    # refresh_plot()'s own decode/redraw path must show the same thing.
+    page.refresh_plot()
+    assert page.curve_y(0) == [pytest.approx(v) for v in (100, 101, 102)]
+    assert page.curve_y(1) == [pytest.approx(v) for v in (300, 301, 302)]
+
+
+def test_add_reuses_freed_slot_without_stale_values(qtbot, monkeypatch):
+    """After A is removed, B compacts from slot 1 into slot 0, freeing
+    slot 1 - B's OLD physical column. The next channel added (D) lands
+    there; its history must be clean, not B's leftover values (or
+    plain unwatched-placeholder zeros predating D's own existence)."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    a = page.add_address_slot(0x20000000, "A")
+    b = page.add_address_slot(0x20000004, "B")
+    records = []
+    for i in range(3):
+        slots = [0] * MAX_CH
+        slots[a], slots[b] = 10 + i, 20 + i
+        records.append(TraceRecord(seq=i, gen=0, slots=tuple(slots)))
+    page.store.append(records)
+
+    page.remove_channel(a)
+    assert page.channel_slots()[0]["label"] == "B"
+
+    d = page.add_address_slot(0x20000008, "D")
+    assert d == 1
+    page.store.append([TraceRecord(seq=3, gen=0, slots=_slot_tuple(d, 999))])
+
+    _t, y = page.store.series(d)
+    real_values = [v for v in y.tolist() if v == v]      # drop NaN
+    assert real_values == [999.0]
+
+
+def test_set_watch_receives_compacted_address_list_after_middle_removal(
+        qtbot, monkeypatch):
+    """The exact ordered address list reader.set_watch() receives at
+    every step of add-add-add-remove(middle)-add - watch index must
+    stay the compacted table row throughout, not the original add
+    order."""
+    calls = []
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    monkeypatch.setattr(TraceReader, "set_watch",
+                        lambda self, addrs: calls.append(list(addrs)))
+
+    page.add_address_slot(0x20000000, "A")
+    page.add_address_slot(0x20000004, "B")
+    page.add_address_slot(0x20000008, "C")
+    page.remove_channel(1)                       # remove B, the middle
+    page.add_address_slot(0x2000000C, "D")
+
+    assert calls == [
+        [0x20000000],
+        [0x20000000, 0x20000004],
+        [0x20000000, 0x20000004, 0x20000008],
+        [0x20000000, 0x20000008],
+        [0x20000000, 0x20000008, 0x2000000C],
+    ]
+
+
 def test_curve_decodes_from_store_and_skips_nan_gap_rows(qtbot, monkeypatch):
     """spec point 4: curves decode display-side from the store's raw
     f64 (cast back to int for decode); a NaN gap row (TraceStore's own

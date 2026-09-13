@@ -78,3 +78,67 @@ def test_clear_then_series_and_newest_are_empty():
     t, y = store.series(0)
     assert t.size == 0 and y.size == 0
     assert store.newest(0) is None
+
+
+def _multi(seq, values, gen=1):
+    """A TraceRecord with a distinct value per slot index given in
+    `values` (a dict slot->value), 0 everywhere else - the shape a
+    real multi-channel record has (every slot carries SOME value,
+    never NaN, regardless of whether the firmware is watching it)."""
+    slots = [0] * 10
+    for slot, v in values.items():
+        slots[slot] = v
+    return TraceRecord(seq=seq, gen=gen, slots=tuple(slots))
+
+
+def test_clear_slot_wipes_column_to_nan():
+    """ScopePage.add_address_slot() calls this right when occupying a
+    slot - a column's history prior to that moment is NOT blank by
+    default (every record carries a real, non-NaN value for every
+    slot index, watched or not), so this is what actually makes it
+    blank."""
+    store = TraceStore(parse_desc(_desc_words("<")))
+    store.append([_multi(0, {0: 5, 1: 50}), _multi(1, {0: 6, 1: 51})])
+
+    store.clear_slot(0)
+
+    _t, y0 = store.series(0)
+    assert np.isnan(y0).all()
+    _t, y1 = store.series(1)
+    assert list(y1) == [50.0, 51.0]          # untouched
+
+
+def test_clear_slot_on_empty_buffer_is_a_no_op():
+    store = TraceStore(parse_desc(_desc_words("<")))
+    store.clear_slot(0)          # must not raise
+    t, y = store.series(0)
+    assert t.size == 0 and y.size == 0
+
+
+def test_remove_slot_shifts_higher_columns_down_and_nans_the_tail():
+    """The bug this guards against: TraceStore's columns are purely
+    positional (series()/newest() index by slot number) with no
+    concept of "which channel used to be there" - a middle-slot
+    removal on the PAGE side (ScopePage.remove_channel) must be
+    mirrored here, column-for-column, or a channel that compacts into
+    a new row keeps reading the REMOVED channel's stale history at
+    that column instead of its own."""
+    store = TraceStore(parse_desc(_desc_words("<")))
+    store.append([_multi(0, {0: 100, 1: 200, 2: 300}),
+                 _multi(1, {0: 101, 1: 201, 2: 301})])
+
+    store.remove_slot(1)          # remove the middle slot (was "B")
+
+    _t, y0 = store.series(0)
+    assert list(y0) == [100.0, 101.0]        # slot 0 ("A") untouched
+    _t, y1 = store.series(1)
+    assert list(y1) == [300.0, 301.0]        # slot 2's data ("C") shifted in
+    _t, y_tail = store.series(9)
+    assert np.isnan(y_tail).all()            # explicit freed-tail NaN
+
+
+def test_remove_slot_on_empty_buffer_is_a_no_op():
+    store = TraceStore(parse_desc(_desc_words("<")))
+    store.remove_slot(0)         # must not raise
+    t, y = store.series(0)
+    assert t.size == 0 and y.size == 0

@@ -574,6 +574,18 @@ class ScopePage(QWidget):
         # _fail_pending(), not by blocking the full timeout the way a
         # fully stopped poller's abandoned queue does.
         self._poller_running = True
+        # Subscribes directly to Engine.on_state() rather than routing
+        # through EngineBridge/Qt signals - accepted (not an oversight)
+        # because the callback contract here is narrow and fully safe
+        # off the Qt thread: _on_engine_state() below runs on the
+        # POLLER thread (Poller._emit_state calls every subscriber
+        # synchronously from wherever it's invoked), does nothing but
+        # write a plain bool to self._poller_running, and touches no
+        # Qt object at all - not a widget, not a signal, nothing that
+        # needs to live on the GUI thread. No unsubscribe is needed
+        # either: a ScopePage is a per-engine singleton for the life of
+        # the process (MainWindow constructs at most one), so this
+        # subscription never needs to be torn down and re-added.
         self.engine.on_state(self._on_engine_state)
 
         # Top-bottom layout (a T5 hardware finding replacing the
@@ -1055,7 +1067,18 @@ class ScopePage(QWidget):
         TraceError/EngineError from the firmware write itself - renders
         inline in error_label and leaves self._slots exactly as it was
         before the call (spec point 3: guarded/alignment refusal BEFORE
-        any write; a firmware rejection rolls the tentative slot back)."""
+        any write; a firmware rejection rolls the tentative slot back).
+
+        Also clears the TraceStore column at the slot being occupied
+        (TraceStore.clear_slot) before this entry is wired up at all -
+        TraceStore's columns are positional, and every record's
+        `slots` tuple carries a real (non-NaN) value for every channel
+        the firmware ISN'T watching too (typically 0), so a slot's
+        history prior to this moment is not blank by default. This is
+        what a middle-slot removal's compaction (see remove_channel)
+        relies on to keep a freshly (re)occupied slot's series/newest
+        clean of whatever a PRIOR occupant (or plain unwatched
+        placeholder data) left in that column."""
         occupied = [s for s in self._slots if s is not None]
         if len(occupied) >= MAX_CH:
             self.error_label.setText("table full")
@@ -1068,6 +1091,8 @@ class ScopePage(QWidget):
             return None
 
         row = len(occupied)
+        if self.store is not None:
+            self.store.clear_slot(row)
         entry = self._make_slot_entry(row, addr, label, type_name)
         self._slots[row] = entry
         try:
@@ -1093,13 +1118,23 @@ class ScopePage(QWidget):
         channel permanently once it shifts. A no-op for an
         out-of-range or already-empty slot. The selection follows a
         shifted channel to its new row (or clears, if the removed slot
-        itself was selected) - see the module docstring."""
+        itself was selected) - see the module docstring.
+
+        TraceStore.remove_slot mirrors this SAME compaction in the
+        store's own columns, in the same operation - the store has no
+        notion of "which columns are logically occupied" on its own
+        (series()/newest() are purely positional by slot number), so
+        without this a later channel that shifted into `slot` would
+        keep reading the REMOVED channel's old column instead of its
+        own, one slot off from where the table now says it lives."""
         if not (0 <= slot < MAX_CH) or self._slots[slot] is None:
             return
         entry = self._slots.pop(slot)
         self._slots.append(None)
         self.plot.removeItem(entry["curve"])
         self._last_series.pop(slot, None)
+        if self.store is not None:
+            self.store.remove_slot(slot)
         self._rebind_slot_colors()
 
         old_selected = self._selected_row

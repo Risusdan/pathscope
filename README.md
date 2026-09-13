@@ -131,8 +131,8 @@ Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
 - USB transaction latency dominates on a clone ST-Link (roughly 0.5-1 ms
   per transaction); the poller batches reads per peripheral to keep the
   snapshot rate up.
-- Watch-table addresses can be anywhere - grouping no longer affects
-  coherence, only firmware whitelist design.
+- Watch-table addresses can be anywhere inside the firmware's
+  whitelist; grouping them has no effect on coherence.
 - Trace records are same-instant by construction: firmware fills every
   watched slot from one timer ISR, so cross-channel skew cannot occur.
   Transport speed only bounds how fast the ring can be drained, i.e.

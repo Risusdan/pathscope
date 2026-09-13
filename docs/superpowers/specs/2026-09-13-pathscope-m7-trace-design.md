@@ -49,7 +49,7 @@ section 7). All layout is fixed-width and 4-byte aligned.
 | 7      | status       | u8        | see 3.4 |
 | 8      | period_us    | u32       | ISR period - the time axis |
 | 12     | record_size  | u16       | 8 + 4*max_ch (= 48) |
-| 14     | ring_count   | u16       | records in the ring (v1: 256) |
+| 14     | ring_count   | u16       | records in the ring (v1: 1024) |
 | 16     | ring_addr    | u32       | ring buffer base address |
 | 20     | wr_seq       | u32       | seq of the NEXT record to write |
 | 24     | watch table  | see 3.3   | |
@@ -117,8 +117,11 @@ inline scope-page error naming the code.
   measuring large-block-read speed on the real probe, and the measured
   ceiling goes into the README. Slow links (e.g. a UART-based debug
   bridge) simply set a longer period; coherence is unaffected.
-- Ring depth 256 records (~12 KB with v1 sizes) gives 256 ms of drain
-  slack at 1 kHz; overflow shows as a seq gap.
+- Ring depth 1024 records (~48 KB with v1 sizes) gives about one
+  second of drain slack at 1 kHz; overflow shows as a seq gap.
+  (Raised from the design's original 256 during hardware validation:
+  per-command probe latency made the smaller ring lose the race
+  against its own wrap.)
 
 ## 5. Tool-side pipeline
 

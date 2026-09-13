@@ -73,6 +73,37 @@ happened to be, pinning it there on real hardware forever after
 (every subsequent naive write repeats the same clobber). This is
 race-free: firmware only ever changes generation on an accept, which
 cannot precede the host's own final write of that same word.
+
+A record surviving the torn-read guard above can still be honestly
+sampled and still be WRONG to show: while a table edit is in flight
+(the gate closed, addresses being rewritten, not yet accepted),
+firmware keeps emitting records every tick, still tagged with the
+OLD (unchanged) generation, with every slot reading 0 since
+watch_count is 0 for that whole span - rendered as-is, a channel that
+was legitimately being watched before AND after the edit would show a
+spurious drop to zero exactly at the edit. Symmetrically, a record
+sampled before an edit but not yet drained out of the ring by the time
+the edit's set_watch() call returns can be appended after the
+reader's caller has already re-laid-out its OWN storage for the new
+table (e.g. TraceStore's column compaction on a channel removal,
+ui/trace_store.py) - it would land in a column that used to mean what
+it did but no longer does, a real value under the wrong channel.
+
+Both are fixed the same way, at the reader: self._expected_gen is the
+generation this reader currently trusts - set once at discover() (to
+whatever generation was already running) and again on every successful
+non-empty set_watch() (to the NEW, just-accepted generation; set_watch
+records the OLD generation on entry, before any write, purely to
+detect that accept). refresh() drops - and counts into self.lost -
+every record whose own gen tag doesn't match self._expected_gen. Since
+self._expected_gen only advances at the exact moment a set_watch()
+call returns successfully, EVERY record from before that moment still
+sitting undelivered (in-flight gate-window zeros and not-yet-drained
+pre-edit stragglers alike) reads as a mismatch on the first refresh()
+after the edit and is dropped as an honest gap, rather than rendered
+as real data under a layout it no longer describes; only records
+sampled under the table this reader is actually watching now ever
+reach a caller.
 """
 import struct
 import time
@@ -120,6 +151,25 @@ def _filter_stable(records: List[TraceRecord], start: int, new_wr_seq: int,
     return kept, dropped
 
 
+def _filter_current_gen(records: List[TraceRecord], expected_gen: Optional[int]
+                        ) -> Tuple[List[TraceRecord], int]:
+    """IMPORTANT 3+4's honest-gap filter (see the module docstring): a
+    record surviving _filter_stable() can still have been sampled
+    under a table this reader no longer trusts - a gate-window zero
+    from mid-edit, or a pre-edit straggler drained after the caller
+    already re-laid-out its own storage for the new table. Both carry
+    a gen tag that doesn't match `expected_gen` (the generation this
+    reader currently trusts - see TraceReader._expected_gen) and are
+    dropped, uniformly, the same way a torn read is: not delivered,
+    counted into self.lost. `expected_gen` of None (nothing known yet)
+    keeps every record. Returns (kept, dropped_count) - kept preserves
+    the input order, same contract as _filter_stable."""
+    if expected_gen is None:
+        return list(records), 0
+    kept = [r for r in records if r.gen == expected_gen]
+    return kept, len(records) - len(kept)
+
+
 class TraceReader:
     def __init__(self, engine: Engine):
         self.engine = engine
@@ -127,12 +177,17 @@ class TraceReader:
         self.desc = None  # type: Optional[TraceDesc]
         self.last_seq = -1
         self.lost = 0
+        # IMPORTANT 3+4: the generation this reader currently trusts -
+        # see the module docstring and _filter_current_gen. Set at
+        # discover() and on every successful set_watch().
+        self._expected_gen = None  # type: Optional[int]
 
     def discover(self, desc_addr: int) -> TraceDesc:
         self.desc_addr = desc_addr
         desc = self._read_desc()
         self.desc = desc
         self.last_seq = desc.wr_seq - 1
+        self._expected_gen = desc.generation
         return desc
 
     def status(self) -> TraceDesc:
@@ -174,6 +229,13 @@ class TraceReader:
         kept, dropped = _filter_stable(raw_records, start, post_desc.wr_seq,
                                        post_desc.ring_count)
         self.lost += dropped
+
+        # IMPORTANT 3+4: drop anything sampled under a table this
+        # reader no longer trusts (a gate-window zero, or a pre-edit
+        # straggler) - see the module docstring and
+        # _filter_current_gen.
+        kept, gen_dropped = _filter_current_gen(kept, self._expected_gen)
+        self.lost += gen_dropped
 
         self.last_seq = wr_seq - 1
         return kept
@@ -237,6 +299,13 @@ class TraceReader:
                 name = _STATUS_NAMES.get(desc.status, str(desc.status))
                 raise TraceError("firmware rejected table: %s" % name)
             raise TraceError("firmware did not accept watch table")
+
+        # IMPORTANT 3+4: this reader now trusts the NEW generation -
+        # every record still in flight under the old one (gate-window
+        # zeros, pre-edit stragglers) will read as a mismatch on the
+        # next refresh() and be dropped as an honest gap instead of
+        # rendered under a layout it no longer describes.
+        self._expected_gen = desc.generation
 
     def _compose_addr_word(self, addr: int) -> int:
         """IMPORTANT 6: wire word for one watch_addrs[] uint32 slot,

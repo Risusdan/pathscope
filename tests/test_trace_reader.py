@@ -1,6 +1,7 @@
 import dataclasses
 import time
 
+import numpy as np
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -183,6 +184,73 @@ def test_set_watch_empty_skips_generation_wait():
         desc = r.status()
         assert desc.watch_count == 0
         assert desc.generation == gen_before   # firmware never bumps it
+    finally:
+        engine.stop()
+
+
+def test_table_edits_drop_stale_generation_records_as_honest_gap():
+    # IMPORTANT 3+4 regression, through the (now hardware-faithful)
+    # sim: add A, add B (a table edit) while A's just-sampled records
+    # are still sitting undrained in the ring, add C the same way, then
+    # remove B - the middle channel - compacting C into B's old
+    # column. fw.step() is called BEFORE each drain that follows a
+    # set_watch(), so every refresh() after the first sees a batch
+    # mixing the OLD generation's tail (sampled before that edit, not
+    # yet drained) with the NEW generation's fresh records - exactly
+    # the window a pre-fix reader would let bleed into the wrong
+    # TraceStore column. Post-fix: those stale-generation records never
+    # reach the store at all - self.lost grows instead, and every real
+    # value that DOES land in a column belongs to that column's actual
+    # channel, with a gap where each edit's stale tail was dropped.
+    from ui.trace_store import TraceStore
+
+    adapter = MockAdapter({0x20000000: 111, 0x20000004: 222,
+                           0x20000008: 333})
+    fw = FakeTraceFirmware(adapter)
+    engine = Engine.load("targets/f411", adapter, interval_s=0.01)
+    engine.start()
+    try:
+        r = TraceReader(engine)
+        desc = r.discover(fw.desc_addr)
+        store = TraceStore(desc, window_s=10.0)
+        lost_before = r.lost
+
+        store.clear_slot(0)
+        r.set_watch([0x20000000])                    # A -> slot 0
+        fw.step(3)                                    # left undrained
+
+        store.clear_slot(1)
+        r.set_watch([0x20000000, 0x20000004])         # + B -> slot 1
+        fw.step(3)
+        store.append(r.refresh())                     # mixed-gen batch
+
+        store.clear_slot(2)
+        r.set_watch([0x20000000, 0x20000004, 0x20000008])  # + C -> slot 2
+        fw.step(3)
+        store.append(r.refresh())                     # mixed-gen batch
+
+        store.remove_slot(1)                          # compact: C -> slot 1
+        r.set_watch([0x20000000, 0x20000008])          # remove B (middle)
+        fw.step(3)
+        store.append(r.refresh())                     # mixed-gen batch
+
+        assert r.lost > lost_before
+
+        _t, y0 = store.series(0)
+        real0 = y0[~np.isnan(y0)]
+        assert real0.size > 0
+        assert np.all(real0 == 111)        # slot 0 is always A - never a
+                                             # gate-window 0, never B/C's
+                                             # value bleeding in
+        assert np.isnan(y0).any()           # honest gap at an edit
+
+        _t, y1 = store.series(1)
+        real1 = y1[~np.isnan(y1)]
+        assert real1.size > 0
+        # slot 1 was B (222) until the removal, C (333) afterward -
+        # never A's value, never a stray 0.
+        assert np.all((real1 == 222) | (real1 == 333))
+        assert np.isnan(y1).any()
     finally:
         engine.stop()
 

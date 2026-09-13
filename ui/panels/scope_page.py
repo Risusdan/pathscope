@@ -650,7 +650,13 @@ class ScopePage(QWidget):
             self._cursor_line = pg.InfiniteLine(
                 pos=x, angle=90,
                 pen=pg.mkPen(color=CURSOR_PEN, width=2, style=Qt.DashLine))
-            self.plot.addItem(self._cursor_line)
+            # ignoreBounds=True: a cursor parked at an old event time
+            # must not itself stretch the plot's auto-range - without
+            # this, ViewBox.childrenBounds() (which drives auto-range)
+            # includes every added item by default, pinning one edge
+            # of the view to a stale x forever while the live data
+            # scrolls past it.
+            self.plot.addItem(self._cursor_line, ignoreBounds=True)
         else:
             self._cursor_line.setPos(x)
         self._flash_nearest_marker(t)
@@ -746,6 +752,12 @@ class ScopePage(QWidget):
     def _on_mouse_moved(self, evt) -> None:
         pos = evt[0]
         if not self.plot.sceneBoundingRect().contains(pos):
+            # mouse left the plot viewport - hide the crosshair rather
+            # than leaving it frozen at its last x (readout rows keep
+            # their last values, which is fine; only the line itself
+            # needs to disappear).
+            if self._crosshair_line is not None:
+                self._crosshair_line.hide()
             return
         view_point = self.plot.vb.mapSceneToView(pos)
         self._update_crosshair(view_point.x())
@@ -763,9 +775,14 @@ class ScopePage(QWidget):
                 pos=view_t, angle=90, movable=False,
                 pen=pg.mkPen(color=CROSSHAIR_PEN, width=1,
                              style=Qt.DashLine))
-            self.plot.addItem(self._crosshair_line)
+            # ignoreBounds=True: a crosshair left parked at whatever x
+            # the mouse last visited must not itself stretch the
+            # plot's auto-range - see jump_to()'s cursor line for the
+            # identical reasoning (both are added the same way here).
+            self.plot.addItem(self._crosshair_line, ignoreBounds=True)
         else:
             self._crosshair_line.setPos(view_t)
+        self._crosshair_line.show()
         self.time_label.setText("t=%.3f s" % view_t)
         for key in self._channels:
             self._channels[key]["item"].setText(self._row_text(key))

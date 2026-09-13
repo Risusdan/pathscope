@@ -339,3 +339,58 @@ def test_normalize_maps_to_unit_range(qtbot):
 
     flat_ys = page.curve_y(flat_key)
     assert flat_ys == [pytest.approx(0.5)]
+
+
+def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
+    """Hardware-session regression: the crosshair (and, identically,
+    jump_to()'s cursor) must never itself contribute to the plot's
+    auto-range. Two symptoms from the same root cause -
+    ViewBox.childrenBounds() (which drives auto-range) includes every
+    added item by default, unless addItem() was called with
+    ignoreBounds=True:
+
+    1. Stale pin - a crosshair/cursor left parked at an old x (mouse
+       moved away, or an old event's t) permanently stretches the
+       view's range to include that x even as live data scrolls past
+       it, while History's own window keeps the real data span fixed.
+    2. Live jitter - since every single sigMouseMoved repositions the
+       crosshair line, if that line counted toward bounds then merely
+       moving the mouse (no clicks) would recompute and visibly
+       rescale/jitter the view on every event.
+
+    Asserting the ViewBox's childrenBoundingRect() is byte-for-byte
+    unchanged after placing a crosshair (or cursor) far outside the
+    plotted data's span - and unchanged again after moving it further
+    still - demonstrates both: an included item would have moved the
+    rect's edge to track it, so an unmoved rect proves the item is
+    excluded from bounds, not merely that its effect happens to be
+    small."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    for i, v in enumerate([100, 200, 300]):
+        engine.history.record(key, t0 + i * 0.1, v)
+    page.refresh_plot()
+
+    baseline = page.plot.vb.childrenBoundingRect()
+
+    # crosshair: placing it far outside the data's span, then moving
+    # it again to a different far point, must not move the bounds at
+    # all - not "not much", not at all.
+    page._update_crosshair(1000.0)
+    after_first_move = page.plot.vb.childrenBoundingRect()
+    assert after_first_move == baseline
+
+    page._update_crosshair(5000.0)
+    after_second_move = page.plot.vb.childrenBoundingRect()
+    assert after_second_move == baseline
+    assert after_second_move.right() < 1000.0
+
+    # cursor (jump_to): same exclusion, same reasoning.
+    page.jump_to(t0 + 9000.0)
+    after_cursor = page.plot.vb.childrenBoundingRect()
+    assert after_cursor == baseline
+    assert after_cursor.right() < 1000.0

@@ -345,9 +345,14 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
 - Layout edit mode: blocks draggable in the running tool, "Export
   layout" writes coordinates back to the topology file; the existing
   auto-grid fallback seeds positions for new targets, optionally a
-  graphviz-dot first draft. Removes the hand-written absolute
-  coordinates pain for large SoC scenario files. (Hardware-session
-  request, 2026-09-13.)
+  pure-python Sugiyama first draft (grandalf). Auto-layout is a
+  FIRST-DRAFT seed only, never a live mode: layered algorithms cannot
+  express spec-book idioms (full-height interconnects, port-anchored
+  orthogonal routing) and reshuffle the whole picture on any topology
+  edit, destroying the familiar-figure value this tool exists for.
+  Coordinates freeze in the yaml after the one-time drag pass. Removes
+  the hand-written absolute coordinates pain for large SoC scenario
+  files. (Hardware-session request, 2026-09-13.)
 - Fault snapshot: on an anomaly rule's rising edge, attach the engine's
   current Snapshot (the very data the rule fired on) to the AnomalyEvent;
   clicking the event-log row shows the register state at fault time even

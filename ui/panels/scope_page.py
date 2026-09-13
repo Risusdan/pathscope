@@ -101,16 +101,18 @@ symbol_list carries a tooltip noting that a symbol larger than 4
 bytes is only sampled at its first word - this is documented here
 rather than filtered at load time, per the brief.
 """
+import struct
 import time
 from typing import Dict, List, Optional, Tuple
 
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
-                               QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton,
-                               QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtGui import QDoubleValidator, QFont
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QPushButton, QScrollArea,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -146,14 +148,44 @@ MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 
-# Side panel width (also used by side_widget.setMaximumWidth() below) -
-# named here so the transform strip's Normalize-label fit check has a
-# stable budget to measure against, rather than a second copy of the
-# literal.
-SIDE_MAX_WIDTH = 260
-SPIN_MIN_WIDTH = 90
-NORMALIZE_LABEL_FULL = "Normalize (map window to 0..1)"
-NORMALIZE_LABEL_SHORT = "Normalize"
+# Side panel width (also used by side_widget.setMaximumWidth() below).
+# v2's channel table is the hero of this panel (spec point 2: 8
+# columns - swatch/name/type/Value/Hz/scale/offset/Fit) and needs
+# meaningfully more width than the old list+strip design's 260px to
+# stay readable; the plot area still gets the rest of the window via
+# outer's stretch factor.
+SIDE_MAX_WIDTH = 520
+
+# Channel table columns (spec point 2).
+COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, COL_SCALE, \
+    COL_OFFSET, COL_FIT = range(8)
+COLUMN_LABELS = ["", "Name", "Type", "Value", "Hz", "Scale", "Offset", "Fit"]
+
+# Type decode set (spec point 3): display-side only, core untouched.
+# Each spec is (bit width, signed?, shift-from-bit-0); f32 is handled
+# separately (IEEE-754 reinterpretation of the raw 32-bit word).
+TYPE_SPECS = {
+    "u32":    {"width": 32, "signed": False, "shift": 0},
+    "i32":    {"width": 32, "signed": True,  "shift": 0},
+    "u16.lo": {"width": 16, "signed": False, "shift": 0},
+    "u16.hi": {"width": 16, "signed": False, "shift": 16},
+    "i16.lo": {"width": 16, "signed": True,  "shift": 0},
+    "i16.hi": {"width": 16, "signed": True,  "shift": 16},
+    "u8.0":   {"width": 8,  "signed": False, "shift": 0},
+    "u8.1":   {"width": 8,  "signed": False, "shift": 8},
+    "u8.2":   {"width": 8,  "signed": False, "shift": 16},
+    "u8.3":   {"width": 8,  "signed": False, "shift": 24},
+    "f32":    {"width": 32, "signed": None,  "shift": 0, "float": True},
+}
+TYPES = list(TYPE_SPECS)
+DEFAULT_TYPE = "u32"
+
+# Scale/offset cells (spec point 2): plain QLineEdit text fields, not
+# spinboxes - accept scientific notation, Enter commits, an invalid
+# entry reverts to the last-good value and flashes this background
+# briefly so the user sees why nothing changed.
+INVALID_EDIT_STYLE = "background-color: #FFCDD2;"
+INVALID_EDIT_FLASH_MS = 400
 
 # Bandwidth budget indicator: below this live sweep rate, the label
 # calls out that the read count is the likely cause (spec: "R < 15.0
@@ -167,6 +199,7 @@ BUDGET_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
 CURVE_COLORS = [
     "#1976D2", "#2E7D32", "#EF6C00", "#6A1B9A",
     "#00838F", "#AD1457", "#5D4037", "#455A64",
+    "#C62828", "#827717",
 ]
 
 
@@ -226,6 +259,60 @@ def value_at(series: List[Tuple[float, int]], t: float) -> Optional[int]:
     return None
 
 
+def decode_value(raw: int, type_name: str):
+    """Display-side type decode (spec point 3) of a raw 32-bit register
+    sample - core is untouched, this is purely how the value is
+    interpreted for the table's Value column and the plotted curve.
+    f32 reinterprets the raw word's bit pattern as IEEE-754 (returns a
+    float); every other type extracts a sub-field by shift/width and,
+    if signed, applies two's-complement sign extension (returns an
+    int)."""
+    spec = TYPE_SPECS[type_name]
+    if spec.get("float"):
+        raw32 = raw & 0xFFFFFFFF
+        return struct.unpack("<f", raw32.to_bytes(4, "little"))[0]
+    width = spec["width"]
+    field = (raw >> spec["shift"]) & ((1 << width) - 1)
+    if spec["signed"] and field & (1 << (width - 1)):
+        field -= 1 << width
+    return field
+
+
+def format_value(decoded, type_name: str) -> str:
+    """The Value column's fixed dual-radix format (spec point 6):
+    "55 (0x37)" for an integer type, sized to that type's own bit
+    width (e.g. a u8 field shows 2 hex digits, not 8); f32 shows the
+    float alone - a hex reading of a float's bits would not mean
+    anything to the person reading it, so no radix pair is offered
+    for that type. No user-facing radix toggle exists for either
+    case."""
+    spec = TYPE_SPECS[type_name]
+    if spec.get("float"):
+        return "%.6g" % decoded
+    hex_digits = spec["width"] // 4
+    raw_bits = decoded & ((1 << spec["width"]) - 1)
+    return "%d (0x%0*X)" % (decoded, hex_digits, raw_bits)
+
+
+def _default_type_for_size(size: int) -> str:
+    """ELF preselect (spec point 3): choose a type from the symbol's
+    declared byte size, unsigned default - a 1-byte symbol starts as
+    u8.0, a 2-byte symbol as u16.lo, anything else (4 bytes, or larger
+    - a channel only ever samples the first word regardless) as u32."""
+    if size <= 1:
+        return "u8.0"
+    if size == 2:
+        return "u16.lo"
+    return "u32"
+
+
+def _fmt_num(v: float) -> str:
+    """Compact numeric text for a scale/offset cell - "%g" keeps
+    scientific notation for very small/large magnitudes instead of a
+    long fixed-point expansion."""
+    return "%g" % v
+
+
 def _apply_transform(ys: List[float], transform: dict) -> List[float]:
     """Display-only transform applied to an already-gapped y array
     (see _gapped_xy) - NaN gap placeholders pass through untouched,
@@ -233,8 +320,15 @@ def _apply_transform(ys: List[float], transform: dict) -> List[float]:
     normalize. Normalize ignores scale/offset entirely and maps this
     window's min..max to 0..1, with a flat-series guard (max == min)
     mapping every finite value to 0.5 instead of dividing by a zero
-    span. Pure python lists throughout - no numpy dependency."""
-    if transform["normalize"]:
+    span. Pure python lists throughout - no numpy dependency.
+
+    "normalize" is a transitional key (removed along with the rest of
+    the Normalize feature once Fit/Auto-lane land, spec point 4) - the
+    table's scale/offset cells never set it, so it defaults to False
+    via .get() for every channel added through the v2 UI; it survives
+    here only for set_channel_transform()'s pre-existing normalize
+    kwarg."""
+    if transform.get("normalize"):
         finite = [v for v in ys if v == v]        # v == v excludes NaN
         if not finite:
             return list(ys)
@@ -287,11 +381,33 @@ class ScopePage(QWidget):
 
         side = QVBoxLayout()
         side.addWidget(QLabel("Channels"))
-        self.channel_list = QListWidget()
-        side.addWidget(self.channel_list, 1)
 
-        # Removal is a channel-list operation, so it belongs directly
-        # under the list - both for locality and for reachability: on
+        # The channel table is this panel's hero (spec point 2):
+        # replaces the old list+strip pair - name/type/value/rate and
+        # the per-channel scale/offset that used to live in a
+        # selection-driven side strip are now all inline, one row per
+        # channel, always visible regardless of selection.
+        self.channel_table = QTableWidget(0, len(COLUMN_LABELS))
+        self.channel_table.setHorizontalHeaderLabels(COLUMN_LABELS)
+        self.channel_table.verticalHeader().setVisible(False)
+        self.channel_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.channel_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.channel_table.setEditTriggers(
+            QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
+        header = self.channel_table.horizontalHeader()
+        header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        self.channel_table.setColumnWidth(COL_SWATCH, 18)
+        self.channel_table.setColumnWidth(COL_TYPE, 70)
+        self.channel_table.setColumnWidth(COL_VALUE, 100)
+        self.channel_table.setColumnWidth(COL_HZ, 48)
+        self.channel_table.setColumnWidth(COL_SCALE, 64)
+        self.channel_table.setColumnWidth(COL_OFFSET, 64)
+        self.channel_table.setColumnWidth(COL_FIT, 44)
+        self.channel_table.itemChanged.connect(self._on_item_changed)
+        side.addWidget(self.channel_table, 1)
+
+        # Removal is a channel-table operation, so it belongs directly
+        # under the table - both for locality and for reachability: on
         # a short dock (see the QScrollArea wrap below), this keeps
         # "Remove channel" visible without scrolling even when the ELF
         # section further down is scrolled out of view.
@@ -299,69 +415,9 @@ class ScopePage(QWidget):
         self.remove_btn.clicked.connect(self._on_remove_clicked)
         side.addWidget(self.remove_btn)
 
-        # per-channel scale/offset/normalize edit strip (feature 2) -
-        # hidden until a channel row is selected, populated from that
-        # channel's stored transform, and hidden again on deselection
-        # (currentItemChanged fires with current=None when the list
-        # goes empty of a selection, e.g. after removing the selected
-        # row).
-        #
-        # Two rows, not one - the ~260px side panel (SIDE_MAX_WIDTH)
-        # is too narrow to fit "scale" + spinbox + "offset" + spinbox
-        # + "Normalize" on a single hbox row without truncating (a
-        # hardware-session screenshot showed "Normalize" clipped to
-        # "Norr" and the offset spinbox's value clipped): row 1 is
-        # scale+offset, row 2 is Normalize alone with the full width
-        # to itself.
-        transform_row1 = QHBoxLayout()
-        transform_row1.addWidget(QLabel("scale"))
-        self.scale_spin = QDoubleSpinBox()
-        self.scale_spin.setRange(1e-6, 1e9)
-        self.scale_spin.setDecimals(6)
-        self.scale_spin.setValue(1.0)
-        self.scale_spin.setMinimumWidth(SPIN_MIN_WIDTH)
-        transform_row1.addWidget(self.scale_spin, 1)
-
-        transform_row1.addWidget(QLabel("offset"))
-        self.offset_spin = QDoubleSpinBox()
-        self.offset_spin.setRange(-1e9, 1e9)
-        self.offset_spin.setDecimals(6)
-        self.offset_spin.setMinimumWidth(SPIN_MIN_WIDTH)
-        transform_row1.addWidget(self.offset_spin, 1)
-
-        transform_row2 = QHBoxLayout()
-        # Prefer the fuller hint text, but only if it plausibly fits
-        # the side panel's width - falls back to the bare word rather
-        # than risk the exact truncation this strip exists to fix.
-        self.normalize_check = QCheckBox(NORMALIZE_LABEL_FULL)
-        fm = self.normalize_check.fontMetrics()
-        checkbox_overhead = 40          # indicator box + spacing/margins
-        if fm.horizontalAdvance(NORMALIZE_LABEL_FULL) > (
-                SIDE_MAX_WIDTH - checkbox_overhead):
-            self.normalize_check.setText(NORMALIZE_LABEL_SHORT)
-        transform_row2.addWidget(self.normalize_check)
-        transform_row2.addStretch(1)
-
-        transform_layout = QVBoxLayout()
-        transform_layout.setContentsMargins(0, 0, 0, 0)
-        transform_layout.addLayout(transform_row1)
-        transform_layout.addLayout(transform_row2)
-
-        self.transform_strip = QWidget()
-        self.transform_strip.setLayout(transform_layout)
-        self.transform_strip.setVisible(False)
-        side.addWidget(self.transform_strip)
-
-        self.scale_spin.valueChanged.connect(self._on_transform_edited)
-        self.offset_spin.valueChanged.connect(self._on_transform_edited)
-        self.normalize_check.toggled.connect(self._on_transform_edited)
-        # Small honest-UI touch: while Normalize is checked, scale and
-        # offset are ignored by refresh_plot()'s transform, so grey
-        # them out rather than leave them editable-but-inert.
-        self.normalize_check.toggled.connect(self._set_scale_offset_enabled)
-        self.channel_list.currentItemChanged.connect(
-            self._on_channel_selected)
-
+        # Add-channel area (spec point 8): compact, 3 rows - register,
+        # address, and the ELF header row (Load + the collapsible
+        # symbol-picker toggle below it).
         reg_row = QHBoxLayout()
         self.reg_combo = QComboBox()
         reg_row.addWidget(self.reg_combo, 1)
@@ -383,31 +439,42 @@ class ScopePage(QWidget):
         addr_row.addWidget(add_addr_btn)
         side.addLayout(addr_row)
 
-        self.budget_label = QLabel("")
-        side.addWidget(self.budget_label)
-
-        side.addWidget(QLabel("ELF symbols"))
-        elf_row = QHBoxLayout()
+        elf_header_row = QHBoxLayout()
         load_elf_btn = QPushButton("Load ELF...")
         load_elf_btn.clicked.connect(self._on_load_elf_clicked)
-        elf_row.addWidget(load_elf_btn)
-        side.addLayout(elf_row)
+        elf_header_row.addWidget(load_elf_btn, 1)
+        # Collapsible symbol picker (spec point 8): collapsed by
+        # default so the compact 3-row add area doesn't cost vertical
+        # space for a symbol list nobody has loaded yet - auto-expands
+        # the first time load_elf() actually populates one.
+        self.elf_toggle_btn = QPushButton("> ELF symbols")
+        self.elf_toggle_btn.setCheckable(True)
+        self.elf_toggle_btn.clicked.connect(self._on_elf_toggle_clicked)
+        elf_header_row.addWidget(self.elf_toggle_btn, 1)
+        side.addLayout(elf_header_row)
 
+        elf_content_layout = QVBoxLayout()
+        elf_content_layout.setContentsMargins(0, 0, 0, 0)
         self.symbol_filter_edit = QLineEdit()
         self.symbol_filter_edit.setPlaceholderText("filter symbols")
         self.symbol_filter_edit.textChanged.connect(
             self._refresh_symbol_list)
-        side.addWidget(self.symbol_filter_edit)
+        elf_content_layout.addWidget(self.symbol_filter_edit)
 
         self.symbol_list = QListWidget()
         self.symbol_list.setToolTip(SYMBOL_LIST_TOOLTIP)
         self.symbol_list.setMaximumHeight(120)
-        side.addWidget(self.symbol_list)
+        elf_content_layout.addWidget(self.symbol_list)
 
         add_symbol_btn = QPushButton("Add symbol")
         add_symbol_btn.setToolTip(SYMBOL_LIST_TOOLTIP)
         add_symbol_btn.clicked.connect(self._on_add_symbol_clicked)
-        side.addWidget(add_symbol_btn)
+        elf_content_layout.addWidget(add_symbol_btn)
+
+        self.elf_content = QWidget()
+        self.elf_content.setLayout(elf_content_layout)
+        self.elf_content.setVisible(False)
+        side.addWidget(self.elf_content)
 
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #C62828;")
@@ -418,19 +485,23 @@ class ScopePage(QWidget):
             "window: %.0f s (History)" % engine.history.window_s)
         side.addWidget(self.window_label)
 
+        # Bandwidth budget indicator (spec point 8: "budget label
+        # bottom") - last widget in the side column.
+        self.budget_label = QLabel("")
+        side.addWidget(self.budget_label)
+
         side_widget = QWidget()
         side_widget.setLayout(side)
 
-        # The side panel's content (channel list, transform strip, add
-        # rows, budget label, ELF section, Remove channel, window
-        # label) can exceed the dock's height at typical sizes -
-        # without a scroll area, the bottom controls are pushed
-        # off-screen with no way to reach them (a hardware-session
-        # screenshot showed the panel cut off at "Add symbol").
-        # setWidgetResizable(True) lets side_widget track the
-        # viewport's width (so its own child layouts still fill it
-        # horizontally) while its height is free to exceed the
-        # viewport and scroll.
+        # The side panel's content (channel table, add rows, ELF
+        # section, Remove channel, window/budget labels) can exceed
+        # the dock's height at typical sizes - without a scroll area,
+        # the bottom controls are pushed off-screen with no way to
+        # reach them (a hardware-session screenshot showed the panel
+        # cut off at "Add symbol"). setWidgetResizable(True) lets
+        # side_widget track the viewport's width (so its own child
+        # layouts still fill it horizontally) while its height is free
+        # to exceed the viewport and scroll.
         self.side_scroll = QScrollArea()
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setHorizontalScrollBarPolicy(
@@ -524,30 +595,37 @@ class ScopePage(QWidget):
         """Add a channel for an already-polled register key (picked
         from the "Add register" dropdown, which only lists
         engine.polled). Idempotent - re-adding an existing key is a
-        no-op."""
+        no-op. Always starts at the default type (u32) - a plain
+        register/address add has no size hint to preselect from (that
+        is the ELF path's job, see add_symbol_channel)."""
         if key in self._channels:
             return
         if label is None:
             label = self.engine.addr_watch_labels.get(key, key)
-        self._add_channel_common(key, label)
+        self._add_channel_common(key, label, DEFAULT_TYPE)
         self._update_budget_label()
 
-    def add_address_channel(self, addr: int, label: str) -> str:
+    def add_address_channel(self, addr: int, label: str,
+                            type_name: Optional[str] = None) -> str:
         """Add a fixed-address channel via engine.add_addr_watch().
         Raises EngineError straight through (guarded/misaligned
         address) - the button handler below is what catches it and
-        renders the message inline, never a dialog.
+        renders the message inline, never a dialog. type_name lets
+        add_symbol_channel preselect a type from the ELF symbol's
+        size (spec point 3); the manual address row always leaves it
+        at the default (u32).
 
         add_addr_watch() is idempotent on addr but always re-sets the
         engine's label; re-adding an address that already has a
         channel here must follow suit rather than silently keeping
-        the first label, so the displayed legend/list entry stays in
-        sync with what the engine now reports for this key."""
+        the first label, so the displayed legend/table entry stays in
+        sync with what the engine now reports for this key (the type
+        of an existing channel is left alone on a re-add)."""
         key = self.engine.add_addr_watch(addr, label)
         if key in self._channels:
             self._relabel_channel(key, label)
         else:
-            self._add_channel_common(key, label)
+            self._add_channel_common(key, label, type_name or DEFAULT_TYPE)
         self._update_budget_label()
         return key
 
@@ -558,7 +636,7 @@ class ScopePage(QWidget):
         legend_label = self.plot.legend.getLabel(entry["curve"])
         if legend_label is not None:
             legend_label.setText(label)
-        entry["item"].setText(label)
+        entry["name_item"].setText(label)
 
     def remove_channel(self, key: str) -> None:
         entry = self._channels.pop(key, None)
@@ -566,9 +644,9 @@ class ScopePage(QWidget):
             return
         self._last_series.pop(key, None)
         self.plot.removeItem(entry["curve"])
-        row = self.channel_list.row(entry["item"])
-        if row >= 0:
-            self.channel_list.takeItem(row)
+        row = self._row_for_key(key)
+        if row is not None:
+            self.channel_table.removeRow(row)
         if key.startswith("@"):
             # the scope itself asked for this address watch - clean it
             # up so the poller stops reading it once nothing displays
@@ -576,23 +654,159 @@ class ScopePage(QWidget):
             self.engine.remove_addr_watch(key)
         self._update_budget_label()
 
-    def _add_channel_common(self, key: str, label: str) -> None:
+    def _row_for_key(self, key: str) -> Optional[int]:
+        for row in range(self.channel_table.rowCount()):
+            item = self.channel_table.item(row, COL_NAME)
+            if item is not None and item.data(Qt.UserRole) == key:
+                return row
+        return None
+
+    def _add_channel_common(self, key: str, label: str,
+                            type_name: str) -> None:
         color = CURVE_COLORS[len(self._channels) % len(CURVE_COLORS)]
         curve = self.plot.plot([], [], pen=pg.mkPen(color=color, width=2),
                                name=label, connect="finite")
-        item = QListWidgetItem(label)
-        item.setData(Qt.UserRole, key)
-        self.channel_list.addItem(item)
-        # transform: display-only scale/offset/normalize (feature 2),
-        # identity by default; rate: last-computed effective Hz,
-        # cached here so _row_text() can rebuild the row's rate
-        # suffix from a crosshair move without waiting on the next
-        # refresh_plot().
+
+        row = self.channel_table.rowCount()
+        self.channel_table.insertRow(row)
+
+        swatch = QLabel()
+        swatch.setFixedSize(12, 12)
+        swatch.setStyleSheet(
+            "background-color: %s; border-radius: 2px;" % color)
+        swatch_box = QWidget()
+        swatch_layout = QHBoxLayout(swatch_box)
+        swatch_layout.setContentsMargins(0, 0, 0, 0)
+        swatch_layout.setAlignment(Qt.AlignCenter)
+        swatch_layout.addWidget(swatch)
+        self.channel_table.setCellWidget(row, COL_SWATCH, swatch_box)
+
+        name_item = QTableWidgetItem(label)
+        name_item.setData(Qt.UserRole, key)
+        self.channel_table.setItem(row, COL_NAME, name_item)
+
+        type_combo = QComboBox()
+        type_combo.addItems(TYPES)
+        type_combo.setCurrentText(type_name)
+        type_combo.currentTextChanged.connect(
+            lambda text, k=key: self._on_type_changed(k, text))
+        self.channel_table.setCellWidget(row, COL_TYPE, type_combo)
+
+        value_item = QTableWidgetItem("--")
+        value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+        self.channel_table.setItem(row, COL_VALUE, value_item)
+
+        hz_item = QTableWidgetItem("0.0")
+        hz_item.setFlags(hz_item.flags() & ~Qt.ItemIsEditable)
+        self.channel_table.setItem(row, COL_HZ, hz_item)
+
+        scale_edit = self._make_number_edit(key, "scale", 1.0)
+        self.channel_table.setCellWidget(row, COL_SCALE, scale_edit)
+        offset_edit = self._make_number_edit(key, "offset", 0.0)
+        self.channel_table.setCellWidget(row, COL_OFFSET, offset_edit)
+
+        fit_btn = QPushButton("Fill")
+        fit_btn.clicked.connect(lambda _checked=False, k=key:
+                                self._on_fit_clicked(k))
+        self.channel_table.setCellWidget(row, COL_FIT, fit_btn)
+
+        # transform: display-only scale/offset, identity by default;
+        # rate: last-computed effective Hz. The widgets are kept on
+        # the entry too so later methods (type change, transform
+        # commit, fit toggle, removal) don't have to re-locate the row
+        # by scanning the table every time.
         self._channels[key] = {
-            "label": label, "curve": curve, "item": item,
-            "transform": {"scale": 1.0, "offset": 0.0, "normalize": False},
+            "label": label, "curve": curve, "color": color,
+            "type": type_name,
+            "transform": {"scale": 1.0, "offset": 0.0},
+            "fit": "fill",
             "rate": 0.0,
+            "name_item": name_item, "value_item": value_item,
+            "hz_item": hz_item, "type_combo": type_combo,
+            "scale_edit": scale_edit, "offset_edit": offset_edit,
+            "fit_btn": fit_btn,
         }
+
+    # -- inline table editing (spec point 2) --------------------------------
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Handles a committed edit of the Name cell (double-click to
+        rename) - the table's other QTableWidgetItem-backed columns
+        (Value, Hz) are marked non-editable but still route through
+        this same signal on every programmatic setText() from
+        refresh_plot(), hence the early-out on column."""
+        if item.column() != COL_NAME:
+            return
+        key = item.data(Qt.UserRole)
+        entry = self._channels.get(key)
+        if entry is None:
+            return
+        new_label = item.text().strip()
+        if not new_label:
+            item.setText(entry["label"])
+            return
+        if new_label == entry["label"]:
+            return
+        entry["label"] = new_label
+        entry["curve"].opts["name"] = new_label
+        legend_label = self.plot.legend.getLabel(entry["curve"])
+        if legend_label is not None:
+            legend_label.setText(new_label)
+
+    def _on_type_changed(self, key: str, type_name: str) -> None:
+        entry = self._channels.get(key)
+        if entry is None:
+            return
+        entry["type"] = type_name
+        self.refresh_plot()
+
+    def _make_number_edit(self, key: str, field: str,
+                          initial: float) -> QLineEdit:
+        """A scale/offset cell (spec point 2): a plain text field, not
+        a spinbox - a QDoubleValidator in scientific-notation mode
+        keeps out non-numeric keystrokes, Enter commits via
+        _commit_number_edit, and losing focus with an uncommitted edit
+        simply leaves the field as typed (no silent commit or
+        silent-revert-on-blur - only Enter commits, per spec)."""
+        edit = QLineEdit(_fmt_num(initial))
+        validator = QDoubleValidator()
+        validator.setNotation(QDoubleValidator.ScientificNotation)
+        edit.setValidator(validator)
+        edit.returnPressed.connect(
+            lambda k=key, f=field, e=edit: self._commit_number_edit(k, f, e))
+        return edit
+
+    def _commit_number_edit(self, key: str, field: str,
+                            edit: QLineEdit) -> None:
+        entry = self._channels.get(key)
+        if entry is None:
+            return
+        text = edit.text().strip()
+        try:
+            value = float(text)
+        except ValueError:
+            self._flash_invalid(edit)
+            edit.setText(_fmt_num(entry["transform"][field]))
+            return
+        entry["transform"][field] = value
+        edit.setText(_fmt_num(value))
+
+    def _flash_invalid(self, edit: QLineEdit) -> None:
+        edit.setStyleSheet(INVALID_EDIT_STYLE)
+        QTimer.singleShot(INVALID_EDIT_FLASH_MS, lambda: edit.setStyleSheet(""))
+
+    def _on_fit_clicked(self, key: str) -> None:
+        """Per-row Fit toggle (spec point 4): switches this channel
+        between the two lane targets Auto-lane groups channels by -
+        "fill" (this channel alone fills the whole view) or "own" (it
+        gets one band of a multi-channel stack). The toggle only
+        changes which group the channel belongs to; the actual
+        scale/offset computation is Auto-lane's job."""
+        entry = self._channels.get(key)
+        if entry is None:
+            return
+        entry["fit"] = "own" if entry["fit"] == "fill" else "fill"
+        entry["fit_btn"].setText("Own" if entry["fit"] == "own" else "Fill")
 
     # -- add-channel UI handlers -------------------------------------------
 
@@ -633,7 +847,10 @@ class ScopePage(QWidget):
         self.addr_label_edit.clear()
 
     def _on_remove_clicked(self) -> None:
-        item = self.channel_list.currentItem()
+        row = self.channel_table.currentRow()
+        if row < 0:
+            return
+        item = self.channel_table.item(row, COL_NAME)
         if item is None:
             return
         self.remove_channel(item.data(Qt.UserRole))
@@ -649,7 +866,9 @@ class ScopePage(QWidget):
         `symbol_list`. Any failure (bad path, unparsable ELF) is
         rendered in `error_label` exactly like an EngineError from the
         address row - never a dialog; the QFileDialog in
-        _on_load_elf_clicked is this panel's one and only dialog."""
+        _on_load_elf_clicked is this panel's one and only dialog. On
+        success, auto-expands the collapsible symbol picker (spec
+        point 8) so the newly loaded list is immediately visible."""
         try:
             from ui.elf_symbols import load_symbols
             symbols = load_symbols(path)
@@ -660,14 +879,18 @@ class ScopePage(QWidget):
         self.symbol_filter_edit.clear()
         self._refresh_symbol_list()
         self.error_label.setText("")
+        self._set_elf_expanded(True)
 
     def add_symbol_channel(self, name: str) -> str:
         """Add a channel for a symbol already loaded by load_elf(), by
         its first word - a thin wrapper over add_address_channel (same
         synthetic key, same EngineError-through behavior), not a
-        separate code path. Raises KeyError for an unknown name."""
+        separate code path. Raises KeyError for an unknown name.
+        Preselects a type from the symbol's declared size (spec point
+        3: unsigned default)."""
         symbol = self.elf_symbols[name]
-        return self.add_address_channel(symbol.addr, symbol.name)
+        return self.add_address_channel(
+            symbol.addr, symbol.name, _default_type_for_size(symbol.size))
 
     def _refresh_symbol_list(self) -> None:
         needle = self.symbol_filter_edit.text().strip().lower()
@@ -693,6 +916,15 @@ class ScopePage(QWidget):
             self.error_label.setText("error: %s" % e)
             return
         self.error_label.setText("")
+
+    def _on_elf_toggle_clicked(self) -> None:
+        self._set_elf_expanded(self.elf_toggle_btn.isChecked())
+
+    def _set_elf_expanded(self, expanded: bool) -> None:
+        self.elf_content.setVisible(expanded)
+        self.elf_toggle_btn.setChecked(expanded)
+        self.elf_toggle_btn.setText(
+            "v ELF symbols" if expanded else "> ELF symbols")
 
     # -- event markers ---------------------------------------------------
 
@@ -794,11 +1026,18 @@ class ScopePage(QWidget):
         for key, entry in self._channels.items():
             series = self.engine.history.series(key)
             self._last_series[key] = series
-            x, y = _gapped_xy(series, now)
+            # decode display-side (spec point 3) before the gap-NaN
+            # pass and the scale/offset display transform - the raw
+            # ints stay in self._last_series for the Value column's
+            # own (unscaled) readout below.
+            decoded_series = [(t, decode_value(v, entry["type"]))
+                              for t, v in series]
+            x, y = _gapped_xy(decoded_series, now)
             y = _apply_transform(y, entry["transform"])
             entry["curve"].setData(x, y, connect="finite")
             entry["rate"] = _effective_rate_hz(series, now)
-            entry["item"].setText(self._row_text(key))
+            entry["hz_item"].setText("%.1f" % entry["rate"])
+            entry["value_item"].setText(self._value_text_for(key))
         self._prune_markers(now)
         if self._cursor_line is not None:
             self._cursor_line.setPos(self._cursor_t - now)
@@ -841,28 +1080,27 @@ class ScopePage(QWidget):
             self.budget_label.setToolTip("")
         self.budget_label.setText(text)
 
-    # -- crosshair readout (feature 1) --------------------------------------
+    # -- crosshair / Value column readout (feature 1, spec point 6) ---------
 
-    def _row_text(self, key: str) -> str:
-        """The channel-list row text: the existing "name (rate Hz)"
-        suffix, plus - once the crosshair has moved at least once - a
-        "= value (0xhex)" suffix showing the RAW sample at the
-        crosshair's time (never the scaled/normalized display value,
-        which is the whole point of a raw readout)."""
+    def _value_text_for(self, key: str) -> str:
+        """The Value column's text for one channel: the type-decoded,
+        dual-radix reading (spec point 6) at the crosshair's time if
+        the crosshair has ever moved, RAW (undecoded is wrong - it is
+        decode()'d, just never scale/offset'd - "Readouts always
+        decoded raw domain", spec point 4) rather than the
+        scaled/fit display value on the curve, which is the whole
+        point of this readout existing alongside the curve."""
         entry = self._channels[key]
-        text = "%s  (%.1f Hz)" % (entry["label"], entry["rate"])
-        if self._crosshair_t is not None:
-            # roll mode: the crosshair's x is relative to the last
-            # refresh's now, not the obsolete dock-open self._t0 - see
-            # the module docstring's "X axis" paragraph.
-            raw_t = self._crosshair_t + self._last_now
-            value = value_at(self._last_series.get(key, []), raw_t)
-            if value is None:
-                value_text = "--"
-            else:
-                value_text = "%d (0x%X)" % (value, value)
-            text += "  = %s" % value_text
-        return text
+        if self._crosshair_t is None:
+            return "--"
+        # roll mode: the crosshair's x is relative to the last
+        # refresh's now, not the obsolete dock-open self._t0 - see the
+        # module docstring's "X axis" paragraph.
+        raw_t = self._crosshair_t + self._last_now
+        raw = value_at(self._last_series.get(key, []), raw_t)
+        if raw is None:
+            return "--"
+        return format_value(decode_value(raw, entry["type"]), entry["type"])
 
     def _on_mouse_moved(self, evt) -> None:
         pos = evt[0]
@@ -902,64 +1140,32 @@ class ScopePage(QWidget):
         self._crosshair_line.show()
         self.time_label.setText("t-now = %.2f s" % view_t)
         for key in self._channels:
-            self._channels[key]["item"].setText(self._row_text(key))
+            self._channels[key]["value_item"].setText(
+                self._value_text_for(key))
 
-    # -- per-channel scale/offset/normalize (feature 2) ---------------------
+    # -- per-channel scale/offset (feature 2) --------------------------------
 
     def set_channel_transform(self, key: str, scale: float, offset: float,
                               normalize: bool = False) -> None:
-        """The programmatic surface the scale/offset spinboxes and
-        Normalize checkbox drive - also the direct entry point for
-        tests. A display-only transform: refresh_plot() applies it
-        (y' = (y - offset) * scale, or the normalize mapping) when
-        building each curve's y array; the crosshair readout above
-        always shows raw values regardless of this setting."""
+        """The programmatic surface the table's scale/offset text
+        fields drive - also the direct entry point for tests. A
+        display-only transform: refresh_plot() applies it (y' =
+        (y - offset) * scale, or - normalize=True, a transitional
+        kwarg due to be removed with the rest of Normalize once
+        Fit/Auto-lane land, spec point 4 - the normalize mapping) when
+        building each curve's y array; the Value column readout above
+        always shows the raw decoded value regardless of this
+        setting. Also mirrors scale/offset into the row's own text
+        fields so a programmatic change (this method, or a future
+        Auto-lane pass) is visible inline rather than only affecting
+        the plotted curve."""
         entry = self._channels.get(key)
         if entry is None:
             return
         entry["transform"] = {
             "scale": scale, "offset": offset, "normalize": normalize}
-
-    def _on_channel_selected(self, current, _previous) -> None:
-        if current is None:
-            self.transform_strip.setVisible(False)
-            return
-        key = current.data(Qt.UserRole)
-        entry = self._channels.get(key)
-        if entry is None:
-            self.transform_strip.setVisible(False)
-            return
-        transform = entry["transform"]
-        spins = (self.scale_spin, self.offset_spin, self.normalize_check)
-        for w in spins:
-            w.blockSignals(True)
-        self.scale_spin.setValue(transform["scale"])
-        self.offset_spin.setValue(transform["offset"])
-        self.normalize_check.setChecked(transform["normalize"])
-        for w in spins:
-            w.blockSignals(False)
-        # setChecked() above was signal-blocked (it must not re-fire
-        # _on_transform_edited and re-store the channel's own values
-        # back at itself), so the enabled/disabled state it would
-        # normally drive via toggled needs setting explicitly here too.
-        self._set_scale_offset_enabled(transform["normalize"])
-        self.transform_strip.setVisible(True)
-
-    def _set_scale_offset_enabled(self, normalize_checked: bool) -> None:
-        """Grey out scale/offset while Normalize is checked - they are
-        ignored by _apply_transform() in that mode, so leaving them
-        editable would be dishonest UI."""
-        self.scale_spin.setEnabled(not normalize_checked)
-        self.offset_spin.setEnabled(not normalize_checked)
-
-    def _on_transform_edited(self, _value=None) -> None:
-        item = self.channel_list.currentItem()
-        if item is None:
-            return
-        key = item.data(Qt.UserRole)
-        self.set_channel_transform(
-            key, self.scale_spin.value(), self.offset_spin.value(),
-            self.normalize_check.isChecked())
+        entry["scale_edit"].setText(_fmt_num(scale))
+        entry["offset_edit"].setText(_fmt_num(offset))
 
     # -- test-support accessors ---------------------------------------------
 

@@ -1,4 +1,5 @@
 import math
+import struct
 import time
 
 import pyqtgraph as pg
@@ -9,10 +10,12 @@ from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
+from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
-from ui.panels.scope_page import (NORMALIZE_LABEL_FULL,
-                                  NORMALIZE_LABEL_SHORT, ScopePage,
-                                  _gapped_xy, value_at)
+from ui.panels.scope_page import (COL_NAME, CURVE_COLORS, DEFAULT_TYPE,
+                                  TYPES, ScopePage, _default_type_for_size,
+                                  _gapped_xy, decode_value, format_value,
+                                  value_at)
 
 TARGET = "targets/f411"
 
@@ -50,8 +53,8 @@ def test_add_address_channel_relabels_existing(qtbot):
     """Re-adding the same fixed address with a different label (the
     engine's add_addr_watch() already re-sets its own label
     idempotently) must update the existing channel's label - both the
-    channel-list row and the curve's legend entry - rather than
-    leaving the first label in place or creating a duplicate curve."""
+    channel-table row and the curve's legend entry - rather than
+    leaving the first label in place or creating a duplicate row."""
     engine = make_demo_engine("targets/f411")
     page = ScopePage(engine)
     qtbot.addWidget(page)
@@ -60,12 +63,12 @@ def test_add_address_channel_relabels_existing(qtbot):
 
     assert key1 == key2
     assert len(page._channels) == 1
-    assert page.channel_list.count() == 1
+    assert page.channel_table.rowCount() == 1
 
     entry = page._channels[key1]
     assert entry["label"] == "second"
     assert entry["curve"].opts["name"] == "second"
-    assert page.channel_list.item(0).text() == "second"
+    assert page.channel_table.item(0, COL_NAME).text() == "second"
     legend_label = page.plot.legend.getLabel(entry["curve"])
     assert legend_label.text == "second"
 
@@ -208,8 +211,8 @@ def test_crosshair_readout_shows_raw_values(qtbot):
     """_update_crosshair(view_t) takes plot-relative seconds (the same
     domain mapSceneToView would hand it - roll mode: sample_t -
     self._last_now, the last refresh's now) and must update both the
-    channel row's raw-value suffix and the time label - reading only
-    the per-channel series cached by the prior refresh_plot(), per the
+    channel row's Value cell and the time label - reading only the
+    per-channel series cached by the prior refresh_plot(), per the
     module's cheapness requirement. History.record() is called
     directly (no engine.start()) so sample timestamps are fully
     controlled and the test needs no polling wait."""
@@ -226,15 +229,15 @@ def test_crosshair_readout_shows_raw_values(qtbot):
 
     page._update_crosshair(1.5)
 
-    item_text = page._channels[key]["item"].text()
-    assert item_text.endswith("= %d (0x%X)" % (200, 200))
+    value_text = page._channels[key]["value_item"].text()
+    assert value_text == format_value(200, DEFAULT_TYPE)
     assert page.time_label.text() == "t-now = 1.50 s"
 
 
 def test_scale_offset_transforms_curve(qtbot):
-    """set_channel_transform() is the programmatic surface the scale/
-    offset spinboxes drive; refresh_plot() must apply y' = (y-offset)
-    * scale when building the curve's data."""
+    """set_channel_transform() is the programmatic surface the table's
+    scale/offset text fields drive; refresh_plot() must apply y' =
+    (y-offset) * scale when building the curve's data."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
@@ -254,11 +257,11 @@ def test_scale_offset_transforms_curve(qtbot):
     for e, a in zip(expected, ys):
         assert a == pytest.approx(e)
 
-    # the crosshair readout always shows raw values, never the scaled
-    # display curve - the whole point of the readout.
+    # the Value column always shows the raw decoded value, never the
+    # scaled display curve - the whole point of the readout.
     page._update_crosshair(0.1)
-    item_text = page._channels[key]["item"].text()
-    assert item_text.endswith("= %d (0x%X)" % (200, 200))
+    value_text = page._channels[key]["value_item"].text()
+    assert value_text == format_value(200, DEFAULT_TYPE)
 
 
 def test_budget_label_shows_no_rate_before_any_sweep_rate_received(qtbot):
@@ -315,9 +318,12 @@ def test_budget_label_updates_immediately_after_add_and_remove_channel(
 
 
 def test_normalize_maps_to_unit_range(qtbot):
-    """Normalize ignores scale/offset and maps the current window's
-    min..max to 0..1; a flat (single-valued) series must map to 0.5
-    everywhere rather than dividing by a zero span."""
+    """Transitional: Normalize (removed from the UI in v2, spec point
+    4) still works through set_channel_transform()'s normalize kwarg
+    until Fit/Auto-lane fully replace it - ignores scale/offset and
+    maps the current window's min..max to 0..1, with a flat (single-
+    valued) series mapping to 0.5 everywhere rather than dividing by a
+    zero span."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
@@ -401,52 +407,19 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     assert after_cursor.right() < 1000.0
 
 
-def test_normalize_checkbox_full_label_and_disables_spinboxes(qtbot):
-    """Hardware-session finding: the transform strip's single hbox row
-    was too narrow for the ~260px side panel and visually truncated
-    "Normalize" to "Norr" (and clipped the offset spinbox's value).
-    The checkbox's text must remain the full word - not shortened by
-    some future rename - regardless of which of the two fit-checked
-    labels gets picked; and checking Normalize must grey out
-    scale/offset (they are ignored by the transform in that mode),
-    re-enabling them on uncheck."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-
-    text = page.normalize_check.text()
-    assert text.startswith("Normalize")
-    assert text in (NORMALIZE_LABEL_FULL, NORMALIZE_LABEL_SHORT)
-
-    page.channel_list.setCurrentRow(0)
-    assert page.scale_spin.isEnabled()
-    assert page.offset_spin.isEnabled()
-
-    page.normalize_check.setChecked(True)
-    assert not page.scale_spin.isEnabled()
-    assert not page.offset_spin.isEnabled()
-
-    page.normalize_check.setChecked(False)
-    assert page.scale_spin.isEnabled()
-    assert page.offset_spin.isEnabled()
-
-
-def test_side_panel_scrolls_and_remove_button_above_transform_strip(qtbot):
-    """Hardware-session finding: at typical dock heights the side
-    panel's content (channel list, transform strip, add rows, budget
-    label, ELF section, Remove channel, window label) exceeds the
+def test_side_panel_scrolls_and_remove_button_above_elf_section(qtbot):
+    """Hardware-session finding (carried into v2): at typical dock
+    heights the side panel's content (channel table, add rows, ELF
+    section, Remove channel, window/budget labels) exceeds the
     available height with no scrollbar, pushing the bottom controls
-    off-screen and unreachable (a screenshot showed the panel cut off
-    at "Add symbol"). The panel must now scroll, and "Remove channel"
-    - a channel-list operation - must sit directly under the channel
-    list (above the transform strip), so it stays reachable even when
-    the ELF section further down is scrolled out of view."""
+    off-screen and unreachable. The panel must scroll, and "Remove
+    channel" - a channel-table operation - must sit directly under the
+    table (above the ELF section), so it stays reachable even when the
+    ELF section further down is scrolled out of view."""
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    page.resize(360, 400)
+    page.resize(480, 150)
     page.show()
     qtbot.waitExposed(page)
 
@@ -456,14 +429,11 @@ def test_side_panel_scrolls_and_remove_button_above_transform_strip(qtbot):
     assert (page.side_scroll.horizontalScrollBarPolicy()
            == Qt.ScrollBarAlwaysOff)
 
-    # order assertion via layout index, not geometry - geometry alone
-    # is unreliable for a widget (transform_strip) that starts hidden
-    # and so may report a stale/zero position before ever being shown.
     side_layout = page.side_scroll.widget().layout()
     remove_index = side_layout.indexOf(page.remove_btn)
-    strip_index = side_layout.indexOf(page.transform_strip)
-    assert remove_index >= 0 and strip_index >= 0
-    assert remove_index < strip_index
+    elf_index = side_layout.indexOf(page.elf_content)
+    assert remove_index >= 0 and elf_index >= 0
+    assert remove_index < elf_index
 
 
 def test_roll_mode_viewport_fixed(qtbot):
@@ -517,3 +487,210 @@ def test_roll_mode_viewport_fixed(qtbot):
     # the marker scrolled left (more negative) by exactly the elapsed
     # real-time delta between the two refreshes.
     assert (pos_before - pos_after) == pytest.approx(now2 - now1, abs=1e-6)
+
+
+# -- v2: channel table, type decode, inline editing (spec points 2,3,6) ----
+
+def test_curve_colors_has_ten_entries_and_wraps():
+    """Palette extended from 8 to 10 (user-approved addition): two
+    distinct colors, appended without disturbing the assignment for
+    the first 8 channels, so an 11th channel wraps back to color 0."""
+    assert len(CURVE_COLORS) == 10
+    assert len(set(CURVE_COLORS)) == 10
+    assert CURVE_COLORS[8:10] == ["#C62828", "#827717"]
+
+
+def test_channel_table_has_spec_columns_and_default_type(qtbot):
+    """The table replaces the old list+strip (spec point 2): 8 columns
+    (swatch/name/type/Value/Hz/scale/offset/Fit), and a freshly added
+    channel starts at the default type (u32, spec point 3)."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    assert page.channel_table.columnCount() == 8
+
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    row = page._row_for_key(key)
+    assert row is not None
+    assert page._channels[key]["type"] == DEFAULT_TYPE
+    type_combo = page._channels[key]["type_combo"]
+    assert type_combo.currentText() == DEFAULT_TYPE
+    assert list(type_combo.itemText(i) for i in range(type_combo.count())) \
+        == TYPES
+    assert len(TYPES) == 11
+
+
+@pytest.mark.parametrize("raw,type_name,expected_decoded,expected_text", [
+    (0x1234, "u32", 0x1234, "4660 (0x00001234)"),
+    (0xFFFFFFFF, "i32", -1, "-1 (0xFFFFFFFF)"),
+    (0xABCD1234, "u16.lo", 0x1234, "4660 (0x1234)"),
+    (0xABCD1234, "u16.hi", 0xABCD, "43981 (0xABCD)"),
+    (0x0000FFFF, "i16.lo", -1, "-1 (0xFFFF)"),
+    (0xFFFF0000, "i16.hi", -1, "-1 (0xFFFF)"),
+    (0x123456AB, "u8.0", 0xAB, "171 (0xAB)"),
+    (0x12345678, "u8.3", 0x12, "18 (0x12)"),
+])
+def test_decode_and_format_integer_types(raw, type_name, expected_decoded,
+                                         expected_text):
+    decoded = decode_value(raw, type_name)
+    assert decoded == expected_decoded
+    assert format_value(decoded, type_name) == expected_text
+
+
+def test_decode_and_format_f32_shows_float_only():
+    # 1.5 as IEEE-754 little-endian bits.
+    raw = int.from_bytes(struct.pack("<f", 1.5), "little")
+    decoded = decode_value(raw, "f32")
+    assert decoded == pytest.approx(1.5)
+    text = format_value(decoded, "f32")
+    assert text == "1.5"
+    assert "0x" not in text
+
+
+def test_default_type_for_size():
+    assert _default_type_for_size(1) == "u8.0"
+    assert _default_type_for_size(2) == "u16.lo"
+    assert _default_type_for_size(4) == "u32"
+    assert _default_type_for_size(16) == "u32"
+
+
+def test_type_change_updates_curve_and_value_column(qtbot):
+    """Changing a row's type combo re-decodes both the plotted curve
+    and the Value column readout - display-side only, core untouched
+    (the History still stores the plain 32-bit raw word)."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 0xFFFFFFFF)
+    page.refresh_plot()
+
+    assert page.curve_y(key) == [pytest.approx(0xFFFFFFFF)]
+
+    page._channels[key]["type_combo"].setCurrentText("i32")
+    assert page._channels[key]["type"] == "i32"
+    assert page.curve_y(key) == [pytest.approx(-1)]
+
+    page._update_crosshair(0.1)
+    assert page._channels[key]["value_item"].text() == "-1 (0xFFFFFFFF)"
+
+
+def test_scale_offset_text_field_commit_and_invalid_revert(qtbot):
+    """Scale/offset cells are plain text fields (spec point 2), not
+    spinboxes - Enter commits a valid numeric entry (including
+    scientific notation), and an invalid entry reverts to the last
+    good value and flashes the field's background."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    entry = page._channels[key]
+
+    entry["scale_edit"].setText("2.5e1")
+    entry["scale_edit"].returnPressed.emit()
+    assert entry["transform"]["scale"] == pytest.approx(25.0)
+    assert "FFCDD2" not in entry["scale_edit"].styleSheet()
+
+    entry["scale_edit"].setText("not-a-number")
+    entry["scale_edit"].returnPressed.emit()
+    assert entry["transform"]["scale"] == pytest.approx(25.0)
+    assert "FFCDD2" in entry["scale_edit"].styleSheet()
+    assert entry["scale_edit"].text() == "%g" % 25.0
+
+
+def test_add_symbol_channel_preselects_type_by_size(qtbot):
+    """ELF preselect (spec point 3): a channel added from a loaded
+    symbol starts at a type chosen from the symbol's declared size,
+    unsigned default - 1 byte -> u8.0, 2 bytes -> u16.lo, anything
+    else -> u32."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    page.elf_symbols = {
+        "byte_flag": Symbol(name="byte_flag", addr=0x20000100, size=1),
+        "half_word": Symbol(name="half_word", addr=0x20000200, size=2),
+        "full_word": Symbol(name="full_word", addr=0x20000300, size=4),
+    }
+    k1 = page.add_symbol_channel("byte_flag")
+    k2 = page.add_symbol_channel("half_word")
+    k3 = page.add_symbol_channel("full_word")
+    assert page._channels[k1]["type"] == "u8.0"
+    assert page._channels[k2]["type"] == "u16.lo"
+    assert page._channels[k3]["type"] == "u32"
+
+
+def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
+        qtbot, monkeypatch):
+    """Add-channel area is compact (spec point 8): the ELF symbol
+    picker starts collapsed, and load_elf() auto-expands it once
+    symbols actually land - no reason to show an empty list before
+    anything is loaded, but no reason to hide it once something is."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    # isVisibleTo(page), not isVisible(): the test never shows the
+    # page on screen, and plain isVisible() always reads False for an
+    # unmapped widget regardless of setVisible() calls.
+    assert not page.elf_content.isVisibleTo(page)
+
+    import ui.elf_symbols as elf_symbols_mod
+    monkeypatch.setattr(
+        elf_symbols_mod, "load_symbols",
+        lambda path: [Symbol(name="adc_buf", addr=0x20000400, size=64)])
+
+    page.load_elf("fake.elf")
+
+    assert page.elf_content.isVisibleTo(page)
+    assert page.elf_toggle_btn.isChecked()
+    assert page.symbol_list.count() == 1
+
+
+def test_fit_button_toggles_fill_own_label(qtbot):
+    """Per-row Fit toggle (spec point 4): starts at "fill" (button
+    text "Fill") and flips to "own" ("Own") and back on each click -
+    the actual lane math lands with Auto-lane in a later commit, but
+    the per-row state and its label already exist here."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    entry = page._channels[key]
+    assert entry["fit"] == "fill"
+    assert entry["fit_btn"].text() == "Fill"
+
+    entry["fit_btn"].click()
+    assert entry["fit"] == "own"
+    assert entry["fit_btn"].text() == "Own"
+
+    entry["fit_btn"].click()
+    assert entry["fit"] == "fill"
+    assert entry["fit_btn"].text() == "Fill"
+
+
+def test_rename_channel_via_table_updates_label_and_legend(qtbot):
+    """Name is inline-editable too (spec point 2: "ALL
+    inline-editable") - committing an edit to the Name cell updates
+    the channel's stored label, the curve's legend entry, and (an
+    empty name is rejected, reverting to the previous label)."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    entry = page._channels[key]
+    row = page._row_for_key(key)
+
+    page.channel_table.item(row, COL_NAME).setText("ndtr")
+    assert entry["label"] == "ndtr"
+    assert entry["curve"].opts["name"] == "ndtr"
+    legend_label = page.plot.legend.getLabel(entry["curve"])
+    assert legend_label.text == "ndtr"
+
+    page.channel_table.item(row, COL_NAME).setText("   ")
+    assert entry["label"] == "ndtr"
+    assert page.channel_table.item(row, COL_NAME).text() == "ndtr"

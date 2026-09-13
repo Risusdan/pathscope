@@ -363,6 +363,11 @@ PySide6 prototype review (`prototype/ui_proto.py`, kept as reference).
   tuned UART debug links with burst reads; kHz-class on Ethernet
   debug links) - the honest rate display already communicates this.
   (Hardware-session request, 2026-09-13.)
+- Scope UX parity batch (J-Scope-informed, deferred tranche): pause
+  auto-range while the user zooms/pans with a follow-live button;
+  configurable History depth (10/30/60 s); channel rows with hide
+  toggle, color swatch and live value; CSV export of a channel window.
+  (Crosshair readout and per-channel scale/offset shipped with M6.)
 - Fault snapshot: on an anomaly rule's rising edge, attach the engine's
   current Snapshot (the very data the rule fired on) to the AnomalyEvent;
   clicking the event-log row shows the register state at fault time even

@@ -1,6 +1,6 @@
 /**
  * @file main.c
- * @brief Blackpill (STM32F411CE) test firmware for Data Path Explorer.
+ * @brief Blackpill (STM32F411CE) test firmware for PathScope.
  * @details ADC1 ch1 (PA1) continuous conversion -> DMA2 stream 0
  *          (channel 0) -> circular buffer in SRAM. KEY button (PA0,
  *          active low) toggles the DMA stream to inject the "stalled"

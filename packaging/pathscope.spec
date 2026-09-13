@@ -103,7 +103,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX off: compressed binaries trip AV false positives and can hit
+    # DLL-load issues on Windows, same rationale as onedir-over-onefile.
+    upx=False,
     # console=True on every OS, including Windows, for MVP: this pops
     # a console window behind the GUI, which is uglier than a clean
     # launch, but it is currently the only place a startup crash
@@ -125,7 +127,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="pathscope",
 )

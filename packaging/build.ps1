@@ -7,6 +7,11 @@
 # never inside the PyInstaller-collected tree, per spec section 3 -
 # plus dist\pathscope-<version>-windows.zip containing both.
 $ErrorActionPreference = "Stop"
+# $ErrorActionPreference only covers cmdlet errors; without this, a
+# failing native command (pip, pyinstaller) would fall through instead
+# of stopping the script. Requires pwsh 7.3+, which GitHub's
+# windows-latest runner ships.
+$PSNativeCommandUseErrorActionPreference = $true
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir

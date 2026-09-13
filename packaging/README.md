@@ -11,9 +11,11 @@ can add or edit target description files without rebuilding.
 ## Files
 
 - `entry.py` - the PyInstaller entry script. Always launches the
-  `gui` subcommand and forwards whatever flags the user passed
-  (`--demo`, `--shot`, etc.). Because the frozen app's current working
-  directory is not necessarily the install directory, it also computes
+  `gui` subcommand and forwards whatever `gui` flags the user passed
+  (`--demo`, `--shot`); top-level flags of the source CLI (`--target`)
+  do not pass through, since `gui` is always selected for the user.
+  Because the frozen app's current working directory is not necessarily
+  the install directory, it also computes
   a `targets/f411` path next to the executable and passes it as
   `--target-dir` whenever the user did not already supply one - an
   explicit `--target-dir` always wins.
@@ -45,7 +47,8 @@ directory. They install `.[ui,build]` themselves, so a bare
 
 Output: `dist/pathscope/` (the onedir bundle - executable at
 `dist/pathscope/pathscope`, or `pathscope.exe` on Windows) with a
-sibling `targets/` directory, plus the zip containing both.
+`targets/` directory next to the executable inside `dist/pathscope/`,
+plus the zip containing both.
 
 ## Verifying a build
 

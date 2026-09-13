@@ -29,6 +29,30 @@ are intercepted by monkey-patching the adapter instance's write32;
 everything outside that range passes through unmodified to the
 original bound method, so ordinary register writes elsewhere still
 behave like a plain MockAdapter.
+
+Cross-thread contract: ui/demo.py's animate thread calls step() while
+a TraceReader on the engine's poller thread may be reading the same
+adapter.mem concurrently, with no lock on either side. This is safe by
+construction, not by accident, for the same three reasons real
+firmware-over-a-probe is safe despite the same lack of a lock:
+
+  (i)   Every word write is a single MockAdapter.set_word() call, which
+        is one dict-item assignment - atomic under the GIL. A reader
+        never observes a torn (half-old, half-new) word.
+  (ii)  Publish order mirrors firmware: _resync() writes every
+        descriptor word EXCEPT wr_seq first, then wr_seq itself last,
+        as its own set_word() call - and step() writes all of a
+        batch's ring-record words before it ever calls _resync(). So a
+        concurrent reader can only ever see wr_seq claim a record
+        exists after that record's words are already in memory, never
+        before.
+  (iii) Whatever a reader catches mid-step anyway (e.g. wr_seq
+        advancing between its two descriptor reads within one
+        refresh() call) is exactly the torn-read window
+        TraceReader._filter_stable() already guards against - the same
+        two-layer check documented in core/trace/reader.py, unchanged
+        by whether the "firmware" on the other end is silicon or this
+        sim.
 """
 from typing import Tuple
 
@@ -39,6 +63,15 @@ from core.trace.contract import (DESC_SIZE, MAX_CH, RECORD_SIZE, RING_COUNT,
                                  WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
                                  encode_desc, encode_record,
                                  record_word_addr)
+
+# wr_seq is the last header field before the watch table begins (see
+# contract._HEADER_FMT: "...II" ends with ring_addr then wr_seq, and
+# watch_addrs starts immediately after) and, thanks to the struct's
+# standard sizes with no padding, it occupies a whole word of its own.
+# Deriving its offset from the already-imported WATCH_ADDRS_OFFSET
+# instead of a new literal keeps this tied to the one place the layout
+# is defined.
+_WR_SEQ_WORD_OFFSET = WATCH_ADDRS_OFFSET - 4
 
 
 class FakeTraceFirmware:
@@ -156,6 +189,14 @@ class FakeTraceFirmware:
                          generation=self._generation)
 
     def _resync(self) -> None:
+        """Re-derive and write back the full descriptor. wr_seq - the
+        word a concurrent TraceReader watches to know new data exists
+        - is written LAST, as its own set_word() call, only after
+        every other descriptor word is already in memory. Combined
+        with step() writing all of a batch's ring-record words before
+        ever calling _resync(), this mirrors firmware's own publish
+        order (payload, then the sequence number that announces it) -
+        see the module docstring's cross-thread contract."""
         desc = self._current_desc()
         words = encode_desc(period_us=desc.period_us,
                             ring_addr=desc.ring_addr,
@@ -165,5 +206,9 @@ class FakeTraceFirmware:
                             watch_count=desc.watch_count,
                             generation=desc.generation,
                             status=desc.status, endian=desc.endian)
+        wr_seq_idx = _WR_SEQ_WORD_OFFSET // 4
         for i, w in enumerate(words):
-            self._adapter.set_word(self.desc_addr + 4 * i, w)
+            if i != wr_seq_idx:
+                self._adapter.set_word(self.desc_addr + 4 * i, w)
+        self._adapter.set_word(self.desc_addr + 4 * wr_seq_idx,
+                               words[wr_seq_idx])

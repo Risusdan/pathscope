@@ -17,3 +17,7 @@ build/
 
 # Firmware build artifacts
 firmware/**/fw.elf
+
+# Hardware E2E test screenshots (Task 10) - eyeballed by the
+# coordinating agent after a run, never committed.
+tests/hw/artifacts/

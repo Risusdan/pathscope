@@ -14,8 +14,8 @@ from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
 from ui.panels.scope_page import (COL_NAME, CURVE_COLORS, DEFAULT_TYPE,
                                   TYPES, ScopePage, _default_type_for_size,
-                                  _gapped_xy, decode_value, format_value,
-                                  value_at)
+                                  _fit_scale_offset, _gapped_xy, decode_value,
+                                  format_value, value_at)
 
 TARGET = "targets/f411"
 
@@ -317,40 +317,6 @@ def test_budget_label_updates_immediately_after_add_and_remove_channel(
     assert page.budget_label.text() == "sweep %d reads" % engine.read_ops
 
 
-def test_normalize_maps_to_unit_range(qtbot):
-    """Transitional: Normalize (removed from the UI in v2, spec point
-    4) still works through set_channel_transform()'s normalize kwarg
-    until Fit/Auto-lane fully replace it - ignores scale/offset and
-    maps the current window's min..max to 0..1, with a flat (single-
-    valued) series mapping to 0.5 everywhere rather than dividing by a
-    zero span."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    values = [100, 400, 250, 300]
-    for i, v in enumerate(values):
-        engine.history.record(key, t0 + i * 0.1, v)
-
-    page.set_channel_transform(key, scale=1.0, offset=0.0, normalize=True)
-    page.refresh_plot()
-
-    ys = page.curve_y(key)
-    assert min(ys) == pytest.approx(0.0)
-    assert max(ys) == pytest.approx(1.0)
-
-    flat_key = "SCOPE.FLAT"
-    page.add_channel(flat_key)
-    engine.history.record(flat_key, t0 + 0.0, 42)
-    page.set_channel_transform(flat_key, scale=1.0, offset=0.0,
-                               normalize=True)
-    page.refresh_plot()
-
-    flat_ys = page.curve_y(flat_key)
-    assert flat_ys == [pytest.approx(0.5)]
-
 
 def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     """Hardware-session regression: the crosshair (and, identically,
@@ -491,13 +457,16 @@ def test_roll_mode_viewport_fixed(qtbot):
 
 # -- v2: channel table, type decode, inline editing (spec points 2,3,6) ----
 
-def test_curve_colors_has_ten_entries_and_wraps():
-    """Palette extended from 8 to 10 (user-approved addition): two
-    distinct colors, appended without disturbing the assignment for
-    the first 8 channels, so an 11th channel wraps back to color 0."""
+def test_curve_colors_has_ten_distinct_entries_not_sharing_marker_or_cursor():
+    """Palette (user-approved, 10 entries): all distinct, and none may
+    collide with MARKER_PEN (event markers) or CURSOR_PEN (the
+    jump_to() cursor line) - a curve must never be mistaken for
+    either of the plot's other line kinds."""
+    from ui.panels.scope_page import CURSOR_PEN, MARKER_PEN
     assert len(CURVE_COLORS) == 10
     assert len(set(CURVE_COLORS)) == 10
-    assert CURVE_COLORS[8:10] == ["#C62828", "#827717"]
+    assert MARKER_PEN not in CURVE_COLORS
+    assert CURSOR_PEN not in CURVE_COLORS
 
 
 def test_channel_table_has_spec_columns_and_default_type(qtbot):
@@ -694,3 +663,144 @@ def test_rename_channel_via_table_updates_label_and_legend(qtbot):
     page.channel_table.item(row, COL_NAME).setText("   ")
     assert entry["label"] == "ndtr"
     assert page.channel_table.item(row, COL_NAME).text() == "ndtr"
+
+
+# -- v2: Fit / Auto-lane replace Normalize, y-axis follows selection -------
+# (spec points 4, 7)
+
+def test_fit_scale_offset_maps_span_into_band():
+    scale, offset = _fit_scale_offset(0.0, 100.0, 0.0, 1.0)
+    assert (0.0 - offset) * scale == pytest.approx(0.0)
+    assert (100.0 - offset) * scale == pytest.approx(1.0)
+
+    scale, offset = _fit_scale_offset(0.0, 100.0, 0.5, 1.0)
+    assert (0.0 - offset) * scale == pytest.approx(0.5)
+    assert (100.0 - offset) * scale == pytest.approx(1.0)
+
+
+def test_fit_scale_offset_flat_window_centers_on_band():
+    """hi <= lo (no span to map, including "no data at all" -> (0,0))
+    must not divide by zero - centers every value on the band's own
+    midpoint instead."""
+    scale, offset = _fit_scale_offset(5.0, 5.0, 0.0, 1.0)
+    assert (5.0 - offset) * scale == pytest.approx(0.5)
+
+    scale, offset = _fit_scale_offset(0.0, 0.0, 0.25, 0.75)
+    assert (0.0 - offset) * scale == pytest.approx(0.5)
+
+
+def test_auto_lane_fills_and_stacks_own_channels(qtbot):
+    """Auto-lane (spec point 4): a "fill" channel's own window maps to
+    the full [0, 1] view; "own" channels split [0, 1] into as many
+    equal bands as there are "own" channels, each mapping its own
+    window into just its band, in table (add) order."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    t0 = page._t0
+
+    fill_key = "DMA2.S0NDTR"
+    page.add_channel(fill_key)
+    for i, v in enumerate([100, 200, 300]):
+        engine.history.record(fill_key, t0 + i * 0.1, v)
+
+    own_key1 = "SCOPE.OWN1"
+    page.add_channel(own_key1)
+    page._channels[own_key1]["fit_btn"].click()
+    for i, v in enumerate([0, 100]):
+        engine.history.record(own_key1, t0 + i * 0.1, v)
+
+    own_key2 = "SCOPE.OWN2"
+    page.add_channel(own_key2)
+    page._channels[own_key2]["fit_btn"].click()
+    for i, v in enumerate([1000, 2000]):
+        engine.history.record(own_key2, t0 + i * 0.1, v)
+
+    page.auto_lane_check.setChecked(True)
+    page.refresh_plot()
+
+    fill_ys = page.curve_y(fill_key)
+    assert min(fill_ys) == pytest.approx(0.0)
+    assert max(fill_ys) == pytest.approx(1.0)
+
+    own1_ys = page.curve_y(own_key1)
+    assert min(own1_ys) == pytest.approx(0.0)
+    assert max(own1_ys) == pytest.approx(0.5)
+
+    own2_ys = page.curve_y(own_key2)
+    assert min(own2_ys) == pytest.approx(0.5)
+    assert max(own2_ys) == pytest.approx(1.0)
+
+
+def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
+    """Turning Auto-lane off stops the recompute but does not reset
+    scale/offset - they stay exactly as last computed, still plain
+    editable fields the user can hand-tune from there."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    t0 = page._t0
+    engine.history.record(key, t0 + 0.0, 100)
+    engine.history.record(key, t0 + 0.1, 300)
+
+    page.auto_lane_check.setChecked(True)
+    page.refresh_plot()
+    computed = dict(page._channels[key]["transform"])
+    assert computed != {"scale": 1.0, "offset": 0.0}
+
+    page.auto_lane_check.setChecked(False)
+    page.refresh_plot()
+    assert page._channels[key]["transform"] == computed
+
+
+def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
+    """Spec point 7: no selection hides the axis tick numbers; a
+    selected row titles the axis with that channel's name/color and
+    makes the tick numbers that channel's own raw decoded domain (the
+    inverse of its scale/offset), not the transformed display range
+    the curve is drawn in."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    axis = page.plot.getAxis("left")
+
+    assert axis.style["showValues"] is False
+
+    row = page._row_for_key(key)
+    page.channel_table.selectRow(row)
+    assert page._selected_key == key
+    assert axis.style["showValues"] is True
+    entry = page._channels[key]
+    assert entry["label"] in axis.labelText
+    assert entry["color"] in axis.labelText
+
+    page.set_channel_transform(key, scale=2.0, offset=5.0)
+    # displayed = (raw - offset) * scale, so tickStrings must invert:
+    # raw = displayed / scale + offset.
+    ticks = axis.tickStrings([0.0, 1.0], 1, 1)
+    assert ticks[0] == "%g" % (0.0 / 2.0 + 5.0)
+    assert ticks[1] == "%g" % (1.0 / 2.0 + 5.0)
+
+    page.channel_table.clearSelection()
+    assert page._selected_key is None
+    assert axis.style["showValues"] is False
+
+
+def test_removing_selected_channel_clears_y_axis(qtbot):
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key = "DMA2.S0NDTR"
+    page.add_channel(key)
+    row = page._row_for_key(key)
+    page.channel_table.selectRow(row)
+    assert page._selected_key == key
+
+    page.remove_channel(key)
+    assert page._selected_key is None
+    axis = page.plot.getAxis("left")
+    assert axis.style["showValues"] is False

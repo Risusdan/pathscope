@@ -108,11 +108,11 @@ from typing import Dict, List, Optional, Tuple
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDoubleValidator, QFont
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QPushButton, QScrollArea,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QPushButton,
+                               QScrollArea, QTableWidget, QTableWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -197,10 +197,22 @@ BUDGET_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
                   "contiguous addresses")
 
 CURVE_COLORS = [
-    "#1976D2", "#2E7D32", "#EF6C00", "#6A1B9A",
-    "#00838F", "#AD1457", "#5D4037", "#455A64",
-    "#C62828", "#827717",
+    "#1976D2",  # blue
+    "#B71C1C",  # red
+    "#2E7D32",  # green
+    "#EF6C00",  # orange
+    "#6A1B9A",  # purple
+    "#00838F",  # teal
+    "#D81B60",  # pink
+    "#5D4037",  # brown
+    "#212121",  # near-black
+    "#827717",  # olive
 ]
+# Neither entry above may collide with MARKER_PEN ("#C62828", event
+# markers) or CURSOR_PEN ("#1565C0", the jump_to() cursor line) -
+# that's why red is #B71C1C rather than MARKER_PEN's own shade and
+# blue stays #1976D2 rather than CURSOR_PEN's: a curve must never be
+# the same color as either of the plot's other line kinds.
 
 
 def _gapped_xy(series: List[Tuple[float, int]], t0: float
@@ -313,31 +325,33 @@ def _fmt_num(v: float) -> str:
     return "%g" % v
 
 
+def _fit_scale_offset(lo: float, hi: float, band_lo: float,
+                      band_hi: float) -> Tuple[float, float]:
+    """Auto-lane's core computation (spec point 4): the scale/offset
+    pair such that a channel whose raw decoded window spans [lo, hi]
+    displays inside [band_lo, band_hi] through the existing display
+    transform y' = (y - offset) * scale - the same fields a manual
+    edit could set by hand, just computed. A flat window (hi <= lo,
+    including no data at all: lo == hi == 0.0) can't be mapped to a
+    span without dividing by zero, so it centers on the band's
+    midpoint instead - analogous to old Normalize's flat-series 0.5
+    guard, generalized to an arbitrary band."""
+    if hi <= lo:
+        return 1.0, lo - (band_lo + band_hi) / 2.0
+    scale = (band_hi - band_lo) / (hi - lo)
+    offset = lo - band_lo / scale
+    return scale, offset
+
+
 def _apply_transform(ys: List[float], transform: dict) -> List[float]:
     """Display-only transform applied to an already-gapped y array
-    (see _gapped_xy) - NaN gap placeholders pass through untouched,
-    since a gap's midpoint carries no real sample to scale or
-    normalize. Normalize ignores scale/offset entirely and maps this
-    window's min..max to 0..1, with a flat-series guard (max == min)
-    mapping every finite value to 0.5 instead of dividing by a zero
-    span. Pure python lists throughout - no numpy dependency.
-
-    "normalize" is a transitional key (removed along with the rest of
-    the Normalize feature once Fit/Auto-lane land, spec point 4) - the
-    table's scale/offset cells never set it, so it defaults to False
-    via .get() for every channel added through the v2 UI; it survives
-    here only for set_channel_transform()'s pre-existing normalize
-    kwarg."""
-    if transform.get("normalize"):
-        finite = [v for v in ys if v == v]        # v == v excludes NaN
-        if not finite:
-            return list(ys)
-        lo = min(finite)
-        hi = max(finite)
-        if hi == lo:
-            return [0.5 if v == v else v for v in ys]
-        span = hi - lo
-        return [(v - lo) / span if v == v else v for v in ys]
+    (see _gapped_xy): y' = (y - offset) * scale. NaN gap placeholders
+    pass through untouched, since a gap's midpoint carries no real
+    sample to scale. Normalize (the old single-channel-only 0..1
+    mapping) is gone (spec point 4) - Fit/Auto-lane replace it by
+    computing this same scale/offset pair instead of a separate
+    transform mode (see _fit_scale_offset). Pure python lists
+    throughout - no numpy dependency."""
     scale = transform["scale"]
     offset = transform["offset"]
     return [(v - offset) * scale if v == v else v for v in ys]
@@ -375,12 +389,27 @@ class ScopePage(QWidget):
         # before MainWindow has ever fed one in - the budget label's
         # "no rate yet" state.
         self._sweep_rate: Optional[float] = None
+        # Y axis follows the selected row (spec point 7) - None means
+        # no selection, which hides the axis's tick numbers entirely
+        # rather than showing a meaningless shared scale.
+        self._selected_key: Optional[str] = None
+        # Auto-lane (spec point 4): while on, every refresh_plot() tick
+        # recomputes scale/offset for all channels from their per-row
+        # Fit setting (see _apply_auto_lane) instead of leaving
+        # whatever was last typed into the scale/offset cells.
+        self._auto_lane = False
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
 
         side = QVBoxLayout()
-        side.addWidget(QLabel("Channels"))
+        channels_header = QHBoxLayout()
+        channels_header.addWidget(QLabel("Channels"))
+        channels_header.addStretch(1)
+        self.auto_lane_check = QCheckBox("Auto-lane")
+        self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
+        channels_header.addWidget(self.auto_lane_check)
+        side.addLayout(channels_header)
 
         # The channel table is this panel's hero (spec point 2):
         # replaces the old list+strip pair - name/type/value/rate and
@@ -404,6 +433,8 @@ class ScopePage(QWidget):
         self.channel_table.setColumnWidth(COL_OFFSET, 64)
         self.channel_table.setColumnWidth(COL_FIT, 44)
         self.channel_table.itemChanged.connect(self._on_item_changed)
+        self.channel_table.itemSelectionChanged.connect(
+            self._on_table_selection_changed)
         side.addWidget(self.channel_table, 1)
 
         # Removal is a channel-table operation, so it belongs directly
@@ -553,6 +584,10 @@ class ScopePage(QWidget):
         self._timer.start()
 
         self._update_budget_label()
+        # No selection yet - hide the y-axis tick numbers (spec point
+        # 7) rather than show a shared scale that means nothing until
+        # a channel is picked.
+        self._update_y_axis()
 
     # -- freeze --------------------------------------------------------------
 
@@ -637,6 +672,8 @@ class ScopePage(QWidget):
         if legend_label is not None:
             legend_label.setText(label)
         entry["name_item"].setText(label)
+        if key == self._selected_key:
+            self._update_y_axis()
 
     def remove_channel(self, key: str) -> None:
         entry = self._channels.pop(key, None)
@@ -652,6 +689,14 @@ class ScopePage(QWidget):
             # up so the poller stops reading it once nothing displays
             # it any more.
             self.engine.remove_addr_watch(key)
+        if self._selected_key == key:
+            # belt-and-braces: removeRow() firing itemSelectionChanged
+            # on its own already clears this in the common case, but
+            # don't rely on exactly when/whether Qt does so - a stale
+            # _selected_key would point the y axis at a channel that
+            # no longer exists.
+            self._selected_key = None
+            self._update_y_axis()
         self._update_budget_label()
 
     def _row_for_key(self, key: str) -> Optional[int]:
@@ -752,6 +797,10 @@ class ScopePage(QWidget):
         legend_label = self.plot.legend.getLabel(entry["curve"])
         if legend_label is not None:
             legend_label.setText(new_label)
+        if key == self._selected_key:
+            # the y-axis title (spec point 7) is this channel's name -
+            # keep it in sync with a live rename.
+            self._update_y_axis()
 
     def _on_type_changed(self, key: str, type_name: str) -> None:
         entry = self._channels.get(key)
@@ -801,12 +850,121 @@ class ScopePage(QWidget):
         "fill" (this channel alone fills the whole view) or "own" (it
         gets one band of a multi-channel stack). The toggle only
         changes which group the channel belongs to; the actual
-        scale/offset computation is Auto-lane's job."""
+        scale/offset computation is Auto-lane's job - if Auto-lane is
+        currently on, recompute immediately so the regrouping is
+        visible right away rather than waiting on the next 200 ms
+        tick."""
         entry = self._channels.get(key)
         if entry is None:
             return
         entry["fit"] = "own" if entry["fit"] == "fill" else "fill"
         entry["fit_btn"].setText("Own" if entry["fit"] == "own" else "Fill")
+        if self._auto_lane:
+            self._apply_auto_lane()
+            self.refresh_plot()
+
+    # -- Auto-lane (spec point 4) --------------------------------------------
+
+    def _on_auto_lane_toggled(self, on: bool) -> None:
+        """While on, every refresh_plot() tick recomputes scale/offset
+        for every channel from its per-row Fit setting (see
+        _apply_auto_lane) - turning it off just stops the recompute,
+        leaving whatever scale/offset was last computed in the
+        (still-editable) fields for hand-tuning."""
+        self._auto_lane = on
+        if on:
+            self._apply_auto_lane()
+            self.refresh_plot()
+
+    def _apply_auto_lane(self) -> None:
+        """Compute scale/offset for every channel from its stored Fit
+        setting (spec point 4): "fill" channels each map their own
+        current-window min..max to the full [0, 1] view; "own"
+        channels split [0, 1] into as many equal bands as there are
+        "own" channels and each maps its own min..max into just its
+        band, in table order. Reads self._last_series (this tick's
+        already-fetched samples - refresh_plot() runs this before
+        decoding/plotting, see its own comment) rather than calling
+        engine.history.series() again."""
+        own_keys = [k for k, e in self._channels.items() if e["fit"] == "own"]
+        fill_keys = [k for k, e in self._channels.items()
+                    if e["fit"] == "fill"]
+        for key in fill_keys:
+            lo, hi = self._window_min_max(key)
+            scale, offset = _fit_scale_offset(lo, hi, 0.0, 1.0)
+            self.set_channel_transform(key, scale, offset)
+        n = len(own_keys)
+        for i, key in enumerate(own_keys):
+            band_lo, band_hi = i / n, (i + 1) / n
+            lo, hi = self._window_min_max(key)
+            scale, offset = _fit_scale_offset(lo, hi, band_lo, band_hi)
+            self.set_channel_transform(key, scale, offset)
+
+    def _window_min_max(self, key: str) -> Tuple[float, float]:
+        """The raw-decoded (spec point 4: "readouts always decoded raw
+        domain" - Auto-lane fits the same domain, pre scale/offset)
+        min/max of a channel's currently cached window series. (0.0,
+        0.0) - a flat window, per _fit_scale_offset's guard - for a
+        channel with no samples yet."""
+        entry = self._channels[key]
+        series = self._last_series.get(key, [])
+        if not series:
+            return 0.0, 0.0
+        decoded = [decode_value(v, entry["type"]) for _t, v in series]
+        return float(min(decoded)), float(max(decoded))
+
+    # -- y axis follows the selected channel (spec point 7) ------------------
+
+    def _on_table_selection_changed(self) -> None:
+        # selectionModel().selectedRows(), not currentRow(): Qt keeps
+        # a "current" cell independent of the actual selection (e.g.
+        # clearSelection() alone does not move it), so currentRow()
+        # can still report a stale row after the selection is cleared.
+        rows = self.channel_table.selectionModel().selectedRows()
+        if not rows:
+            self._selected_key = None
+        else:
+            item = self.channel_table.item(rows[0].row(), COL_NAME)
+            self._selected_key = item.data(Qt.UserRole) \
+                if item is not None else None
+        self._update_y_axis()
+
+    def _update_y_axis(self) -> None:
+        """No selection -> hide the tick numbers entirely (a shared
+        y-axis scale means nothing until one channel's own domain is
+        picked); a selection -> the axis title becomes that channel's
+        name in its own curve color, and the tick numbers are that
+        channel's raw decoded domain (the inverse of its scale/offset
+        transform), not the 0..1-ish display range the curve itself is
+        drawn in."""
+        axis = self.plot.getAxis("left")
+        entry = self._channels.get(self._selected_key) \
+            if self._selected_key else None
+        if entry is None:
+            axis.setStyle(showValues=False)
+            self.plot.setLabel("left", "")
+            return
+        axis.setStyle(showValues=True)
+        self.plot.setLabel(
+            "left", '<span style="color:%s">%s</span>'
+            % (entry["color"], entry["label"]))
+        axis.tickStrings = self._make_tick_strings(self._selected_key)
+
+    def _make_tick_strings(self, key: str):
+        """A pyqtgraph AxisItem.tickStrings override bound to one
+        channel by key (not by a captured transform dict, which
+        set_channel_transform replaces wholesale rather than mutating
+        - looking the channel back up by key on every call always
+        sees its current transform, however it last changed)."""
+        def tick_strings(values, _scale, _spacing):
+            entry = self._channels.get(key)
+            if entry is None:
+                return ["" for _ in values]
+            transform = entry["transform"]
+            scale = transform["scale"] or 1.0
+            offset = transform["offset"]
+            return [_fmt_num(v / scale + offset) for v in values]
+        return tick_strings
 
     # -- add-channel UI handlers -------------------------------------------
 
@@ -1023,9 +1181,16 @@ class ScopePage(QWidget):
         self._refresh_reg_combo()
         now = time.monotonic()
         self._last_now = now
+        # series first, transforms second: Auto-lane (spec point 4)
+        # needs every channel's freshly-fetched series (via
+        # _window_min_max, which reads self._last_series) to compute
+        # this tick's scale/offset before the second loop applies it.
+        for key in self._channels:
+            self._last_series[key] = self.engine.history.series(key)
+        if self._auto_lane:
+            self._apply_auto_lane()
         for key, entry in self._channels.items():
-            series = self.engine.history.series(key)
-            self._last_series[key] = series
+            series = self._last_series[key]
             # decode display-side (spec point 3) before the gap-NaN
             # pass and the scale/offset display transform - the raw
             # ints stay in self._last_series for the Value column's
@@ -1145,25 +1310,21 @@ class ScopePage(QWidget):
 
     # -- per-channel scale/offset (feature 2) --------------------------------
 
-    def set_channel_transform(self, key: str, scale: float, offset: float,
-                              normalize: bool = False) -> None:
+    def set_channel_transform(self, key: str, scale: float,
+                              offset: float) -> None:
         """The programmatic surface the table's scale/offset text
-        fields drive - also the direct entry point for tests. A
-        display-only transform: refresh_plot() applies it (y' =
-        (y - offset) * scale, or - normalize=True, a transitional
-        kwarg due to be removed with the rest of Normalize once
-        Fit/Auto-lane land, spec point 4 - the normalize mapping) when
-        building each curve's y array; the Value column readout above
-        always shows the raw decoded value regardless of this
+        fields drive - also the direct entry point for tests and for
+        Auto-lane's own recompute (_apply_auto_lane). A display-only
+        transform: refresh_plot() applies it (y' = (y - offset) *
+        scale) when building each curve's y array; the Value column
+        readout always shows the raw decoded value regardless of this
         setting. Also mirrors scale/offset into the row's own text
-        fields so a programmatic change (this method, or a future
-        Auto-lane pass) is visible inline rather than only affecting
-        the plotted curve."""
+        fields so a programmatic change is visible inline rather than
+        only affecting the plotted curve."""
         entry = self._channels.get(key)
         if entry is None:
             return
-        entry["transform"] = {
-            "scale": scale, "offset": offset, "normalize": normalize}
+        entry["transform"] = {"scale": scale, "offset": offset}
         entry["scale_edit"].setText(_fmt_num(scale))
         entry["offset_edit"].setText(_fmt_num(offset))
 
@@ -1181,8 +1342,7 @@ class ScopePage(QWidget):
 
     def curve_y(self, key: str) -> List[float]:
         """The curve's currently plotted y data - post gap-NaN
-        insertion and post display transform (scale/offset/
-        normalize)."""
+        insertion and post display transform (scale/offset)."""
         entry = self._channels.get(key)
         if entry is None:
             return []

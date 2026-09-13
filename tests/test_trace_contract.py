@@ -13,6 +13,15 @@ def _desc_words(endian):
                        watch_count=3, generation=2, status=0,
                        endian=endian)
 
+def _patch_bytes(words, byte_offset, fmt_char, value):
+    """Corrupt one little-endian field of an already-encoded (endian="<")
+    descriptor at the raw-byte level, then re-derive the word list the
+    same way the adapter would compose it - so these tests exercise
+    parse_desc()'s own validation, independent of encode_desc()."""
+    raw = bytearray(struct.pack("<{0}I".format(len(words)), *words))
+    struct.pack_into("<" + fmt_char, raw, byte_offset, value)
+    return list(struct.unpack("<{0}I".format(len(words)), bytes(raw)))
+
 @pytest.mark.parametrize("endian", ["<", ">"])
 def test_desc_round_trip(endian):
     d = parse_desc(_desc_words(endian))
@@ -42,13 +51,20 @@ def test_bad_magic_and_version_raise():
         parse_desc(bad)
 
 def test_bad_max_ch_raises():
-    words = _desc_words("<")
-    # max_ch is the u8 at byte offset 6 of the descriptor, inside
-    # word index 1 (bytes 4-7), byte position 2 within that word.
-    word_idx, byte_pos = 6 // 4, 6 % 4
-    raw = bytearray(struct.pack("<I", words[word_idx]))
-    raw[byte_pos] = 12
-    words[word_idx] = struct.unpack("<I", bytes(raw))[0]
+    # max_ch is the u8 at byte offset 6 of the descriptor.
+    words = _patch_bytes(_desc_words("<"), 6, "B", 12)
+    with pytest.raises(ContractError):
+        parse_desc(words)
+
+def test_bad_record_size_raises():
+    # record_size is the u16 at byte offset 12 of the descriptor.
+    words = _patch_bytes(_desc_words("<"), 12, "H", 44)
+    with pytest.raises(ContractError):
+        parse_desc(words)
+
+def test_bad_ring_count_raises():
+    # ring_count is the u16 at byte offset 14 of the descriptor.
+    words = _patch_bytes(_desc_words("<"), 14, "H", 0)
     with pytest.raises(ContractError):
         parse_desc(words)
 

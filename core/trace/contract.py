@@ -103,6 +103,12 @@ def parse_desc(words: List[int]) -> TraceDesc:
     if max_ch != MAX_CH:
         raise ContractError(
             "unsupported channel count {0}".format(max_ch))
+    if record_size != RECORD_SIZE:
+        raise ContractError(
+            "unsupported record_size {0}".format(record_size))
+    if ring_count != RING_COUNT:
+        raise ContractError(
+            "unsupported ring_count {0}".format(ring_count))
 
     return TraceDesc(endian=endian, version=version, max_ch=max_ch,
                      status=status, period_us=period_us,

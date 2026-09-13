@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "data-path-explorer"
+name = "pathscope"
 version = "0.0.1"
-description = "Visual data path debug tool - core engine"
+description = "Live data-path observer for MCU/SoC bring-up and debugging"
 requires-python = ">=3.9"
 dependencies = [
     "pyocd>=0.36",
@@ -16,5 +16,12 @@ dependencies = [
 ui = ["PySide6>=6.5"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2"]
 
+[project.scripts]
+pathscope = "cli:main"
+
 [tool.setuptools]
-packages = ["core", "core.adapter", "core.engine", "core.target"]
+packages = [
+    "core", "core.adapter", "core.engine", "core.target",
+    "ui", "ui.diagram", "ui.panels",
+]
+py-modules = ["cli"]

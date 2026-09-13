@@ -1,6 +1,7 @@
-# Data Path Explorer
+# PathScope
 
-Visual data-path debug tool. Core engine + CLI (M0-M2); UI follows.
+PathScope is a live data-path observer for MCU/SoC bring-up and
+debugging. Core engine + CLI (M0-M2); GUI (M3-M4).
 
 ## Quick start (dev)
 

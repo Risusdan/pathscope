@@ -39,7 +39,7 @@ class MainWindow(QMainWindow):
     def __init__(self, engine: Engine, bridge: EngineBridge, parent=None,
                  target_label: Optional[str] = None):
         super().__init__(parent)
-        self.setWindowTitle("Data Path Explorer")
+        self.setWindowTitle("PathScope")
         self.resize(1280, 800)
 
         self.engine = engine

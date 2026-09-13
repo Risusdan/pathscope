@@ -1,5 +1,5 @@
 # cli.py
-"""Command-line driver for the data path explorer core engine."""
+"""Command-line driver for the PathScope core engine."""
 import argparse
 import sys
 import threading
@@ -92,7 +92,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="dpe")
+    p = argparse.ArgumentParser(prog="pathscope")
     p.add_argument("--target", default="stm32f411ce")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("probe", help="connect and print target identity")

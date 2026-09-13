@@ -4,6 +4,10 @@ import cli
 from core.adapter.base import TargetLostError
 
 
+def test_prog_name_is_pathscope():
+    assert cli.build_parser().prog == "pathscope"
+
+
 def test_parser_has_both_commands():
     p = cli.build_parser()
     a = p.parse_args(["probe"])

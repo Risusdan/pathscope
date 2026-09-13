@@ -1,4 +1,4 @@
-"""`dpe gui` entry point: QApplication, engine wiring (demo or real
+"""`pathscope gui` entry point: QApplication, engine wiring (demo or real
 hardware), MainWindow, event loop - plus an offscreen `--shot` smoke
 mode used by CI/manual verification (mirrors prototype/ui_proto.py's
 `--shot` behavior: pump events until the first live update lands or 3 s
@@ -22,7 +22,7 @@ from .main_window import MainWindow
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="dpe gui")
+    p = argparse.ArgumentParser(prog="pathscope gui")
     p.add_argument("--target", default="stm32f411ce")
     p.add_argument("--target-dir", default="targets/f411")
     p.add_argument("--demo", action="store_true",
@@ -43,7 +43,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # No display available (or wanted) for a one-shot render.
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    app = QApplication.instance() or QApplication(sys.argv[:1] or ["dpe"])
+    app = QApplication.instance() or QApplication(sys.argv[:1] or ["pathscope"])
     # tool is light-theme only by design; never follow the OS dark mode
     try:
         app.styleHints().setColorScheme(Qt.ColorScheme.Light)

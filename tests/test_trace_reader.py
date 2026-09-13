@@ -17,7 +17,7 @@ def test_discover_and_drain_records():
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
-        desc = r.discover(0x20002000)
+        desc = r.discover(fw.desc_addr)
         assert desc.period_us == 1000
         r.set_watch([0x20000000, 0x20000004])
         fw.step(5)
@@ -33,7 +33,7 @@ def test_overflow_counts_lost_and_resumes():
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
-        r.discover(0x20002000)
+        r.discover(fw.desc_addr)
         r.set_watch([0x20000000])
         fw.step(3); r.refresh()
         fw.step(300)                      # > ring_count: oldest overwritten
@@ -48,7 +48,7 @@ def test_set_watch_rejected_address_raises():
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
-        r.discover(0x20002000)
+        r.discover(fw.desc_addr)
         with pytest.raises(TraceError):
             r.set_watch([0x99999990])     # outside sim whitelist
         assert r.status().watch_count == 0
@@ -60,7 +60,7 @@ def test_set_watch_too_many_raises_before_touching_target():
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
-        r.discover(0x20002000)
+        r.discover(fw.desc_addr)
         with pytest.raises(TraceError):
             r.set_watch([0x20000000] * 11)
     finally:
@@ -71,11 +71,35 @@ def test_generation_marks_table_change():
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
-        r.discover(0x20002000)
+        r.discover(fw.desc_addr)
         r.set_watch([0x20000000]); fw.step(2)
         first = r.refresh()
         r.set_watch([0x20000004]); fw.step(2)
         second = r.refresh()
         assert second[-1].gen == first[-1].gen + 1
+    finally:
+        engine.stop()
+
+
+def test_full_ring_pass_not_clobbered_by_desc_resync():
+    # Regression for the desc/ring address overlap bug: fill the ring
+    # past a full lap so the read window spans the wrap point and
+    # refresh() must split it into two block reads internally. Every
+    # surviving record's sampled slots must still read back exactly
+    # what was watched - if the descriptor's own resync ever lands on
+    # ring bytes again, this is where a clobbered record would show up
+    # as garbage instead of the constant watched values.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000, 0x20000004])
+        fw.step(256 + 8)                  # wraps the ring once, plus 8
+        recs = r.refresh()                # window spans the wrap point
+        assert len(recs) == 256
+        for rec in recs:
+            assert rec.slots[0] == 111
+            assert rec.slots[1] == 222
+            assert rec.slots[2:] == (0,) * 8
     finally:
         engine.stop()

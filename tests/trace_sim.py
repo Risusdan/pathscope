@@ -41,12 +41,26 @@ WATCH_COUNT_OFFSET = WATCH_ADDRS_OFFSET + 4 * MAX_CH            # 64
 
 
 class FakeTraceFirmware:
-    def __init__(self, adapter: MockAdapter, desc_addr: int = 0x20002000,
+    def __init__(self, adapter: MockAdapter, desc_addr: int = 0x20004000,
                  ring_addr: int = 0x20001000, period_us: int = 1000,
                  whitelist: Tuple[Tuple[int, int], ...] =
                  ((0x20000000, 0x20020000),), endian: str = "<"):
+        # The ring physically spans RING_COUNT * RECORD_SIZE bytes from
+        # ring_addr (0x3000 bytes at the contract's current constants) -
+        # a desc_addr inside that span would have the descriptor's own
+        # resync silently clobbering whichever ring record(s) land on
+        # the same bytes. Guard it here instead of letting a future
+        # caller rediscover that the hard way.
+        ring_end = ring_addr + RING_COUNT * RECORD_SIZE
+        desc_end = desc_addr + DESC_SIZE
+        if desc_addr < ring_end and ring_addr < desc_end:
+            raise ValueError(
+                "trace descriptor [0x%08X,0x%08X) overlaps the ring "
+                "[0x%08X,0x%08X)" % (desc_addr, desc_end, ring_addr,
+                                     ring_end))
+
         self._adapter = adapter
-        self._desc_addr = desc_addr
+        self.desc_addr = desc_addr
         self._ring_addr = ring_addr
         self._period_us = period_us
         self._whitelist = whitelist
@@ -83,13 +97,13 @@ class FakeTraceFirmware:
         self._resync()
 
     def _patched_write32(self, addr: int, value: int) -> None:
-        if self._desc_addr <= addr < self._desc_addr + DESC_SIZE:
+        if self.desc_addr <= addr < self.desc_addr + DESC_SIZE:
             self._handle_desc_write(addr, value)
         else:
             self._original_write32(addr, value)
 
     def _handle_desc_write(self, addr: int, value: int) -> None:
-        offset = addr - self._desc_addr
+        offset = addr - self.desc_addr
         if (WATCH_ADDRS_OFFSET <= offset < WATCH_COUNT_OFFSET
                 and (offset - WATCH_ADDRS_OFFSET) % 4 == 0):
             idx = (offset - WATCH_ADDRS_OFFSET) // 4
@@ -151,4 +165,4 @@ class FakeTraceFirmware:
                             generation=desc.generation,
                             status=desc.status, endian=desc.endian)
         for i, w in enumerate(words):
-            self._adapter.set_word(self._desc_addr + 4 * i, w)
+            self._adapter.set_word(self.desc_addr + 4 * i, w)

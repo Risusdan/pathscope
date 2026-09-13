@@ -26,10 +26,27 @@ jobs:
         # packaging/build.ps1 assumes .venv already exists and installs
         # the ui+build extras into it itself.
 
+      - name: Check tag matches pyproject.toml version
+        run: |
+          $TagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          $VersionLine = Select-String -Path pyproject.toml -Pattern 'version = "([^"]+)"' | Select-Object -First 1
+          if (-not $VersionLine) {
+              Write-Error "error: could not find a version = ""..."" line in pyproject.toml"
+              exit 1
+          }
+          $PyVersion = $VersionLine.Matches[0].Groups[1].Value
+          if ($TagVersion -ne $PyVersion) {
+              Write-Error "error: tag 'v$TagVersion' does not match pyproject.toml version '$PyVersion'"
+              exit 1
+          }
+        shell: pwsh
+
       - name: Build release package
         run: packaging/build.ps1
         shell: pwsh
 
       - name: Publish GitHub release
-        run: gh release create "$env:GITHUB_REF_NAME" dist/*.zip --generate-notes
+        # pwsh does not glob-expand args to native commands, so dist/*.zip
+        # must be expanded ourselves before gh sees it.
+        run: gh release create "$env:GITHUB_REF_NAME" (Get-ChildItem dist\*.zip).FullName --generate-notes
         shell: pwsh

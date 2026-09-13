@@ -62,34 +62,36 @@ def test_anomaly_events_reach_event_log(qtbot):
         engine.stop()
 
 
-def test_freeze_does_not_drop_anomaly_from_event_log(qtbot):
-    """FIX 1 regression: event_log.add_events() must fire from
-    apply_update() before the frozen check, not from inside _apply()
-    (which freezing skips entirely) - otherwise an anomaly that occurs
-    while frozen is permanently lost from the log (only its badge
-    survives), violating spec 7's "event log stays live"."""
+def test_run_stop_does_not_drop_anomaly_from_event_log(qtbot):
+    """FIX 1 regression, carried into per-page run/stop (spec point
+    1): event_log.add_events() must fire from apply_update() before
+    the Data Path stop check, not from inside _apply() (which stopping
+    skips entirely) - otherwise an anomaly that occurs while stopped
+    is permanently lost from the log (only its badge survives),
+    violating "event log always live"."""
     engine = _make_overrun_engine()
     bridge = EngineBridge(engine)
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
 
-    # freeze before the engine even starts, so the very first sweep -
-    # the one carrying the overrun anomaly - is delivered while frozen.
-    win.freeze_act.setChecked(True)
-    frozen_rate_text = win.rate_label.text()
-    frozen_active_edges = set(win.diagram_state.active_edges)
+    # stop before the engine even starts, so the very first sweep -
+    # the one carrying the overrun anomaly - is delivered while
+    # stopped.
+    win.run_stop_act.setChecked(True)
+    stopped_rate_text = win.rate_label.text()
+    stopped_active_edges = set(win.diagram_state.active_edges)
 
     engine.start()
     try:
         qtbot.waitUntil(lambda: _has_anomaly_row(win), timeout=4000)
-        # the frozen display itself must not have moved: last_update
+        # the stopped display itself must not have moved: last_update
         # advances (bridge keeps delivering), but the visible panels
         # (driven only by _apply(), which apply_update() short-circuits
-        # while frozen) stay put.
+        # while stopped) stay put.
         assert win.last_update is not None
-        assert win.rate_label.text() == frozen_rate_text
-        assert win.diagram_state.active_edges == frozen_active_edges
+        assert win.rate_label.text() == stopped_rate_text
+        assert win.diagram_state.active_edges == stopped_active_edges
     finally:
-        win.freeze_act.setChecked(False)
+        win.run_stop_act.setChecked(False)
         engine.stop()

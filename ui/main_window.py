@@ -1,9 +1,11 @@
 """Main application window: central diagram view plus chrome toolbar.
 
 Ported from prototype/ui_proto.py's Main class - toolbar construction
-(stylesheet, actions) and freeze semantics are the same pattern, wired
-to the real Engine/EngineBridge/DiagramState instead of the prototype's
-StubEngine and stub-dict snapshots."""
+(stylesheet, actions) is the same pattern, wired to the real
+Engine/EngineBridge/DiagramState instead of the prototype's StubEngine
+and stub-dict snapshots. The prototype's single global Freeze has
+since been replaced by per-page Run/Stop (spec point 1, M6 scope-view
+plan v2) - see run_stop_act/_toggle_run_stop below."""
 from typing import Dict, Optional, Set
 
 from PySide6.QtCore import QTimer, Qt
@@ -44,7 +46,13 @@ class MainWindow(QMainWindow):
 
         self.engine = engine
         self.bridge = bridge
-        self.frozen = False
+        # Data Path's own stop flag (spec point 1: per-page run/stop
+        # replaces the old global Freeze) - holds the diagram +
+        # Inspector display exactly like the old self.frozen did,
+        # minus the scope side effect: Scope's stop state
+        # (scope_page._stopped) is now completely independent, set
+        # only via ScopePage.set_stopped().
+        self._datapath_stopped = False
         self.last_update: Optional[EngineUpdate] = None
         self._target_label_text = target_label
 
@@ -166,10 +174,16 @@ class MainWindow(QMainWindow):
         self.halt_act.triggered.connect(self._toggle_halt)
         tb.addAction(self.halt_act)
 
-        self.freeze_act = QAction("Freeze", self)
-        self.freeze_act.setCheckable(True)
-        self.freeze_act.toggled.connect(self._toggle_freeze)
-        tb.addAction(self.freeze_act)
+        # Per-page Run/Stop (spec point 1) - replaces the old global
+        # Freeze action. Acts on whichever tab is current (Data Path
+        # or Scope, each with its own independent stop flag - see
+        # _toggle_run_stop) and its own checked/text state is kept in
+        # sync with that tab's own flag on every tab switch (see
+        # _on_tab_changed's _sync_run_stop_action call).
+        self.run_stop_act = QAction("Stop", self)
+        self.run_stop_act.setCheckable(True)
+        self.run_stop_act.toggled.connect(self._toggle_run_stop)
+        tb.addAction(self.run_stop_act)
 
         self.tint_act = QAction("Tint", self)
         self.tint_act.setCheckable(True)
@@ -270,12 +284,25 @@ class MainWindow(QMainWindow):
             return
         self.halt_act.setText("Resume" if halting else "Halt")
 
-    def _toggle_freeze(self, on: bool) -> None:
-        self.frozen = on
-        if self.scope_page is not None:
-            self.scope_page.set_frozen(on)
-        if not on and self.last_update is not None:
-            self._apply(self.last_update)
+    def _toggle_run_stop(self, on: bool) -> None:
+        """Wired to the toolbar's run_stop_act - acts on whichever tab
+        is CURRENT (spec point 1), not both: on the Scope tab this
+        only sets scope_page's own independent stop flag (the
+        waveform hold), and on the Data Path tab this only sets
+        self._datapath_stopped (the diagram+Inspector hold) - unlike
+        the old global Freeze, neither path touches the other tab's
+        state at all. The action's own text ("Run"/"Stop") is kept in
+        sync here since this is the one place both entry points (the
+        toolbar action itself, and _on_scope_stopped_changed relaying
+        the scope page's own big button/spacebar) ultimately update
+        the tab-independent flags from."""
+        if self.tabs.currentIndex() == 1 and self.scope_page is not None:
+            self.scope_page.set_stopped(on)
+        else:
+            self._datapath_stopped = on
+            if not on and self.last_update is not None:
+                self._apply(self.last_update)
+        self.run_stop_act.setText("Run" if on else "Stop")
 
     def _toggle_scope(self, on: bool) -> None:
         """Wired to the toolbar's "Scope" action - now a tab shortcut
@@ -306,6 +333,34 @@ class MainWindow(QMainWindow):
         self.scope_act.blockSignals(False)
         if on_scope and self.scope_page is None:
             self._activate_scope_tab()
+        # Per-page run/stop (spec point 1): the toolbar action reflects
+        # whichever tab is now current's OWN stop flag, independent of
+        # the other tab's.
+        self._sync_run_stop_action()
+
+    def _sync_run_stop_action(self) -> None:
+        if self.tabs.currentIndex() == 1 and self.scope_page is not None:
+            stopped = self.scope_page.is_stopped()
+        else:
+            stopped = self._datapath_stopped
+        self.run_stop_act.blockSignals(True)
+        self.run_stop_act.setChecked(stopped)
+        self.run_stop_act.blockSignals(False)
+        self.run_stop_act.setText("Run" if stopped else "Stop")
+
+    def _on_scope_stopped_changed(self, stopped: bool) -> None:
+        """Wired to scope_page.on_stopped_changed - relays a state
+        change made through the scope page's OWN entry points (its big
+        Run/Stop button, or spacebar) back to the toolbar action, but
+        only while Scope is the active tab (acting on the toolbar
+        action while looking at Data Path would be confusing - the
+        Scope tab already stays in sync with its own state next time
+        it becomes current, via _sync_run_stop_action above)."""
+        if self.tabs.currentIndex() == 1:
+            self.run_stop_act.blockSignals(True)
+            self.run_stop_act.setChecked(stopped)
+            self.run_stop_act.blockSignals(False)
+            self.run_stop_act.setText("Run" if stopped else "Stop")
 
     def _activate_scope_tab(self) -> None:
         """Lazy construction (per the M6 scope-view plan): the
@@ -327,7 +382,11 @@ class MainWindow(QMainWindow):
         with the real page in place."""
         from .panels.scope_page import ScopePage
         self.scope_page = ScopePage(self.engine)
-        self.scope_page.set_frozen(self.frozen)
+        # Independent stop flag (spec point 1) - the new page starts
+        # running regardless of Data Path's own _datapath_stopped;
+        # on_stopped_changed relays the page's own button/spacebar
+        # back to the toolbar action while Scope is the active tab.
+        self.scope_page.on_stopped_changed = self._on_scope_stopped_changed
         self.tabs.removeTab(1)
         self.tabs.insertTab(1, self.scope_page, "Scope")
         self.tabs.setCurrentIndex(1)
@@ -436,21 +495,24 @@ class MainWindow(QMainWindow):
 
     def apply_update(self, u: EngineUpdate) -> None:
         self.last_update = u
-        # spec 7 "event log stays live": the log must not depend on
-        # whether the diagram is frozen, so it is fed here,
-        # unconditionally, before the frozen check below - not from
-        # inside _apply(), which the frozen check can skip entirely.
-        # This also means unfreezing (which replays self.last_update
-        # through _apply() to restore the display) can no longer
-        # double-log that update's events, since _apply() itself never
-        # touches the log.
+        # spec point 1 "event log always live": the log must not
+        # depend on either tab's own stop flag, so it is fed here,
+        # unconditionally, before the Data Path stop check below - not
+        # from inside _apply(), which that check can skip entirely.
+        # This also means resuming Data Path (which replays
+        # self.last_update through _apply() to restore the display)
+        # can no longer double-log that update's events, since
+        # _apply() itself never touches the log. Scope's own markers/
+        # sweep rate are likewise unconditional here - Scope's stop
+        # flag only pauses ITS repaint timer (ScopePage.set_stopped),
+        # not this feed.
         self.event_log.add_events(u.events)
         if self.scope_page is not None:
             for ev in u.events:
                 self.scope_page.add_event_marker(
                     ev.t, "%s: %s" % (ev.flow, ev.msg))
             self.scope_page.set_sweep_rate(u.snapshot.rate_hz)
-        if self.frozen:
+        if self._datapath_stopped:
             return
         self._apply(u)
 
@@ -518,7 +580,7 @@ class MainWindow(QMainWindow):
             self.rate_label.setText("poll -- Hz  ")
 
     def _advance_dash(self) -> None:
-        if self.frozen:
+        if self._datapath_stopped:
             return
         self.diagram_state.dash_phase = (self.diagram_state.dash_phase
                                          + 1.3) % 100

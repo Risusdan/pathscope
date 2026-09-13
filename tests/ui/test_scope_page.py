@@ -97,7 +97,7 @@ def test_gapped_xy_even_interval_count_uses_averaged_median():
 def test_event_marker_hard_cap_guards_unbounded_growth(qtbot):
     """add_event_marker's list must never grow past MARKER_HARD_CAP
     even when nothing is calling refresh_plot()'s window-based
-    _prune_markers (dock hidden or frozen) - the primary pruning
+    _prune_markers (dock hidden or stopped) - the primary pruning
     mechanism, which this cap only backstops."""
     engine = make_demo_engine("targets/f411")
     page = ScopePage(engine)
@@ -917,5 +917,82 @@ def test_event_log_click_only_moves_cursor_line_not_value_column(qtbot):
     page.jump_to(t0 + 50.0)
 
     assert page.cursor_time() == t0 + 50.0
-    assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == header_before
+    header_after = page.channel_table.horizontalHeaderItem(COL_VALUE).text()
+    assert header_after == header_before
     assert page._channels[key]["value_item"].text() == value_before
+
+
+# -- v2: per-page run/stop replaces global freeze (spec point 1) -----------
+
+def test_set_stopped_and_hidden_timer_matrix(qtbot):
+    """Same bug class the old set_frozen()/hideEvent() pairing guarded
+    against (Task 2's "hidden-dock timer pause w/ frozen matrix" fix,
+    carried into the run/stop rename): the repaint timer's active
+    state must be exactly (visible AND NOT stopped) after every
+    visibility/stop transition, in either order - in particular,
+    stopping while hidden must not let a later show() wake the timer
+    back up (set_stopped(True) has to win over a plain show/hide
+    cycle, same as the old set_frozen(True))."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+
+    page.show()
+    assert page._timer.isActive()
+
+    page.set_stopped(True)
+    assert not page._timer.isActive()
+    page.hide()
+    assert not page._timer.isActive()
+    page.show()
+    # stopped while hidden -> a later show() must not wake the timer.
+    assert not page._timer.isActive()
+
+    page.set_stopped(False)
+    assert page._timer.isActive()
+
+    page.hide()
+    assert not page._timer.isActive()
+    page.set_stopped(True)
+    page.set_stopped(False)
+    # still hidden -> resuming stop must not start a timer nobody can
+    # see repaint.
+    assert not page._timer.isActive()
+    page.show()
+    assert page._timer.isActive()
+
+
+def test_run_stop_button_toggles_label_state_and_callback(qtbot):
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    seen = []
+    page.on_stopped_changed = seen.append
+
+    assert page.run_stop_btn.text() == "Stop"
+    assert not page.is_stopped()
+
+    page.run_stop_btn.click()
+    assert page.is_stopped()
+    assert page.run_stop_btn.text() == "Run"
+    assert seen == [True]
+
+    page.run_stop_btn.click()
+    assert not page.is_stopped()
+    assert page.run_stop_btn.text() == "Stop"
+    assert seen == [True, False]
+
+
+def test_spacebar_toggles_run_stop(qtbot):
+    """spec point 1: spacebar is a scope-focus shortcut for the same
+    big Run/Stop button, not a global app-wide binding."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    assert not page.is_stopped()
+
+    qtbot.keyClick(page, Qt.Key_Space)
+    assert page.is_stopped()
+
+    qtbot.keyClick(page, Qt.Key_Space)
+    assert not page.is_stopped()

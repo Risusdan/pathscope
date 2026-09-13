@@ -1,4 +1,5 @@
 import dataclasses
+import time
 
 import pytest
 from core.adapter.mock import MockAdapter
@@ -110,6 +111,78 @@ def test_set_watch_rejected_address_raises():
         with pytest.raises(TraceError):
             r.set_watch([0x99999990])     # outside sim whitelist
         assert r.status().watch_count == 0
+    finally:
+        engine.stop()
+
+
+def test_set_watch_reject_then_valid_retry_succeeds():
+    # IMPORTANT 5 regression: firmware (and the sim, faithfully - see
+    # FakeTraceFirmware._handle_count_write) leaves a rejection's
+    # status in place until the next accept, rather than clearing it
+    # the moment the gate closes. set_watch's own success criterion is
+    # generation advancing, not "status happens to read OK" - a valid
+    # retry right after a rejection must succeed, not be mistaken for
+    # a repeat of the stale BAD_ADDR still sitting in status.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        with pytest.raises(TraceError):
+            r.set_watch([0x99999990])     # outside sim whitelist
+        r.set_watch([0x20000000])         # must succeed, no spurious BAD_ADDR
+        desc = r.status()
+        assert desc.status == 0
+        assert desc.watch_count == 1
+    finally:
+        engine.stop()
+
+
+def test_set_watch_big_endian_round_trip():
+    # IMPORTANT 6 regression: set_watch must byte-swap the words it
+    # writes for a big-endian target - a raw (unswapped) write would
+    # store the wrong bytes for both the address and the count/
+    # generation word, and the sim, faithfully modeling a BE target's
+    # memory (see FakeTraceFirmware._decode_addr_word/_resync), would
+    # then either reject the table or sample the wrong address.
+    adapter = MockAdapter({0x20000000: 111, 0x20000004: 222})
+    fw = FakeTraceFirmware(adapter, endian=">")
+    engine = Engine.load("targets/f411", adapter, interval_s=0.01)
+    engine.start()
+    try:
+        r = TraceReader(engine)
+        desc = r.discover(fw.desc_addr)
+        assert desc.endian == ">"
+        r.set_watch([0x20000000, 0x20000004])
+        fw.step(3)
+        recs = r.refresh()
+        assert len(recs) >= 3
+        assert recs[-1].slots[0] == 111
+        assert recs[-1].slots[1] == 222
+    finally:
+        engine.stop()
+
+
+def test_set_watch_empty_skips_generation_wait():
+    # MUST-FIX m4 regression: firmware's gate never validates (and so
+    # never bumps generation) for an empty table - waiting for a
+    # generation change here would always run to the full ~500ms
+    # timeout for no reason. set_watch([]) must return promptly, with
+    # success judged purely by watch_count reading back 0.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000])
+        gen_before = r.status().generation
+
+        start = time.monotonic()
+        r.set_watch([])
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.1              # no 10x0.05s generation poll
+        desc = r.status()
+        assert desc.watch_count == 0
+        assert desc.generation == gen_before   # firmware never bumps it
     finally:
         engine.stop()
 

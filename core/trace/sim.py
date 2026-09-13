@@ -63,6 +63,7 @@ firmware-over-a-probe is safe despite the same lack of a lock:
         by whether the "firmware" on the other end is silicon or this
         sim.
 """
+import struct
 from typing import Tuple
 
 from core.adapter.mock import MockAdapter
@@ -150,7 +151,7 @@ class FakeTraceFirmware:
         if (WATCH_ADDRS_OFFSET <= offset < WATCH_COUNT_OFFSET
                 and (offset - WATCH_ADDRS_OFFSET) % 4 == 0):
             idx = (offset - WATCH_ADDRS_OFFSET) // 4
-            self._watch_addrs[idx] = value & 0xFFFFFFFF
+            self._watch_addrs[idx] = self._decode_addr_word(value)
         elif offset == WATCH_COUNT_OFFSET:
             self._handle_count_word_write(value & 0xFFFFFFFF)
         # Any other in-range offset (status, period_us, ring geometry,
@@ -158,6 +159,21 @@ class FakeTraceFirmware:
         # host write protocol - ignore it rather than let a stray write
         # corrupt state that _current_desc() re-derives below.
         self._resync()
+
+    def _decode_addr_word(self, word: int) -> int:
+        """IMPORTANT 6: inverse of TraceReader._compose_addr_word -
+        recover the logical address a watch_addrs[] write actually
+        means from the wire word it carried. The wire word is always
+        the little-endian composition of the raw target bytes
+        (contract.py's own adapter convention, _words_to_bytes);
+        reinterpreting those same raw bytes per this target's own
+        endianness recovers the value _validate()/step() need to use
+        as a real memory key (self._adapter.mem is addressed by plain
+        logical addresses, independent of wire byte order) - symmetric
+        with how _resync() serializes watch_addrs back out through
+        encode_desc for the read side."""
+        raw = struct.pack("<I", word & 0xFFFFFFFF)
+        return struct.unpack(self._endian + "I", raw)[0]
 
     def _handle_count_word_write(self, word: int) -> None:
         """CRITICAL 1: model the real 32-bit write, not just "the host
@@ -190,10 +206,16 @@ class FakeTraceFirmware:
                 # Rejected: count stays 0, the pending addresses simply
                 # never get committed.
         else:
-            # Closing the gate (N->0) or restating a count needs no
-            # validation; a fresh STATUS_OK clears any status left
-            # over from a previous rejection.
-            self._status = STATUS_OK
+            # IMPORTANT 5(a): closing the gate (N->0) or restating a
+            # count needs no validation - and, matching real firmware
+            # exactly (ps_trace.c only ever touches status inside the
+            # accept/reject branch above), does NOT touch status
+            # either. A rejection's status is only ever replaced by
+            # the NEXT accept/reject, not silently cleared here -
+            # eagerly clearing it here (as this sim previously did)
+            # diverged from firmware and hid a real race: a valid
+            # retry right after a rejection could read back a
+            # spuriously-cleared OK before an accept had actually run.
             self._watch_count = new_count
 
     def _validate(self, new_count: int) -> Tuple[bool, int]:

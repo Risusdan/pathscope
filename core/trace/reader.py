@@ -186,24 +186,68 @@ class TraceReader:
                 "too many watch channels: %d > max %d"
                 % (len(addrs), self.desc.max_ch))
 
+        if not addrs:
+            # MUST-FIX m4: firmware's gate never validates - and so
+            # never bumps generation - for an empty table (count == 0
+            # is always the "gate closed" state, never itself
+            # accepted). Polling for a generation change here would
+            # always run to the full timeout for no reason (a ~500ms
+            # stall on every remove-to-empty edit); success is simply
+            # the count reading back 0, with nothing left to validate.
+            self._write_count(0)
+            desc = self.status()
+            if desc.watch_count != 0:
+                raise TraceError("firmware did not clear the watch table")
+            return
+
         prev_gen = self.desc.generation
         self._write_count(0)
+        # IMPORTANT 2(c): dwell at least one sample period after
+        # closing the gate before writing the new addresses - ps_trace.h
+        # documents this as a should, not a must (the firmware's
+        # level-based gate, see ps_trace.c, no longer depends on it for
+        # correctness), but it's still what keeps a mid-edit sample
+        # from ever observing a half-written address table.
+        period_s = self.desc.period_us / 1e6
+        time.sleep(max(2 * period_s, 0.002))
         for i, addr in enumerate(addrs):
             self.engine.write_word(
-                self.desc_addr + WATCH_ADDRS_OFFSET + 4 * i, addr)
+                self.desc_addr + WATCH_ADDRS_OFFSET + 4 * i,
+                self._compose_addr_word(addr))
         self._write_count(len(addrs))
 
         desc = self.status()
         tries = 1
-        while (desc.generation == prev_gen and desc.status == STATUS_OK
-               and tries < 10):
+        while desc.generation == prev_gen and tries < 10:
             time.sleep(0.05)
             desc = self.status()
             tries += 1
 
-        if desc.status != STATUS_OK:
-            name = _STATUS_NAMES.get(desc.status, str(desc.status))
-            raise TraceError("firmware rejected table: %s" % name)
+        if desc.generation == prev_gen:
+            # IMPORTANT 5(b): generation advancing is the only
+            # trustworthy accept signal (reliable now that CRITICAL 1
+            # keeps a stray write from ever clobbering it) - a status
+            # observed WHILE still polling is not trusted, since
+            # firmware (and the sim, faithfully - see IMPORTANT 5(a))
+            # leaves a REJECTED status in place until the next accept,
+            # so it could be stale from a wholly earlier rejection
+            # rather than a verdict on this submission. Only once no
+            # accept ever arrived is status consulted, to name why.
+            if desc.status != STATUS_OK:
+                name = _STATUS_NAMES.get(desc.status, str(desc.status))
+                raise TraceError("firmware rejected table: %s" % name)
+            raise TraceError("firmware did not accept watch table")
+
+    def _compose_addr_word(self, addr: int) -> int:
+        """IMPORTANT 6: wire word for one watch_addrs[] uint32 slot,
+        byte-swapped for a big-endian target the same way
+        contract.encode_desc handles every multi-byte field - pack the
+        value in the target's own byte order, then reinterpret those
+        same raw bytes as the little-endian word every Engine
+        transaction actually carries (contract.py's module
+        docstring)."""
+        raw = struct.pack(self.desc.endian + "I", addr & 0xFFFFFFFF)
+        return struct.unpack("<I", raw)[0]
 
     def _compose_count_word(self, new_count: int, current_word: int) -> int:
         """CRITICAL 1: the word at WATCH_COUNT_OFFSET physically holds

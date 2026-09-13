@@ -160,7 +160,7 @@ MARKER_HARD_CAP = 200
 # meaningfully more width than the old list+strip design's 260px to
 # stay readable; the plot area still gets the rest of the window via
 # outer's stretch factor.
-SIDE_MAX_WIDTH = 520
+SIDE_MAX_WIDTH = 600
 
 # Channel table columns (spec point 2).
 COL_SWATCH, COL_NAME, COL_TYPE, COL_VALUE, COL_HZ, COL_SCALE, \
@@ -445,7 +445,7 @@ class ScopePage(QWidget):
         header.setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
         self.channel_table.setColumnWidth(COL_SWATCH, 18)
         self.channel_table.setColumnWidth(COL_TYPE, 70)
-        self.channel_table.setColumnWidth(COL_VALUE, 100)
+        self.channel_table.setColumnWidth(COL_VALUE, 135)
         self.channel_table.setColumnWidth(COL_HZ, 48)
         self.channel_table.setColumnWidth(COL_SCALE, 64)
         self.channel_table.setColumnWidth(COL_OFFSET, 64)
@@ -557,6 +557,15 @@ class ScopePage(QWidget):
             Qt.ScrollBarAlwaysOff)
         self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.side_scroll.setWidget(side_widget)
+        # A QScrollArea's own sizeHint doesn't grow to fit its content
+        # even with setWidgetResizable(True) - only setMaximumWidth
+        # left the layout free to squeeze it down to a small default,
+        # which is exactly what left the channel table showing 2-3 of
+        # its 8 columns behind a horizontal scrollbar in practice.
+        # Fixing min==max makes this a genuinely fixed-width column
+        # sized to fit the table (spec point 2's "hero" column widths
+        # above sum to it), not just capped from growing further.
+        self.side_scroll.setMinimumWidth(SIDE_MAX_WIDTH)
         self.side_scroll.setMaximumWidth(SIDE_MAX_WIDTH)
         outer.addWidget(self.side_scroll)
 

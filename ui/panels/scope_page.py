@@ -109,7 +109,7 @@ rather than filtered at load time, per the brief.
 """
 import struct
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Qt
@@ -219,10 +219,6 @@ CURVE_COLORS = [
 # that's why red is #B71C1C rather than MARKER_PEN's own shade and
 # blue stays #1976D2 rather than CURSOR_PEN's: a curve must never be
 # the same color as either of the plot's other line kinds.
-
-
-def _noop(_arg) -> None:
-    pass
 
 
 def _gapped_xy(series: List[Tuple[float, int]], t0: float
@@ -374,12 +370,6 @@ class ScopePage(QWidget):
         # This page's own independent run/stop flag (spec point 1) -
         # unrelated to MainWindow's Data Path stop flag.
         self._stopped = False
-        # Notified with the new stopped state on every set_stopped()
-        # call (this page's own big button, spacebar, or MainWindow
-        # acting on the toolbar's Run/Stop action) - MainWindow wires
-        # this to keep that toolbar action in sync while the Scope tab
-        # is active. No-op until MainWindow replaces it.
-        self.on_stopped_changed: Callable[[bool], None] = _noop
         # _t0 (dock-open time) no longer drives axis positioning - see
         # the module docstring's "X axis" paragraph for roll mode.
         # Kept only as a construction-time anchor a few tests use for
@@ -575,10 +565,10 @@ class ScopePage(QWidget):
         self.time_label = QLabel("t-now = -- s")
         top_row.addWidget(self.time_label, 1)
         # The scope page's own big Run/Stop button (spec point 1),
-        # synced with the toolbar's run_stop_act while this is the
-        # active tab (see MainWindow._toggle_run_stop/
-        # _on_scope_stopped_changed) and with spacebar (keyPressEvent
-        # below) - checkable so its own pressed-look tracks state too.
+        # this page's only run/stop control besides spacebar
+        # (keyPressEvent below) - checkable so its own pressed-look
+        # tracks state too. Sits top-right, the same position as the
+        # Data Path page's own Run/Stop, deliberately.
         self.run_stop_btn = QPushButton("Stop")
         self.run_stop_btn.setCheckable(True)
         self.run_stop_btn.setMinimumHeight(36)
@@ -648,18 +638,14 @@ class ScopePage(QWidget):
         that hideEvent() below deliberately paused; showEvent()
         re-checks self._stopped when the dock is next shown, so the
         timer still resumes correctly at that point. Syncs the big
-        button's own label/checked state and notifies
-        on_stopped_changed (MainWindow, so the toolbar's Run/Stop
-        action can mirror this page's state while it is the active
-        tab) either way this was triggered - this method, the big
-        button, or spacebar."""
+        button's own label/checked state either way this was
+        triggered - this method, the big button, or spacebar."""
         self._stopped = on
         if on:
             self._timer.stop()
         elif self.isVisible():
             self._timer.start()
         self._update_run_stop_button()
-        self.on_stopped_changed(on)
 
     def is_stopped(self) -> bool:
         return self._stopped

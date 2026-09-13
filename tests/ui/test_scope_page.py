@@ -962,12 +962,10 @@ def test_set_stopped_and_hidden_timer_matrix(qtbot):
     assert page._timer.isActive()
 
 
-def test_run_stop_button_toggles_label_state_and_callback(qtbot):
+def test_run_stop_button_toggles_label_and_state(qtbot):
     engine = make_demo_engine(TARGET)
     page = ScopePage(engine)
     qtbot.addWidget(page)
-    seen = []
-    page.on_stopped_changed = seen.append
 
     assert page.run_stop_btn.text() == "Stop"
     assert not page.is_stopped()
@@ -975,12 +973,10 @@ def test_run_stop_button_toggles_label_state_and_callback(qtbot):
     page.run_stop_btn.click()
     assert page.is_stopped()
     assert page.run_stop_btn.text() == "Run"
-    assert seen == [True]
 
     page.run_stop_btn.click()
     assert not page.is_stopped()
     assert page.run_stop_btn.text() == "Stop"
-    assert seen == [True, False]
 
 
 def test_spacebar_toggles_run_stop(qtbot):

@@ -78,7 +78,7 @@ def test_run_stop_does_not_drop_anomaly_from_event_log(qtbot):
     # stop before the engine even starts, so the very first sweep -
     # the one carrying the overrun anomaly - is delivered while
     # stopped.
-    win.run_stop_act.setChecked(True)
+    win.set_datapath_stopped(True)
     stopped_rate_text = win.rate_label.text()
     stopped_active_edges = set(win.diagram_state.active_edges)
 
@@ -93,5 +93,5 @@ def test_run_stop_does_not_drop_anomaly_from_event_log(qtbot):
         assert win.rate_label.text() == stopped_rate_text
         assert win.diagram_state.active_edges == stopped_active_edges
     finally:
-        win.run_stop_act.setChecked(False)
+        win.set_datapath_stopped(False)
         engine.stop()

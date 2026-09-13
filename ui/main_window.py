@@ -5,14 +5,21 @@ Ported from prototype/ui_proto.py's Main class - toolbar construction
 Engine/EngineBridge/DiagramState instead of the prototype's StubEngine
 and stub-dict snapshots. The prototype's single global Freeze has
 since been replaced by per-page Run/Stop (spec point 1, M6 scope-view
-plan v2) - see run_stop_act/_toggle_run_stop below."""
+plan v2): each page carries its own button in the same top-right
+position - dp_run_stop_btn on the Data Path page header,
+ScopePage.run_stop_btn on the Scope page - and the toolbar carries
+none. The toolbar holds only the target name, the Data Path/Scope
+page switch (two exclusive buttons at a fixed position - the old
+QTabWidget tab bar rendered as a segmented control that shifted
+position with the page content) and the poll rate."""
 from typing import Dict, Optional, Set
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction, QPainter
-from PySide6.QtWidgets import (QDockWidget, QGraphicsView, QLabel,
-                               QMainWindow, QSizePolicy, QStackedWidget,
-                               QTabWidget, QToolBar, QWidget)
+from PySide6.QtGui import QPainter
+from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsView,
+                               QHBoxLayout, QLabel, QMainWindow,
+                               QPushButton, QSizePolicy, QStackedWidget,
+                               QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
@@ -66,8 +73,9 @@ class MainWindow(QMainWindow):
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         # (central widget is set below, by _build_central_tabs() - the
-        # view becomes tab 0 of a Data Path/Scope QTabWidget rather
-        # than the window's sole central widget.)
+        # view sits inside the Data Path page of a Data Path/Scope
+        # QStackedWidget rather than being the window's sole central
+        # widget.)
 
         self._flow_edges = build_flow_edge_map(engine.topology,
                                                engine.flowspec)
@@ -170,29 +178,27 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.target_label)
         tb.addSeparator()
 
-        # "Halt MCU" halts the TARGET (the chip stops executing);
-        # Run/Stop next to it only holds this page's display. The
-        # explicit "MCU" and the separator keep the two from reading
-        # as siblings.
-        self.halt_act = QAction("Halt MCU", self)
-        self.halt_act.triggered.connect(self._toggle_halt)
-        tb.addAction(self.halt_act)
-        tb.addSeparator()
-
-        # Per-page Run/Stop (spec point 1) - replaces the old global
-        # Freeze action. Acts on whichever tab is current (Data Path
-        # or Scope, each with its own independent stop flag - see
-        # _toggle_run_stop) and its own checked/text state is kept in
-        # sync with that tab's own flag on every tab switch (see
-        # _on_tab_changed's _sync_run_stop_action call).
-        self.run_stop_act = QAction("Stop", self)
-        self.run_stop_act.setCheckable(True)
-        self.run_stop_act.toggled.connect(self._toggle_run_stop)
-        tb.addAction(self.run_stop_act)
-
-        self.fit_act = QAction("Fit", self)
-        self.fit_act.triggered.connect(self.fit_view)
-        tb.addAction(self.fit_act)
+        # The ONLY Data Path/Scope switch: two exclusive checkable
+        # buttons at a fixed toolbar position. (The QTabWidget tab bar
+        # this replaces rendered as a platform segmented control whose
+        # on-screen position shifted with the page content - a UX
+        # finding.) setChecked() below in _on_tab_changed never emits
+        # clicked, so programmatic tab switches cannot recurse here.
+        self.datapath_page_btn = QToolButton()
+        self.datapath_page_btn.setText("Data Path")
+        self.datapath_page_btn.setCheckable(True)
+        self.datapath_page_btn.setChecked(True)
+        self.scope_page_btn = QToolButton()
+        self.scope_page_btn.setText("Scope")
+        self.scope_page_btn.setCheckable(True)
+        self._page_group = QButtonGroup(self)
+        self._page_group.setExclusive(True)
+        self._page_group.addButton(self.datapath_page_btn, 0)
+        self._page_group.addButton(self.scope_page_btn, 1)
+        self._page_group.idClicked.connect(
+            lambda index: self.tabs.setCurrentIndex(index))
+        tb.addWidget(self.datapath_page_btn)
+        tb.addWidget(self.scope_page_btn)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -241,20 +247,53 @@ class MainWindow(QMainWindow):
         watching the scope the diagram is irrelevant, and both were
         cramped sharing the window.
 
-        The Scope tab starts as a plain placeholder label; the real
+        The pages live in a plain QStackedWidget (still named
+        self.tabs - QStackedWidget shares QTabWidget's
+        currentIndex/setCurrentIndex/currentChanged surface, so every
+        caller and test kept working across the switch); the visible
+        switch is the pair of toolbar page buttons, not a tab bar.
+
+        The Data Path page wraps the diagram view under a header row
+        carrying the page's own controls: Halt MCU (target control
+        lives with the machine picture) on the left and this page's
+        Run/Stop on the right - the SAME top-right position as the
+        Scope page's own big button, deliberately (user requirement:
+        Run/Stop sits in one consistent place on both pages).
+
+        The Scope page starts as a plain placeholder label; the real
         ScopePage (and its pyqtgraph import) is constructed lazily on
-        first activation, in _activate_scope_tab() - same "pay the
-        import cost only if the user ever visits it" rule the old
-        dock-based _toggle_scope used. currentChanged is connected
-        only after both tabs are added, so building this method's own
-        two initial tabs never fires _on_tab_changed (which reaches
-        into self.inspector_dock - it must already exist;
-        _build_docks() runs before this in __init__)."""
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self.view, "Data Path")
+        first activation, in _activate_scope_tab() - pay the import
+        cost only if the user ever visits it. currentChanged is
+        connected only after both pages are added, so building them
+        never fires _on_tab_changed (which reaches into
+        self.inspector_dock - it must already exist; _build_docks()
+        runs before this in __init__)."""
+        datapath_page = QWidget()
+        dp_layout = QVBoxLayout(datapath_page)
+        dp_layout.setContentsMargins(0, 4, 0, 0)
+        dp_layout.setSpacing(4)
+        header = QHBoxLayout()
+        header.setContentsMargins(8, 0, 8, 0)
+        self.halt_btn = QPushButton("Halt MCU")
+        self.halt_btn.setMinimumHeight(36)
+        self.halt_btn.setMinimumWidth(110)
+        self.halt_btn.clicked.connect(self._toggle_halt)
+        header.addWidget(self.halt_btn)
+        header.addStretch(1)
+        self.dp_run_stop_btn = QPushButton("Stop")
+        self.dp_run_stop_btn.setCheckable(True)
+        self.dp_run_stop_btn.setMinimumHeight(36)
+        self.dp_run_stop_btn.setMinimumWidth(100)
+        self.dp_run_stop_btn.clicked.connect(self._on_dp_run_stop_clicked)
+        header.addWidget(self.dp_run_stop_btn)
+        dp_layout.addLayout(header)
+        dp_layout.addWidget(self.view)
+
+        self.tabs = QStackedWidget()
+        self.tabs.addWidget(datapath_page)
         self._scope_placeholder = QLabel("Loading Scope...")
         self._scope_placeholder.setAlignment(Qt.AlignCenter)
-        self.tabs.addTab(self._scope_placeholder, "Scope")
+        self.tabs.addWidget(self._scope_placeholder)
         self.setCentralWidget(self.tabs)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -266,7 +305,7 @@ class MainWindow(QMainWindow):
     # -- actions ---------------------------------------------------------
 
     def _toggle_halt(self) -> None:
-        halting = self.halt_act.text() == "Halt MCU"
+        halting = self.halt_btn.text() == "Halt MCU"
         try:
             if halting:
                 self.engine.halt()
@@ -275,70 +314,41 @@ class MainWindow(QMainWindow):
         except EngineError as e:
             self.statusBar().showMessage("error: %s" % e, 5000)
             return
-        self.halt_act.setText("Resume MCU" if halting else "Halt MCU")
+        self.halt_btn.setText("Resume MCU" if halting else "Halt MCU")
 
-    def _toggle_run_stop(self, on: bool) -> None:
-        """Wired to the toolbar's run_stop_act - acts on whichever tab
-        is CURRENT (spec point 1), not both: on the Scope tab this
-        only sets scope_page's own independent stop flag (the
-        waveform hold), and on the Data Path tab this only sets
-        self._datapath_stopped (the diagram+Inspector hold) - unlike
-        the old global Freeze, neither path touches the other tab's
-        state at all. The action's own text ("Run"/"Stop") is kept in
-        sync here since this is the one place both entry points (the
-        toolbar action itself, and _on_scope_stopped_changed relaying
-        the scope page's own big button/spacebar) ultimately update
-        the tab-independent flags from."""
-        if self.tabs.currentIndex() == 1 and self.scope_page is not None:
-            self.scope_page.set_stopped(on)
-        else:
-            self._datapath_stopped = on
-            if not on and self.last_update is not None:
-                self._apply(self.last_update)
-        self.run_stop_act.setText("Run" if on else "Stop")
+    def set_datapath_stopped(self, on: bool) -> None:
+        """The Data Path page's own independent stop flag (spec
+        point 1: diagram+Inspector hold, the display only - the
+        target and the poller keep running, and the Scope page's own
+        flag is untouched). Mirror of ScopePage.set_stopped: syncs
+        the page button's label/checked state whichever entry point
+        (the button, or this method directly) made the change."""
+        self._datapath_stopped = on
+        if not on and self.last_update is not None:
+            self._apply(self.last_update)
+        self.dp_run_stop_btn.setText("Run" if on else "Stop")
+        self.dp_run_stop_btn.setChecked(on)
+
+    def _on_dp_run_stop_clicked(self) -> None:
+        self.set_datapath_stopped(not self._datapath_stopped)
 
     def _on_tab_changed(self, index: int) -> None:
         """Wired to self.tabs.currentChanged. Keeps the Inspector dock
-        visible only on the Data Path tab (index 0) - a full-page
-        Scope has no room for it and it is irrelevant there. The tab
-        bar itself is the ONLY Data Path/Scope switch (the old
-        toolbar "Scope" action, a leftover shortcut from the
-        dock-based layout, was removed as a redundant second switch).
-        Event log dock is untouched here - it stays visible on both
-        tabs. Lazily constructs the real ScopePage the first time the
-        Scope tab is activated."""
+        visible only on the Data Path page (index 0) - a full-page
+        Scope has no room for it and it is irrelevant there - and the
+        toolbar page buttons' checked state mirroring the current
+        page (setChecked never emits clicked, so no recursion into
+        the page switch). Event log dock is untouched here - it stays
+        visible on both pages. Each page carries its own Run/Stop
+        button holding its own flag, so a page switch has nothing to
+        resync there. Lazily constructs the real ScopePage the first
+        time the Scope page is activated."""
         on_scope = index == 1
         self.inspector_dock.setVisible(not on_scope)
+        self.datapath_page_btn.setChecked(not on_scope)
+        self.scope_page_btn.setChecked(on_scope)
         if on_scope and self.scope_page is None:
             self._activate_scope_tab()
-        # Per-page run/stop (spec point 1): the toolbar action reflects
-        # whichever tab is now current's OWN stop flag, independent of
-        # the other tab's.
-        self._sync_run_stop_action()
-
-    def _sync_run_stop_action(self) -> None:
-        if self.tabs.currentIndex() == 1 and self.scope_page is not None:
-            stopped = self.scope_page.is_stopped()
-        else:
-            stopped = self._datapath_stopped
-        self.run_stop_act.blockSignals(True)
-        self.run_stop_act.setChecked(stopped)
-        self.run_stop_act.blockSignals(False)
-        self.run_stop_act.setText("Run" if stopped else "Stop")
-
-    def _on_scope_stopped_changed(self, stopped: bool) -> None:
-        """Wired to scope_page.on_stopped_changed - relays a state
-        change made through the scope page's OWN entry points (its big
-        Run/Stop button, or spacebar) back to the toolbar action, but
-        only while Scope is the active tab (acting on the toolbar
-        action while looking at Data Path would be confusing - the
-        Scope tab already stays in sync with its own state next time
-        it becomes current, via _sync_run_stop_action above)."""
-        if self.tabs.currentIndex() == 1:
-            self.run_stop_act.blockSignals(True)
-            self.run_stop_act.setChecked(stopped)
-            self.run_stop_act.blockSignals(False)
-            self.run_stop_act.setText("Run" if stopped else "Stop")
 
     def _activate_scope_tab(self) -> None:
         """Lazy construction (per the M6 scope-view plan): the
@@ -346,27 +356,25 @@ class MainWindow(QMainWindow):
         activation of the Scope tab, not at MainWindow import time -
         pyqtgraph's import cost is paid only if the user ever visits
         it. Swaps the placeholder widget _build_central_tabs() inserted
-        for a real ScopePage at the same tab index (1).
+        for a real ScopePage at the same page index (1).
 
-        removeTab() on the then-current placeholder tab makes Qt
-        switch currentIndex away and back as this runs (to index 0,
-        since index 1 is being removed, then back to 1 via the
-        explicit setCurrentIndex below), re-entering _on_tab_changed
-        twice more along the way. Both re-entries are harmless: the
-        dock-visible/action-checked state they set is overwritten by
-        the next step, and the `scope_page is None` guard above (set
-        non-None before either removeTab or insertTab run) prevents a
-        second construction - the method converges on Scope, active,
-        with the real page in place."""
+        removeWidget() on the then-current placeholder makes the
+        stack switch currentIndex away and back as this runs (to 0,
+        then back to 1 via the explicit setCurrentIndex below),
+        re-entering _on_tab_changed along the way. The re-entries are
+        harmless: the dock-visible/button-checked state they set is
+        overwritten by the next step, and the `scope_page is None`
+        guard above (set non-None before removeWidget runs) prevents
+        a second construction - the method converges on Scope,
+        active, with the real page in place. The page starts running
+        regardless of Data Path's own _datapath_stopped (independent
+        flags, spec point 1)."""
         from .panels.scope_page import ScopePage
         self.scope_page = ScopePage(self.engine)
-        # Independent stop flag (spec point 1) - the new page starts
-        # running regardless of Data Path's own _datapath_stopped;
-        # on_stopped_changed relays the page's own button/spacebar
-        # back to the toolbar action while Scope is the active tab.
-        self.scope_page.on_stopped_changed = self._on_scope_stopped_changed
-        self.tabs.removeTab(1)
-        self.tabs.insertTab(1, self.scope_page, "Scope")
+        placeholder = self._scope_placeholder
+        self.tabs.removeWidget(placeholder)
+        placeholder.deleteLater()
+        self.tabs.insertWidget(1, self.scope_page)
         self.tabs.setCurrentIndex(1)
         self._scope_placeholder = None
 

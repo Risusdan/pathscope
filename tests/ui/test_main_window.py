@@ -19,10 +19,10 @@ def test_live_updates_light_up_the_diagram(qtbot):
 
 
 def test_run_stop_holds_data_path_display_on_data_path_tab(qtbot):
-    """Per-page run/stop (spec point 1): toggling run_stop_act while
-    the Data Path tab is current holds the diagram+Inspector display
+    """Per-page run/stop (spec point 1): the Data Path page's OWN
+    Run/Stop button holds the diagram+Inspector display
     (self._datapath_stopped) exactly like the old global Freeze did -
-    and the action's own label switches Stop<->Run."""
+    and the button's own label switches Stop<->Run."""
     engine = make_demo_engine("targets/f411")
     bridge = EngineBridge(engine)
     win = MainWindow(engine, bridge)
@@ -32,27 +32,27 @@ def test_run_stop_holds_data_path_display_on_data_path_tab(qtbot):
     try:
         qtbot.waitUntil(lambda: win.last_update is not None, timeout=4000)
         assert win.tabs.currentIndex() == 0
-        assert win.run_stop_act.text() == "Stop"
+        assert win.dp_run_stop_btn.text() == "Stop"
 
-        win.run_stop_act.setChecked(True)
-        assert win.run_stop_act.text() == "Run"
+        win.dp_run_stop_btn.click()
+        assert win.dp_run_stop_btn.text() == "Run"
+        assert win.dp_run_stop_btn.isChecked()
         assert win._datapath_stopped
         held = win.rate_label.text()
         qtbot.wait(300)
         assert win.rate_label.text() == held      # held display
 
-        win.run_stop_act.setChecked(False)
-        assert win.run_stop_act.text() == "Stop"
+        win.dp_run_stop_btn.click()
+        assert win.dp_run_stop_btn.text() == "Stop"
         assert not win._datapath_stopped
     finally:
         engine.stop()
 
 
 def test_run_stop_acts_on_scope_tab_independently_of_data_path(qtbot):
-    """The same toolbar action, while the Scope tab is current, must
-    only set scope_page's own independent stop flag - Data Path's own
-    flag (and vice versa) stays untouched, and the action's checked/
-    text state follows whichever tab is current across a switch."""
+    """Each page's own Run/Stop button sets only that page's flag -
+    stopping Scope leaves Data Path's flag and button untouched (and
+    vice versa), across page switches."""
     engine = make_demo_engine("targets/f411")
     bridge = EngineBridge(engine)
     win = MainWindow(engine, bridge)
@@ -60,49 +60,56 @@ def test_run_stop_acts_on_scope_tab_independently_of_data_path(qtbot):
     win.show()
     win.tabs.setCurrentIndex(1)             # switch to Scope
     assert win.tabs.currentIndex() == 1
-    assert not win.run_stop_act.isChecked()
+    assert not win.scope_page.is_stopped()
 
-    win.run_stop_act.setChecked(True)
+    win.scope_page.run_stop_btn.click()
     assert win.scope_page.is_stopped()
     assert not win._datapath_stopped
-    assert win.run_stop_act.text() == "Run"
+    assert win.dp_run_stop_btn.text() == "Stop"
+    assert not win.dp_run_stop_btn.isChecked()
 
-    # switching back to Data Path must reflect ITS OWN (still
-    # running) flag, not Scope's stopped one.
+    # switching back to Data Path: ITS OWN (still running) button is
+    # untouched by Scope's stopped state.
     win.tabs.setCurrentIndex(0)
     assert win.tabs.currentIndex() == 0
-    assert not win.run_stop_act.isChecked()
-    assert win.run_stop_act.text() == "Stop"
+    assert not win.dp_run_stop_btn.isChecked()
+    assert win.dp_run_stop_btn.text() == "Stop"
 
-    # and switching back to Scope must show it still stopped.
+    # and switching back to Scope shows it still stopped.
     win.tabs.setCurrentIndex(1)
-    assert win.run_stop_act.isChecked()
-    assert win.run_stop_act.text() == "Run"
+    assert win.scope_page.is_stopped()
+    assert win.scope_page.run_stop_btn.text() == "Run"
 
-    win.run_stop_act.setChecked(False)
+    win.scope_page.run_stop_btn.click()
     assert not win.scope_page.is_stopped()
 
 
-def test_scope_big_button_syncs_toolbar_while_scope_tab_active(qtbot):
-    """spec point 1: the scope page's own big Run/Stop button (and,
-    transitively, spacebar) is synced with the toolbar action while
-    Scope is the active tab."""
+def test_page_switch_buttons_mirror_current_page(qtbot):
+    """The toolbar's Data Path/Scope buttons are the only page
+    switch: clicking one switches the stack, and a programmatic
+    switch mirrors back into their checked state."""
     engine = make_demo_engine("targets/f411")
     bridge = EngineBridge(engine)
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
+    assert win.datapath_page_btn.isChecked()
+    assert not win.scope_page_btn.isChecked()
+
+    win.scope_page_btn.click()
+    assert win.tabs.currentIndex() == 1
+    assert win.scope_page is not None
+    assert win.scope_page_btn.isChecked()
+    assert not win.datapath_page_btn.isChecked()
+
+    win.datapath_page_btn.click()
+    assert win.tabs.currentIndex() == 0
+
+    # programmatic switch mirrors back into the buttons.
     win.tabs.setCurrentIndex(1)
-
-    win.scope_page.run_stop_btn.click()
-    assert win.scope_page.is_stopped()
-    assert win.run_stop_act.isChecked()
-    assert win.run_stop_act.text() == "Run"
-
-    win.scope_page.run_stop_btn.click()
-    assert not win.scope_page.is_stopped()
-    assert not win.run_stop_act.isChecked()
-    assert win.run_stop_act.text() == "Stop"
+    assert win.scope_page_btn.isChecked()
+    win.tabs.setCurrentIndex(0)
+    assert win.datapath_page_btn.isChecked()
 
 
 def test_target_lost_stops_animating_and_recovers(qtbot):

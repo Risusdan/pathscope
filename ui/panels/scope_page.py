@@ -938,7 +938,8 @@ class ScopePage(QWidget):
         entry["fit"] = "own" if entry["fit"] == "fill" else "fill"
         entry["fit_btn"].setText("Own" if entry["fit"] == "own" else "Fill")
         if self._auto_lane:
-            self._apply_auto_lane()
+            # refresh_plot() re-runs _apply_auto_lane() itself while
+            # Auto-lane is on, so one call recomputes and repaints.
             self.refresh_plot()
 
     # -- Auto-lane (spec point 4) --------------------------------------------
@@ -951,7 +952,6 @@ class ScopePage(QWidget):
         (still-editable) fields for hand-tuning."""
         self._auto_lane = on
         if on:
-            self._apply_auto_lane()
             self.refresh_plot()
 
     def _apply_auto_lane(self) -> None:
@@ -1282,8 +1282,9 @@ class ScopePage(QWidget):
             entry["hz_item"].setText("%.1f" % entry["rate"])
             entry["value_item"].setText(self._value_text_for(key))
         self._prune_markers(now)
-        if self._cursor_line is not None:
-            self._cursor_line.setPos(self._cursor_t - now)
+        cursor_t = self._cursor_t
+        if self._cursor_line is not None and cursor_t is not None:
+            self._cursor_line.setPos(cursor_t - now)
         # Roll mode: the viewport is pinned to a fixed window every
         # tick rather than left to auto-range - x auto-range was
         # disabled once, in __init__, so this setXRange is the only

@@ -17,9 +17,10 @@ from ui.demo import ADC_SR, S0CR
 from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
 from ui.panels.scope_page import (COL_NAME, COL_SWATCH, COL_VALUE,
-                                  CURVE_COLORS, DEFAULT_TYPE, NO_SOURCE_TEXT,
-                                  TYPES, ScopePage, _decode_series,
-                                  _default_type_for_size, _fit_scale_offset,
+                                  CURVE_COLORS, DEFAULT_TYPE, DRAIN_MS_CAP,
+                                  NO_SOURCE_TEXT, TYPES, ScopePage,
+                                  _decode_series, _default_type_for_size,
+                                  _drain_interval_ms, _fit_scale_offset,
                                   _gapped_xy, decode_value, format_value,
                                   value_at)
 
@@ -512,6 +513,54 @@ def test_stop_and_hidden_drain_keeps_reader_lost_from_growing(qtbot):
         page.set_stopped(False)
         page.refresh_plot()
         assert page.reader.lost == 0
+    finally:
+        engine.stop()
+
+
+def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
+    """Hardware finding (Task 10 E2E suite): a fixed 500ms slow-drain
+    interval is only safe for firmware slow enough that 500ms sits
+    under the trace ring's own span (RING_COUNT * period_us) - a real
+    board sampling at 1 kHz (period_us=1000, a 256ms ring span) is
+    not, and would lose data on every stopped tick under the old fixed
+    interval. _discover_at() must derive the slow timer's interval
+    from the descriptor actually discovered
+    (_drain_interval_ms(ring_count, period_us): half the ring's span,
+    floored/capped) rather than use a constant - here that's half of
+    256ms = 128ms. Inspects the timer directly, no sleeps: discovery
+    (and the interval it sets) happens synchronously in ScopePage.__init__
+    once engine.start() has the poller thread up to service it."""
+    engine = _make_demo_like_engine(period_us=1000)
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+        assert page.desc.period_us == 1000
+        expected = _drain_interval_ms(page.desc.ring_count, 1000)
+        assert expected == 128
+        assert page._drain_timer.interval() == 128
+    finally:
+        engine.stop()
+
+
+def test_slow_drain_interval_caps_at_default_for_slower_firmware(qtbot):
+    """The other half of the same fix: a firmware slow enough that
+    half its ring span would exceed DRAIN_MS_CAP (500ms) still drains
+    at that cap, not slower - the demo target's own default
+    (period_us=5000, a 1.28s ring span) is exactly this case, and was
+    already safe under the old fixed 500ms constant; this pins that
+    the cap - not an ever-growing interval - is what binds for it."""
+    engine = _make_demo_like_engine()   # default period_us=5000
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+        assert page.desc.period_us == 5000
+        expected = _drain_interval_ms(page.desc.ring_count, 5000)
+        assert expected == DRAIN_MS_CAP == 500
+        assert page._drain_timer.interval() == 500
     finally:
         engine.stop()
 

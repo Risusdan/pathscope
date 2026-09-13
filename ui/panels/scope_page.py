@@ -120,19 +120,34 @@ not a statistical median-interval guess) where a break happened, so
 gap detection for channel data moved there in this task.
 
 Drain independent of paint state (spec point 5): a SEPARATE QTimer
-(`self._drain_timer`, DRAIN_MS = 500 ms) calls `_drain_once()` on its
-own, and is started once discovery first succeeds and left running for
-the page's lifetime - completely independent of Run/Stop
-(`self._stopped`) and of page visibility (hideEvent/showEvent only
-ever touch the FAST repaint timer, `self._timer`). The trace ring only
-holds RING_COUNT (256) records; the fast timer's own `refresh_plot()`
-also calls `_drain_once()` itself (so live drawing isn't limited to the
-slow timer's 500 ms cadence while actually running/visible), and
-TraceReader.refresh() is safe to call redundantly (it only ever asks
-for records past what it has already delivered) - so the two timers
-never need to coordinate, and a page that's stopped or tabbed away
-still drains fast enough that reader.lost never grows just because
-nobody's looking.
+(`self._drain_timer`) calls `_drain_once()` on its own, and is started
+once discovery first succeeds and left running for the page's
+lifetime - completely independent of Run/Stop (`self._stopped`) and of
+page visibility (hideEvent/showEvent only ever touch the FAST repaint
+timer, `self._timer`). While RUNNING and visible, the fast timer's own
+`refresh_plot()` also calls `_drain_once()` itself (so live drawing
+isn't limited to the slow timer's own cadence), and TraceReader.refresh()
+is safe to call redundantly (it only ever asks for records past what
+it has already delivered) - so the two timers never need to
+coordinate.
+
+While STOPPED (or tabbed away), the slow timer is the ONLY thing
+draining the ring, which makes its interval load-bearing rather than
+cosmetic: the trace ring holds only RING_COUNT (256) records, so if
+the slow timer's period exceeds the ring's own span at the firmware's
+sampling rate (ring_count * period_us), records get overwritten faster
+than they're drained and TraceReader.lost grows on every stopped tick,
+by construction, regardless of how attentively anything is watching. A
+fixed interval cannot honor this for every firmware: M7's own demo
+default (period_us=5000, a 1.28s ring span) tolerated a fixed 500ms
+drain comfortably, but a real board sampling at 1 kHz (period_us=1000,
+a 256ms ring span) did not - a hardware run of the Task 10 E2E suite's
+run/stop test caught exactly this. `_drain_interval_ms()` (below)
+computes the interval fresh from whatever descriptor was actually
+discovered - half the ring's span, floored at DRAIN_MS_FLOOR and
+capped at DRAIN_MS_CAP - and `_discover_at()` applies it (and
+re-applies it on every re-discovery, since a different ELF/target can
+carry a different geometry) to `self._drain_timer` before starting it.
 
 Drain health (spec point 6): `lost_label`, on the header row next to
 `rate_label`, shows "lost N samples" when TraceReader.lost has grown
@@ -265,7 +280,15 @@ MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
 MONO.setPointSize(10)
 
 REFRESH_MS = 200
-DRAIN_MS = 500
+# Slow drain timer bounds (see _drain_interval_ms and the module
+# docstring's "Drain independent of paint state" paragraph): the
+# actual interval is derived per-descriptor, never this pair alone -
+# DRAIN_MS_FLOOR keeps a very slow/large-ring firmware from draining
+# needlessly often, DRAIN_MS_CAP keeps a very fast/small-ring firmware
+# from picking an interval so short it competes with the fast timer
+# for no benefit.
+DRAIN_MS_FLOOR = 50
+DRAIN_MS_CAP = 500
 GAP_FACTOR = 3.0
 MARKER_PEN = "#C62828"
 CURSOR_PEN = "#1565C0"
@@ -331,6 +354,31 @@ CURVE_COLORS = [
 # swatch row per trace slot, CURVE_COLORS[i] for row i (see the module
 # docstring's "Channel slots" paragraph for what "row i" means once a
 # middle slot is removed and later slots compact up).
+
+
+def _drain_interval_ms(ring_count: int, period_us: int) -> int:
+    """Slow-drain timer cadence for a discovered descriptor's own
+    geometry (module docstring's "Drain independent of paint state"
+    paragraph) - half the trace ring's span at this firmware's sample
+    period, floored at DRAIN_MS_FLOOR and capped at DRAIN_MS_CAP.
+
+    INVARIANT this exists to preserve: the returned interval must stay
+    below the ring's own span (ring_count * period_us, in ms) or the
+    Stop path loses data by construction - while stopped, this timer
+    is the ONLY thing draining the ring (see set_stopped/_discover_at),
+    so a drain period slower than the ring's lifetime guarantees
+    TraceReader.lost grows every stopped tick, no matter how promptly
+    anything reads it. Halving the span rather than using it exactly
+    leaves headroom for scheduling jitter (Qt timer delivery is not
+    real-time) to still land inside a single ring lifetime. The
+    DRAIN_MS_CAP floor keeps this from being read as "recompute every
+    firmware's cadence with no ceiling" - a slow/huge-ring firmware
+    that would compute an interval past 500ms still drains at least
+    that often, matching the pre-fix behavior for any geometry that
+    was already safe under it (e.g. the demo target's period_us=5000,
+    1.28s ring span)."""
+    span_ms = ring_count * period_us / 1000.0
+    return int(min(DRAIN_MS_CAP, max(DRAIN_MS_FLOOR, span_ms / 2.0)))
 
 
 def _gapped_xy(series: List[Tuple[float, int]], t0: float
@@ -792,9 +840,20 @@ class ScopePage(QWidget):
         # visibility, so the ring (RING_COUNT=256 records) can never
         # overflow just because nobody's watching. Started once a
         # trace target is actually discovered (see _discover_at) and
-        # never stopped by hideEvent/set_stopped.
+        # never stopped by hideEvent/set_stopped. INVARIANT: while
+        # stopped, this timer is the ONLY thing draining the ring, so
+        # its interval must stay below the ring's own span
+        # (ring_count * period_us) or the stop path loses data by
+        # construction - a fixed interval here (500ms, pre-fix) is
+        # only safe for firmware slow enough that 500ms is under its
+        # ring span, which a real 1 kHz board (256ms span) is not.
+        # setInterval() below is a placeholder for before any
+        # descriptor exists; _discover_at() overwrites it with
+        # _drain_interval_ms(desc.ring_count, desc.period_us) - derived
+        # from the ACTUAL descriptor - every time discovery succeeds,
+        # including re-discovery against a different geometry.
         self._drain_timer = QTimer(self)
-        self._drain_timer.setInterval(DRAIN_MS)
+        self._drain_timer.setInterval(DRAIN_MS_CAP)
         self._drain_timer.timeout.connect(self._drain_once)
 
         # No selection yet - hide the y-axis tick numbers (spec point
@@ -945,6 +1004,16 @@ class ScopePage(QWidget):
         self.error_label.setText("")
         self._reset_channels()
         self.store = TraceStore(self.desc, window_s=self.engine.history.window_s)
+        # Re-derived on every successful discovery, not just the
+        # first: a re-discovery (a second load_elf() call, or a
+        # different target entirely) can carry a different ring_count/
+        # period_us, and the interval this page picked for a PREVIOUS
+        # descriptor may no longer honor the invariant (drain period <
+        # ring span) against the new one. setInterval() on an already-
+        # active QTimer takes effect for its next firing - no need to
+        # stop/restart it first.
+        self._drain_timer.setInterval(
+            _drain_interval_ms(self.desc.ring_count, self.desc.period_us))
         if not self._drain_timer.isActive():
             self._drain_timer.start()
         return True

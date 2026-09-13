@@ -18,7 +18,7 @@ description files - no changes to the core engine or UI.
 - Live block diagram of a data path, with active edges animated and
   annotated with a real progress value (e.g. a DMA byte count).
 - Declarative rules (YAML) turn register conditions into anomaly badges
-  and event-log entries - no code changes to add a new check.
+  and event-log entries.
 - Guarded-register safety: registers with a read side effect (SVD
   `readAction`, or a `guarded` entry in flows.yaml for vendor SVDs that
   don't annotate it) are never swept by the poller; reading one requires

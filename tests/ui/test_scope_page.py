@@ -1,3 +1,5 @@
+import math
+
 import pyqtgraph as pg
 
 from core.adapter.mock import MockAdapter
@@ -5,7 +7,7 @@ from core.engine.core import Engine
 from ui.bridge import EngineBridge
 from ui.demo import ADC_SR, S0CR, make_demo_engine
 from ui.main_window import MainWindow
-from ui.panels.scope_page import ScopePage
+from ui.panels.scope_page import ScopePage, _gapped_xy
 
 TARGET = "targets/f411"
 
@@ -37,6 +39,63 @@ def test_scope_addr_channel_via_engine(qtbot):
             lambda: page.channel_sample_count(key) >= 3, timeout=3000)
     finally:
         engine.stop()
+
+
+def test_add_address_channel_relabels_existing(qtbot):
+    """Re-adding the same fixed address with a different label (the
+    engine's add_addr_watch() already re-sets its own label
+    idempotently) must update the existing channel's label - both the
+    channel-list row and the curve's legend entry - rather than
+    leaving the first label in place or creating a duplicate curve."""
+    engine = make_demo_engine("targets/f411")
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    key1 = page.add_address_channel(0x20000000, "first")
+    key2 = page.add_address_channel(0x20000000, "second")
+
+    assert key1 == key2
+    assert len(page._channels) == 1
+    assert page.channel_list.count() == 1
+
+    entry = page._channels[key1]
+    assert entry["label"] == "second"
+    assert entry["curve"].opts["name"] == "second"
+    assert page.channel_list.item(0).text() == "second"
+    legend_label = page.plot.legend.getLabel(entry["curve"])
+    assert legend_label.text == "second"
+
+
+def test_gapped_xy_even_interval_count_uses_averaged_median():
+    """_gapped_xy's median-of-intervals must average the two middle
+    values for an even interval count, not pick the upper one
+    (intervals[len//2]) - the old code's choice is always the larger
+    of a pair, which can never itself exceed GAP_FACTOR times itself,
+    so it under-detects gaps. A 2-interval (3-sample) series can never
+    demonstrate this either way - the gap value is necessarily one of
+    only two numbers averaged into its own threshold, so 3x the
+    average can never exceed it, regardless of which of the two
+    formulas is used. The smallest series where the fix is observable
+    has one more interval: 3 evenly-spaced samples (dt=0.05) followed
+    by a stall - the old median (intervals[2], one of the two largest
+    values) sets a threshold the gap fails to clear, while the
+    correct average of the two middle intervals sets it low enough
+    to flag the stall with a NaN."""
+    series = [(0.0, 0), (0.05, 1), (0.10, 2), (1.10, 3), (4.0, 4)]
+    _x, y = _gapped_xy(series, 0.0)
+    assert any(math.isnan(v) for v in y)
+
+
+def test_event_marker_hard_cap_guards_unbounded_growth(qtbot):
+    """add_event_marker's list must never grow past MARKER_HARD_CAP
+    even when nothing is calling refresh_plot()'s window-based
+    _prune_markers (dock hidden or frozen) - the primary pruning
+    mechanism, which this cap only backstops."""
+    engine = make_demo_engine("targets/f411")
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    for i in range(250):
+        page.add_event_marker(float(i), "evt %d" % i)
+    assert len(page._markers) <= 200
 
 
 def test_repaint_timer_stops_when_hidden(qtbot):
@@ -91,7 +150,7 @@ def _has_anomaly_row(win):
 
 
 def test_log_click_moves_scope_cursor_to_event_time(qtbot):
-    """task-4-brief.md: clicking an event-log anomaly row must move
+    """Clicking an event-log anomaly row must move
     the scope cursor to that event's timestamp (t, in the same
     time.monotonic domain as AnomalyEvent.t/ScopePage._t0), but
     clicking a plain info row (no event time in its payload) must

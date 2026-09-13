@@ -1,12 +1,12 @@
-"""Scope panel: live pyqtgraph plot of History-backed channels, task
-2's "Scope" dock (task-2-brief.md).
+"""Scope panel: live pyqtgraph plot of History-backed channels, the
+M6 scope-view plan's "Scope" dock.
 
 Not a port of anything in prototype/ui_proto.py - the prototype had no
 scope view. New widget, following the same conventions as the other
 Inspector-family pages (register_page.py, memory_page.py): a plain
 QWidget, EngineError caught at the boundary and rendered as text in
-the panel rather than a QMessageBox (never a dialog - task-2-brief.md
-is explicit about this for the address-watch add path).
+the panel rather than a QMessageBox (never a dialog, including for
+the address-watch add path).
 
 Channel model: a channel is either a currently-polled register key
 (picked from `engine.polled`, already being read by the poller - the
@@ -41,9 +41,9 @@ data it annotates.
 Test-support accessors `channel_sample_count(key)` (raw History sample
 count - independent of whether refresh_plot() has run yet) and
 `curve_point_count(key)` (plotted point count, post gap-NaN-insertion)
-are part of the produced interface per task-2-brief.md.
+are part of this panel's produced interface.
 
-Cursor sync (task 4, task-4-brief.md): `jump_to(t)` places (or moves)
+Cursor sync (event-log-to-scope focus): `jump_to(t)` places (or moves)
 a single cursor `pg.InfiniteLine` at t, styled distinctly from event
 markers (dashed blue vs. solid red) so the two are never confused, and
 flashes whichever marker in `_markers` is nearest to t so the user can
@@ -54,7 +54,7 @@ the raw t last passed to jump_to(), or None before the cursor has ever
 been placed - fed by MainWindow._on_log_time_focus, itself wired to
 EventLog's new on_event_time callback (an event-log row click).
 
-ELF symbol picker (task 3, task-3-brief.md): "Load ELF..." opens a
+ELF symbol picker: "Load ELF..." opens a
 QFileDialog (the one dialog this panel uses - everything else is
 inline, per the class-level convention above) and hands the chosen
 path to `load_elf()`, which lazily imports ui.elf_symbols (same
@@ -111,6 +111,7 @@ MARKER_PEN = "#C62828"
 CURSOR_PEN = "#1565C0"
 MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
+MARKER_HARD_CAP = 200
 
 CURVE_COLORS = [
     "#1976D2", "#2E7D32", "#EF6C00", "#6A1B9A",
@@ -131,7 +132,15 @@ def _gapped_xy(series: List[Tuple[float, int]], t0: float
     if len(xs) < 3:
         return xs, ys
     intervals = sorted(xs[i + 1] - xs[i] for i in range(len(xs) - 1))
-    median = intervals[len(intervals) // 2]
+    mid = len(intervals) // 2
+    if len(intervals) % 2 == 1:
+        median = intervals[mid]
+    else:
+        # even count: true median is the average of the two middle
+        # values, not the upper one - intervals[mid] alone skews high,
+        # raising GAP_FACTOR * median enough to under-detect real
+        # gaps in a short series (see the _gapped_xy test cases).
+        median = (intervals[mid - 1] + intervals[mid]) / 2.0
     out_x = [xs[0]]
     out_y = [ys[0]]
     for i in range(1, len(xs)):
@@ -304,11 +313,28 @@ class ScopePage(QWidget):
         """Add a fixed-address channel via engine.add_addr_watch().
         Raises EngineError straight through (guarded/misaligned
         address) - the button handler below is what catches it and
-        renders the message inline, never a dialog."""
+        renders the message inline, never a dialog.
+
+        add_addr_watch() is idempotent on addr but always re-sets the
+        engine's label; re-adding an address that already has a
+        channel here must follow suit rather than silently keeping
+        the first label, so the displayed legend/list entry stays in
+        sync with what the engine now reports for this key."""
         key = self.engine.add_addr_watch(addr, label)
-        if key not in self._channels:
+        if key in self._channels:
+            self._relabel_channel(key, label)
+        else:
             self._add_channel_common(key, label)
         return key
+
+    def _relabel_channel(self, key: str, label: str) -> None:
+        entry = self._channels[key]
+        entry["label"] = label
+        entry["curve"].opts["name"] = label
+        legend_label = self.plot.legend.getLabel(entry["curve"])
+        if legend_label is not None:
+            legend_label.setText(label)
+        entry["item"].setText(label)
 
     def remove_channel(self, key: str) -> None:
         entry = self._channels.pop(key, None)
@@ -444,6 +470,12 @@ class ScopePage(QWidget):
             labelOpts={"color": MARKER_PEN, "position": 0.95})
         self.plot.addItem(line)
         self._markers.append((t, line))
+        # cap guards hidden/frozen accumulation; window pruning
+        # (_prune_markers, run from refresh_plot) remains the primary
+        # mechanism.
+        while len(self._markers) > MARKER_HARD_CAP:
+            _oldest_t, oldest_line = self._markers.pop(0)
+            self.plot.removeItem(oldest_line)
 
     def _prune_markers(self, now: float) -> None:
         window = self.engine.history.window_s

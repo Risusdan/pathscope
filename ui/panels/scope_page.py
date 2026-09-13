@@ -43,10 +43,16 @@ count - independent of whether refresh_plot() has run yet) and
 `curve_point_count(key)` (plotted point count, post gap-NaN-insertion)
 are part of the produced interface per task-2-brief.md.
 
-`jump_to(t)` / `cursor_time()` (task-4-brief.md's event-log-click ->
-scope-cursor sync) are NOT implemented here - left entirely to Task 4,
-per task-2-brief.md's "you may stub cursor_time now or leave to Task
-4; document which" - this file leaves both to Task 4.
+Cursor sync (task 4, task-4-brief.md): `jump_to(t)` places (or moves)
+a single cursor `pg.InfiniteLine` at t, styled distinctly from event
+markers (dashed blue vs. solid red) so the two are never confused, and
+flashes whichever marker in `_markers` is nearest to t so the user can
+see which annotation the cursor landed on. `t` is in the same
+time.monotonic domain as `self._t0` and `add_event_marker`'s own t -
+positioned the same way, `x = t - self._t0`. `cursor_time()` returns
+the raw t last passed to jump_to(), or None before the cursor has ever
+been placed - fed by MainWindow._on_log_time_focus, itself wired to
+EventLog's new on_event_time callback (an event-log row click).
 
 ELF symbol picker (task 3, task-3-brief.md): "Load ELF..." opens a
 QFileDialog (the one dialog this panel uses - everything else is
@@ -102,6 +108,9 @@ REFRESH_MS = 200
 RATE_WINDOW_S = 2.0
 GAP_FACTOR = 3.0
 MARKER_PEN = "#C62828"
+CURSOR_PEN = "#1565C0"
+MARKER_FLASH_PEN = "#FFB300"
+MARKER_FLASH_MS = 400
 
 CURVE_COLORS = [
     "#1976D2", "#2E7D32", "#EF6C00", "#6A1B9A",
@@ -153,6 +162,8 @@ class ScopePage(QWidget):
         self._t0 = time.monotonic()
         self._channels: Dict[str, dict] = {}
         self._markers: List[Tuple[float, pg.InfiniteLine]] = []
+        self._cursor_t: Optional[float] = None
+        self._cursor_line: Optional[pg.InfiniteLine] = None
         # name -> ui.elf_symbols.Symbol (a namedtuple, hence `tuple`
         # here) - populated by load_elf(); ui.elf_symbols is imported
         # lazily there, not at this module's top, so this attribute is
@@ -443,6 +454,47 @@ class ScopePage(QWidget):
             else:
                 kept.append((t, line))
         self._markers = kept
+
+    # -- cursor sync (event-log click -> scope cursor, task 4) -------------
+
+    def jump_to(self, t: float) -> None:
+        """Place (or move) the scope cursor at t and flash the nearest
+        event marker. t is in the same time.monotonic domain as
+        self._t0 - positioned the same way add_event_marker positions
+        a marker, x = t - self._t0. The cursor's pen (dashed blue) is
+        deliberately distinct from a marker's (solid red) so the two
+        are never confused on the plot."""
+        self._cursor_t = t
+        x = t - self._t0
+        if self._cursor_line is None:
+            self._cursor_line = pg.InfiniteLine(
+                pos=x, angle=90,
+                pen=pg.mkPen(color=CURSOR_PEN, width=2, style=Qt.DashLine))
+            self.plot.addItem(self._cursor_line)
+        else:
+            self._cursor_line.setPos(x)
+        self._flash_nearest_marker(t)
+
+    def cursor_time(self) -> Optional[float]:
+        """The raw t last passed to jump_to(), or None before the
+        cursor has ever been placed."""
+        return self._cursor_t
+
+    def _flash_nearest_marker(self, t: float) -> None:
+        if not self._markers:
+            return
+        _nearest_t, line = min(self._markers,
+                               key=lambda entry: abs(entry[0] - t))
+        line.setPen(pg.mkPen(color=MARKER_FLASH_PEN, width=3))
+        QTimer.singleShot(MARKER_FLASH_MS,
+                          lambda: self._unflash_marker(line))
+
+    def _unflash_marker(self, line: pg.InfiniteLine) -> None:
+        # the marker may already have been pruned (History window
+        # rolled past it) by the time this fires - only restore the
+        # normal pen if it is still one of ours.
+        if any(existing is line for _t, existing in self._markers):
+            line.setPen(pg.mkPen(color=MARKER_PEN, width=1))
 
     # -- repaint -----------------------------------------------------------
 

@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
         self.diagram_state.on_badge_clicked = self._on_badge_clicked
         self.flow_page.on_pick = self._highlight_flow
         self.event_log.on_focus = self._on_log_focus
+        self.event_log.on_event_time = self._on_log_time_focus
 
         self.bridge.update.connect(self.apply_update)
         self.bridge.state.connect(self.on_state)
@@ -350,6 +351,16 @@ class MainWindow(QMainWindow):
         if block_id in self.blocks:
             self._select_block(block_id)
             self.view.centerOn(self.blocks[block_id])
+
+    def _on_log_time_focus(self, t: float) -> None:
+        """Wired to event_log.on_event_time (EventLog row click, for a
+        row that carries an event time - task-4-brief.md's
+        event-to-scope cursor sync). Routes to the scope dock's
+        cursor; a no-op if the Scope dock has never been opened, same
+        "dock may not exist yet" guard apply_update() already uses for
+        add_event_marker."""
+        if self.scope_page is not None:
+            self.scope_page.jump_to(t)
 
     # -- live data -----------------------------------------------------------
 

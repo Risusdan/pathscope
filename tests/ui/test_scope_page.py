@@ -1,7 +1,13 @@
 import pyqtgraph as pg
 
-from ui.demo import make_demo_engine
+from core.adapter.mock import MockAdapter
+from core.engine.core import Engine
+from ui.bridge import EngineBridge
+from ui.demo import ADC_SR, S0CR, make_demo_engine
+from ui.main_window import MainWindow
 from ui.panels.scope_page import ScopePage
+
+TARGET = "targets/f411"
 
 
 def test_scope_plots_polled_register(qtbot):
@@ -64,5 +70,59 @@ def test_plot_theme_is_light(qtbot):
         qtbot.addWidget(page)
         assert pg.getConfigOption("background") == "w"
         assert pg.getConfigOption("foreground") == "k"
+    finally:
+        engine.stop()
+
+
+def _make_overrun_engine():
+    """Same seeded-OVR helper pattern as
+    tests/ui/test_flow_and_log.py's _make_overrun_engine: the ADC
+    overrun anomaly (f411.flows.yaml's "ADC1.SR.OVR == 1" rule) is
+    already firing on the very first sweep, so this test doesn't have
+    to wait out the demo's normal-streaming window."""
+    mem = {S0CR: 1, ADC_SR: 0x30}          # OVR bit set
+    adapter = MockAdapter(mem)
+    return Engine.load(TARGET, adapter, interval_s=0.01)
+
+
+def _has_anomaly_row(win):
+    return any("ANOMALY" in win.event_log.item(i).text()
+              for i in range(win.event_log.count()))
+
+
+def test_log_click_moves_scope_cursor_to_event_time(qtbot):
+    """task-4-brief.md: clicking an event-log anomaly row must move
+    the scope cursor to that event's timestamp (t, in the same
+    time.monotonic domain as AnomalyEvent.t/ScopePage._t0), but
+    clicking a plain info row (no event time in its payload) must
+    leave the cursor untouched."""
+    engine = _make_overrun_engine()
+    bridge = EngineBridge(engine)
+    captured_events = []
+    bridge.update.connect(lambda u: captured_events.extend(u.events))
+    win = MainWindow(engine, bridge)
+    qtbot.addWidget(win)
+    win.show()
+    win._toggle_scope(True)   # toolbar toggle handler, called directly
+    engine.start()
+    try:
+        qtbot.waitUntil(lambda: _has_anomaly_row(win), timeout=4000)
+        assert captured_events, "expected the OVR anomaly to have fired"
+        expected_t = captured_events[0].t
+
+        anomaly_row = next(i for i in range(win.event_log.count())
+                           if "ANOMALY" in win.event_log.item(i).text())
+        win.event_log._clicked(win.event_log.item(anomaly_row))
+
+        cursor_t = win.scope_page.cursor_time()
+        assert cursor_t is not None
+        assert abs(cursor_t - expected_t) < 1e-6
+
+        # a plain info row's payload carries no event time - clicking
+        # it must not move the cursor already placed above.
+        win.event_log.add_info("poller: running")
+        info_row = win.event_log.count() - 1
+        win.event_log._clicked(win.event_log.item(info_row))
+        assert win.scope_page.cursor_time() == cursor_t
     finally:
         engine.stop()

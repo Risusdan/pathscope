@@ -136,6 +136,28 @@ def test_snapshot_callback_exception_does_not_kill_poller():
     assert states[-1] == PollerState.STOPPED
 
 
+def test_submit_after_stop_fails_immediately():
+    """A command submitted after the poller has fully stopped must
+    fail right away, not sit in the abandoned queue until the
+    caller's own Engine._exec timeout (2s in production) elapses -
+    nobody is left running to ever drain it. Poller.submit() checks
+    self._stop_evt itself and fast-fails rather than enqueueing."""
+    a = MockAdapter({})
+    snaps, states = [], []
+    p = make_poller(a, snaps, states)
+    p.start()
+    assert wait_for(lambda: len(snaps) >= 1)
+    p.stop()
+
+    t0 = time.monotonic()
+    q = p.submit(lambda ad: ad.read_block32(0x0, 1))
+    ok, result = q.get(timeout=0.1)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.1, "submit() after stop() must not need any wait"
+    assert ok is False
+    assert result == "poller stopped"
+
+
 def test_rate_hz_is_not_distorted_during_warmup():
     a = MockAdapter({0x40000000: 1})
     snaps, states = [], []

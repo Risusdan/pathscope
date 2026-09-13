@@ -40,7 +40,26 @@ class Poller(threading.Thread):
         self._state_cbs.append(cb)
 
     def submit(self, fn: Callable[[TargetAdapter], Any]) -> "queue.Queue":
+        """Queue fn for the poller thread to run against the adapter,
+        returning a 1-slot queue the caller reads (ok, result) from.
+
+        Fast-fails instead of enqueueing once _stop_evt is set: without
+        this check, a command submitted after stop() has already begun
+        (or after the poller thread has fully exited) can land in
+        self._commands with nobody left to ever call
+        _drain_commands()/_fail_pending() again - the caller's
+        Engine._exec then blocks for its own full command timeout
+        waiting on a queue that will never be answered. Checking here
+        closes that window for every submit() called after
+        _stop_evt.set() (stop() sets the event, then blocks in
+        self.join() until run()'s own shutdown _fail_pending() has
+        already run - so a submit() racing the exact instant of
+        .set() itself is the only case not covered, and even then
+        run()'s shutdown _fail_pending() usually still catches it)."""
         result: "queue.Queue" = queue.Queue(maxsize=1)
+        if self._stop_evt.is_set():
+            result.put((False, "poller stopped"))
+            return result
         self._commands.put((fn, result))
         return result
 

@@ -188,3 +188,35 @@ def test_force_polled_guarded_register_gets_warning_marker(tmp_path, qtbot):
         assert "ADC1.DR" in engine.polled
     finally:
         engine.stop()
+
+
+def test_expanded_state_survives_double_click_on_guarded_row(tmp_path, qtbot, monkeypatch):
+    """Double-click on a guarded row should not collapse its field children.
+    RegisterPage.setExpandsOnDoubleClick(False) disables default tree expansion
+    toggle, so double-click reads (a guarded row's intended use) don't
+    accidentally collapse the tree."""
+    target_dir = _guarded_target(tmp_path)
+    adapter = MockAdapter({})
+    engine = Engine.load(target_dir, adapter, interval_s=0.01)
+    engine.start()
+    try:
+        page = RegisterPage(engine)
+        qtbot.addWidget(page)
+        page.show_block("adc1")
+
+        item = _find_row(page, "ADC1.DR")
+        assert item is not None
+        # show_block calls expandAll, so tree should be expanded
+        assert item.isExpanded()
+        assert item.childCount() > 0
+
+        # Monkeypatch to decline the guarded read without affecting expansion
+        monkeypatch.setattr(register_page_module.QMessageBox, "question",
+                            staticmethod(lambda *a, **k:
+                                        register_page_module.QMessageBox.No))
+        page._on_double(item, 0)
+
+        # After double-click, the item should still be expanded
+        assert item.isExpanded()
+    finally:
+        engine.stop()

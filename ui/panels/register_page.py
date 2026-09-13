@@ -50,6 +50,7 @@ class RegisterPage(QTreeWidget):
         self.setHeaderLabels(["Register / Field", "Value"])
         self.setColumnWidth(0, 170)
         self.itemDoubleClicked.connect(self._on_double)
+        self.setExpandsOnDoubleClick(False)  # double-click is a read command, not expand/collapse
         self.changed_at: Dict[str, float] = {}   # reg_key -> monotonic ts
         self._last_update: Optional[EngineUpdate] = None
 

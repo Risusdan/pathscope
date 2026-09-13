@@ -171,7 +171,7 @@ def test_log_click_moves_scope_cursor_to_event_time(qtbot):
     win = MainWindow(engine, bridge)
     qtbot.addWidget(win)
     win.show()
-    win._toggle_scope(True)   # toolbar toggle handler, called directly
+    win.tabs.setCurrentIndex(1)   # activate the Scope tab
     engine.start()
     try:
         qtbot.waitUntil(lambda: _has_anomaly_row(win), timeout=4000)

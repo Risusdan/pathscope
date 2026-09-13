@@ -85,7 +85,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 while time.monotonic() < select_deadline:
                     app.processEvents()
             if args.shot_scope:
-                win.scope_act.setChecked(True)
+                win.tabs.setCurrentIndex(1)
                 win.scope_page.add_channel("DMA2.S0NDTR")
                 # the demo's S0NDTR sawtooth (ui/demo.py) has a ~1.4 s
                 # period (1000 counts, -37 per 50 ms tick) - wait out a

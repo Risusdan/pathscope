@@ -170,9 +170,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.target_label)
         tb.addSeparator()
 
-        self.halt_act = QAction("Halt", self)
+        # "Halt MCU" halts the TARGET (the chip stops executing);
+        # Run/Stop next to it only holds this page's display. The
+        # explicit "MCU" and the separator keep the two from reading
+        # as siblings.
+        self.halt_act = QAction("Halt MCU", self)
         self.halt_act.triggered.connect(self._toggle_halt)
         tb.addAction(self.halt_act)
+        tb.addSeparator()
 
         # Per-page Run/Stop (spec point 1) - replaces the old global
         # Freeze action. Acts on whichever tab is current (Data Path
@@ -185,20 +190,9 @@ class MainWindow(QMainWindow):
         self.run_stop_act.toggled.connect(self._toggle_run_stop)
         tb.addAction(self.run_stop_act)
 
-        self.tint_act = QAction("Tint", self)
-        self.tint_act.setCheckable(True)
-        self.tint_act.setChecked(True)
-        self.tint_act.toggled.connect(self._toggle_tint)
-        tb.addAction(self.tint_act)
-
         self.fit_act = QAction("Fit", self)
         self.fit_act.triggered.connect(self.fit_view)
         tb.addAction(self.fit_act)
-
-        self.scope_act = QAction("Scope", self)
-        self.scope_act.setCheckable(True)
-        self.scope_act.toggled.connect(self._toggle_scope)
-        tb.addAction(self.scope_act)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -254,9 +248,8 @@ class MainWindow(QMainWindow):
         dock-based _toggle_scope used. currentChanged is connected
         only after both tabs are added, so building this method's own
         two initial tabs never fires _on_tab_changed (which reaches
-        into self.inspector_dock/self.scope_act - both must already
-        exist; _build_docks() and _build_toolbar() run before this in
-        __init__)."""
+        into self.inspector_dock - it must already exist;
+        _build_docks() runs before this in __init__)."""
         self.tabs = QTabWidget()
         self.tabs.addTab(self.view, "Data Path")
         self._scope_placeholder = QLabel("Loading Scope...")
@@ -273,7 +266,7 @@ class MainWindow(QMainWindow):
     # -- actions ---------------------------------------------------------
 
     def _toggle_halt(self) -> None:
-        halting = self.halt_act.text() == "Halt"
+        halting = self.halt_act.text() == "Halt MCU"
         try:
             if halting:
                 self.engine.halt()
@@ -282,7 +275,7 @@ class MainWindow(QMainWindow):
         except EngineError as e:
             self.statusBar().showMessage("error: %s" % e, 5000)
             return
-        self.halt_act.setText("Resume" if halting else "Halt")
+        self.halt_act.setText("Resume MCU" if halting else "Halt MCU")
 
     def _toggle_run_stop(self, on: bool) -> None:
         """Wired to the toolbar's run_stop_act - acts on whichever tab
@@ -304,33 +297,18 @@ class MainWindow(QMainWindow):
                 self._apply(self.last_update)
         self.run_stop_act.setText("Run" if on else "Stop")
 
-    def _toggle_scope(self, on: bool) -> None:
-        """Wired to the toolbar's "Scope" action - now a tab shortcut
-        rather than a dock-visibility toggle (the old dock-stack
-        layout was replaced by full-page Data Path/Scope tabs).
-        Checking it switches to the Scope tab; unchecking switches
-        back to Data Path. _on_tab_changed mirrors the action's
-        checked state back the other way too, for a plain tab-bar
-        click, so the two stay in sync regardless of entry point."""
-        self.tabs.setCurrentIndex(1 if on else 0)
-
     def _on_tab_changed(self, index: int) -> None:
         """Wired to self.tabs.currentChanged. Keeps the Inspector dock
         visible only on the Data Path tab (index 0) - a full-page
-        Scope has no room for it and it is irrelevant there - and the
-        toolbar's Scope action's checked state mirroring whichever tab
-        is active, including a plain tab-bar click (not just the
-        toolbar action). blockSignals guards against recursion: an
-        unblocked setChecked() would re-fire scope_act.toggled ->
-        _toggle_scope -> tabs.setCurrentIndex(), re-entering this slot.
+        Scope has no room for it and it is irrelevant there. The tab
+        bar itself is the ONLY Data Path/Scope switch (the old
+        toolbar "Scope" action, a leftover shortcut from the
+        dock-based layout, was removed as a redundant second switch).
         Event log dock is untouched here - it stays visible on both
         tabs. Lazily constructs the real ScopePage the first time the
         Scope tab is activated."""
         on_scope = index == 1
         self.inspector_dock.setVisible(not on_scope)
-        self.scope_act.blockSignals(True)
-        self.scope_act.setChecked(on_scope)
-        self.scope_act.blockSignals(False)
         if on_scope and self.scope_page is None:
             self._activate_scope_tab()
         # Per-page run/stop (spec point 1): the toolbar action reflects
@@ -391,12 +369,6 @@ class MainWindow(QMainWindow):
         self.tabs.insertTab(1, self.scope_page, "Scope")
         self.tabs.setCurrentIndex(1)
         self._scope_placeholder = None
-
-    def _toggle_tint(self, on: bool) -> None:
-        self.diagram_state.tinted = on
-        for item in self.blocks.values():
-            item.update()
-        self.legend.update()
 
     # -- selection ---------------------------------------------------------
 

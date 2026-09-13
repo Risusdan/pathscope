@@ -31,7 +31,6 @@ class DiagramState:
     """Mutable paint-time state read by BlockItem/WireItem/LegendItem."""
 
     def __init__(self):
-        self.tinted: bool = True
         self.dash_phase: float = 0.0
         self.chsel_value: Optional[int] = None
         self.selected_block: Optional[str] = None

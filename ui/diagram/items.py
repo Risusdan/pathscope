@@ -82,8 +82,7 @@ class BlockItem(QGraphicsItem):
     def paint(self, p, opt, widget=None):
         w, h, kind = self.w, self.h, self.block.kind
         p.setRenderHint(QPainter.Antialiasing)
-        tint = KIND_TINT[kind] if self.state.tinted else "#FFFFFF"
-        p.setBrush(QBrush(QColor(tint)))
+        p.setBrush(QBrush(QColor(KIND_TINT[kind])))
         selected_ = self.block.id == self.state.selected_block
         in_flow = self.block.id in self.state.flow_blocks
         if selected_:
@@ -287,8 +286,7 @@ class LegendItem(QGraphicsItem):
 
         y = 30
         for kind, name in self.KINDS:
-            color = KIND_TINT[kind] if self.state.tinted else "#FFFFFF"
-            p.setBrush(QBrush(QColor(color)))
+            p.setBrush(QBrush(QColor(KIND_TINT[kind])))
             p.setPen(QPen(Qt.black, 1))
             p.drawRect(QRectF(8, y - 8, 14, 10))
             p.drawText(QPointF(28, y + 1), name)

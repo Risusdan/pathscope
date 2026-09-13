@@ -2,23 +2,26 @@ import math
 import struct
 import time
 
+import numpy as np
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine, EngineError
-from core.trace.contract import MAX_CH
+from core.trace.contract import MAX_CH, RING_COUNT, TraceDesc, TraceRecord
 from core.trace.reader import TraceError, TraceReader
+from core.trace.sim import FakeTraceFirmware
 from ui.bridge import EngineBridge
-from ui.demo import ADC_SR, S0CR, make_demo_engine
+from ui.demo import ADC_SR, S0CR
 from ui.elf_symbols import Symbol
 from ui.main_window import MainWindow
 from ui.panels.scope_page import (COL_NAME, COL_SWATCH, COL_VALUE,
                                   CURVE_COLORS, DEFAULT_TYPE, NO_SOURCE_TEXT,
-                                  TYPES, ScopePage, _default_type_for_size,
-                                  _fit_scale_offset, _gapped_xy, decode_value,
-                                  format_value, value_at)
+                                  TYPES, ScopePage, _decode_series,
+                                  _default_type_for_size, _fit_scale_offset,
+                                  _gapped_xy, decode_value, format_value,
+                                  value_at)
 
 TARGET = "targets/f411"
 
@@ -33,6 +36,74 @@ def _make_plain_engine():
     running."""
     adapter = MockAdapter({})
     return Engine.load(TARGET, adapter, interval_s=0.01)
+
+
+def _make_demo_like_engine(period_us=5000):
+    """A REAL engine + REAL FakeTraceFirmware wired the same way
+    ui/demo.py's make_demo_engine() wires one (engine.trace_desc_addr,
+    engine._demo_trace_fw, and 0x20000000 pre-seeded in adapter.mem so
+    the firmware whitelist's own "addr not in adapter.mem" check
+    doesn't reject a channel watching it - see core/trace/sim.py's
+    _validate()) - discover()/set_watch()/refresh() all work for real
+    against it - but WITHOUT make_demo_engine()'s background animate
+    thread, which ui/demo.py never stops (a daemon thread that keeps
+    ticking every ~50 ms for the rest of the process, not just the
+    test). None of this file's tests need that thread's own simulated
+    behavior (the S0NDTR/ADC_SR/ADC_SAMPLE sine/fault-window
+    animation) - they only ever used make_demo_engine() for the
+    trace_desc_addr/_demo_trace_fw convenience - so every call site
+    uses this instead, avoiding one more permanently-running thread
+    per test."""
+    adapter = MockAdapter({0x20000000: 0})
+    engine = Engine.load(TARGET, adapter, interval_s=0.01)
+    fw = FakeTraceFirmware(adapter, period_us=period_us)
+    engine.trace_desc_addr = fw.desc_addr
+    engine._demo_trace_fw = fw
+    return engine
+
+
+def _slot_tuple(slot, value, max_ch=MAX_CH):
+    """A MAX_CH-length trace record slots tuple with `value` at `slot`
+    and 0 everywhere else - the shape TraceRecord.slots always has
+    (every record samples every watch-table entry simultaneously, even
+    though only one channel's value matters to a given test)."""
+    slots = [0] * max_ch
+    slots[slot] = value
+    return tuple(slots)
+
+
+def _stub_desc(period_us=1_000_000, max_ch=MAX_CH):
+    """A hand-built TraceDesc for tests that stub TraceReader entirely
+    (see _make_stubbed_trace_page) - period_us defaults to 1 second/
+    sample so a test can hand seq=0,1,2,... directly as whole seconds."""
+    return TraceDesc(endian="<", version=1, max_ch=max_ch, status=0,
+                     period_us=period_us, record_size=8 + 4 * max_ch,
+                     ring_count=RING_COUNT, ring_addr=0x20001000, wr_seq=0,
+                     watch_addrs=tuple([0] * max_ch), watch_count=0,
+                     generation=0)
+
+
+def _make_stubbed_trace_page(qtbot, monkeypatch, period_us=1_000_000):
+    """A ScopePage wired to a fully deterministic, poller-free trace
+    target: TraceReader.discover/set_watch/refresh are monkeypatched at
+    the class level so add_address_slot()/add_symbol_channel()/
+    add_register_channel() and refresh_plot() all work without any real
+    hardware or the demo engine's background animate thread. Tests that
+    only care about display/decode/UI behavior (not the watch-table
+    wire protocol itself, covered separately by the real demo-engine
+    tests below) use this to stay fast and free of any race with that
+    animate thread - see test_stop_and_hidden_drain_keeps_reader_lost_
+    from_growing's docstring for why calling engine._demo_trace_fw.
+    step() concurrently with that thread would be unsafe."""
+    desc = _stub_desc(period_us=period_us)
+    monkeypatch.setattr(TraceReader, "discover", lambda self, addr: desc)
+    monkeypatch.setattr(TraceReader, "set_watch", lambda self, addrs: None)
+    monkeypatch.setattr(TraceReader, "refresh", lambda self: [])
+    engine = _make_plain_engine()
+    engine.trace_desc_addr = 0x20004000
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    return page
 
 
 # -- page states & trace discovery (spec point 1, M7 rework) ---------------
@@ -56,7 +127,7 @@ def test_scope_discovers_demo_trace_and_shows_rate(qtbot):
     thread actually running to service the descriptor read, so
     engine.start() runs first, same as any other test exercising a
     real read through the engine."""
-    engine = make_demo_engine(TARGET)
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         page = ScopePage(engine)
@@ -81,7 +152,7 @@ def test_scope_shows_trace_error_state_from_bad_descriptor(qtbot, monkeypatch):
         raise TraceError("unsupported trace version 2")
     monkeypatch.setattr(TraceReader, "discover", _boom)
 
-    engine = make_demo_engine(TARGET)     # has trace_desc_addr
+    engine = _make_demo_like_engine()     # has trace_desc_addr
     page = ScopePage(engine)
     qtbot.addWidget(page)
     assert page.error_label.text() == "unsupported trace version 2"
@@ -113,7 +184,7 @@ def test_scope_discovery_survives_engine_error_inline(qtbot, monkeypatch):
         raise EngineError("command timed out")
     monkeypatch.setattr(TraceReader, "discover", _lost)
 
-    engine = make_demo_engine(TARGET)     # has trace_desc_addr
+    engine = _make_demo_like_engine()     # has trace_desc_addr
     page = ScopePage(engine)              # must not raise
     qtbot.addWidget(page)
     assert page.error_label.text() == "command timed out"
@@ -156,7 +227,7 @@ def test_channel_table_row_count_is_max_ch_in_every_page_state(qtbot):
     qtbot.addWidget(no_source_page)
     assert no_source_page.channel_table.rowCount() == MAX_CH
 
-    engine = make_demo_engine(TARGET)
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         ready_page = ScopePage(engine)
@@ -166,62 +237,252 @@ def test_channel_table_row_count_is_max_ch_in_every_page_state(qtbot):
         engine.stop()
 
 
-# -- v2 (M6): channel/plot behavior - lands in Task 8 -----------------------
-
-@pytest.mark.skip(reason="channels land in T8")
-def test_scope_plots_polled_register(qtbot):
-    engine = make_demo_engine("targets/f411")
-    engine.start()
-    try:
-        page = ScopePage(engine)
-        qtbot.addWidget(page)
-        page.add_channel("DMA2.S0NDTR")
-        qtbot.waitUntil(
-            lambda: page.channel_sample_count("DMA2.S0NDTR") >= 5,
-            timeout=3000)
-        page.refresh_plot()
-        assert page.curve_point_count("DMA2.S0NDTR") >= 5
-    finally:
-        engine.stop()
-
-
-@pytest.mark.skip(reason="channels land in T8")
-def test_scope_addr_channel_via_engine(qtbot):
-    engine = make_demo_engine("targets/f411")
-    engine.start()
-    try:
-        page = ScopePage(engine)
-        qtbot.addWidget(page)
-        key = page.add_address_channel(0x20000000, "buf0")
-        qtbot.waitUntil(
-            lambda: page.channel_sample_count(key) >= 3, timeout=3000)
-    finally:
-        engine.stop()
-
-
-@pytest.mark.skip(reason="channels land in T8")
-def test_add_address_channel_relabels_existing(qtbot):
-    """Re-adding the same fixed address with a different label (the
-    engine's add_addr_watch() already re-sets its own label
-    idempotently) must update the existing channel's label - both the
-    channel-table row and the curve's legend entry - rather than
-    leaving the first label in place or creating a duplicate row."""
-    engine = make_demo_engine("targets/f411")
-    page = ScopePage(engine)
+def test_splitter_shows_all_slot_rows_by_default(qtbot):
+    """Spec point 7: all MAX_CH rows visible without dragging the
+    splitter - the top pane's height must be at least the table's own
+    computed header+rows+frame height."""
+    page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
-    key1 = page.add_address_channel(0x20000000, "first")
-    key2 = page.add_address_channel(0x20000000, "second")
+    table = page.channel_table
+    needed = (table.horizontalHeader().height()
+             + table.verticalHeader().length()
+             + 2 * table.frameWidth())
+    assert page.splitter.sizes()[0] >= needed
 
-    assert key1 == key2
-    assert len(page._channels) == 1
-    assert page.channel_table.rowCount() == 1
 
-    entry = page._channels[key1]
-    assert entry["label"] == "second"
-    assert entry["curve"].opts["name"] == "second"
-    assert page.channel_table.item(0, COL_NAME).text() == "second"
-    legend_label = page.plot.legend.getLabel(entry["curve"])
-    assert legend_label.text == "second"
+# -- channel slot assignment, refusals, watch protocol (spec points 2/3) ---
+
+def test_add_address_slot_occupies_first_free_slot_in_order(qtbot, monkeypatch):
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot0 = page.add_address_slot(0x20000000, "a")
+    slot1 = page.add_address_slot(0x20000004, "b")
+    assert (slot0, slot1) == (0, 1)
+    slots = page.channel_slots()
+    assert slots[0]["label"] == "a"
+    assert slots[1]["label"] == "b"
+    assert all(s is None for s in slots[2:])
+    assert page.error_label.text() == ""
+
+
+def test_add_address_slot_table_full(qtbot, monkeypatch):
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    for i in range(MAX_CH):
+        slot = page.add_address_slot(0x20000000 + 4 * i, "c%d" % i)
+        assert slot == i
+    overflow = page.add_address_slot(0x20000000 + 4 * MAX_CH, "overflow")
+    assert overflow is None
+    assert page.error_label.text() == "table full"
+    assert all(s is not None for s in page.channel_slots())
+
+
+def test_add_address_slot_refuses_guarded_address_before_any_write(
+        qtbot, monkeypatch):
+    """spec point 3: reuses the same engine.guarded_addrs set
+    register_page.py's show_block() reads off Engine.load - refusal
+    happens before reader.set_watch() is ever called, so no partial
+    slot is left behind."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    page.engine.guarded_addrs.add(0x20000000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    assert slot is None
+    assert "guarded" in page.error_label.text()
+    assert all(s is None for s in page.channel_slots())
+
+
+def test_add_address_slot_refuses_misaligned_address(qtbot, monkeypatch):
+    """spec point 3: firmware's own whitelist check does not check
+    alignment (core/trace/sim.py's _validate()), so the host must."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000001, "buf0")
+    assert slot is None
+    assert "4-byte aligned" in page.error_label.text()
+    assert all(s is None for s in page.channel_slots())
+
+
+def test_add_register_channel_rejected_by_firmware_renders_inline(qtbot):
+    """DMA2/ADC1 register addresses live in the 0x4... peripheral
+    space, outside the demo trace target's SRAM-only whitelist
+    (core/trace/sim.py's default (0x20000000, 0x20020000)) - firmware
+    genuinely refuses the watch-table write over the REAL reader/sim,
+    and that TraceError must render inline verbatim with the tentative
+    slot rolled back (no half-added channel left behind)."""
+    engine = _make_demo_like_engine()
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        slot = page.add_register_channel("ADC1.SR")
+        assert slot is None
+        assert "firmware rejected table" in page.error_label.text()
+        assert all(s is None for s in page.channel_slots())
+    finally:
+        engine.stop()
+
+
+def test_remove_channel_compacts_table_and_rebinds_color(qtbot, monkeypatch):
+    """Removing a middle slot shifts every later channel up one row -
+    watch index/table row/record slot must stay in lockstep, so a
+    shifted channel's curve is rebound to its new row's color (spec
+    point 2: "palette stays bound to ROW index")."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    page.add_address_slot(0x20000000, "a")
+    page.add_address_slot(0x20000004, "b")
+    page.add_address_slot(0x20000008, "c")
+
+    page.remove_channel(0)
+
+    slots = page.channel_slots()
+    assert slots[0]["label"] == "b"
+    assert slots[1]["label"] == "c"
+    assert slots[2] is None
+    assert slots[0]["color"] == CURVE_COLORS[0]
+    assert slots[1]["color"] == CURVE_COLORS[1]
+    assert slots[0]["curve"].opts["pen"].color().name().lower() == \
+        CURVE_COLORS[0].lower()
+
+
+def test_curve_decodes_from_store_and_skips_nan_gap_rows(qtbot, monkeypatch):
+    """spec point 4: curves decode display-side from the store's raw
+    f64 (cast back to int for decode); a NaN gap row (TraceStore's own
+    seq-gap detection, triggered here by jumping straight from seq=0
+    to seq=5) stays NaN and is not decoded."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([TraceRecord(seq=0, gen=0,
+                                   slots=_slot_tuple(slot, 0xFFFF0000))])
+    page.store.append([TraceRecord(seq=5, gen=0,
+                                   slots=_slot_tuple(slot, 0x0000FFFF))])
+
+    page.refresh_plot()
+
+    ys = page.curve_y(slot)
+    assert len(ys) == 3
+    assert ys[0] == pytest.approx(0xFFFF0000)
+    assert math.isnan(ys[1])
+    assert ys[2] == pytest.approx(0x0000FFFF)
+
+
+def test_decode_series_casts_to_int_and_skips_nan():
+    y = np.array([4660.0, float("nan"), 4294967295.0])
+    out = _decode_series(y, "u32")
+    assert out[0] == pytest.approx(4660)
+    assert math.isnan(out[1])
+    assert out[2] == pytest.approx(4294967295)
+
+
+def test_drain_timer_stays_active_when_hidden_or_stopped(qtbot):
+    """spec point 5: the slow drain timer is independent of Run/Stop
+    and page visibility - only the fast repaint timer pauses for
+    those."""
+    engine = _make_demo_like_engine()
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page._drain_timer.isActive()
+        page.set_stopped(True)
+        assert page._drain_timer.isActive()
+        page.hide()
+        assert page._drain_timer.isActive()
+    finally:
+        engine.stop()
+
+
+def test_stop_and_hidden_drain_keeps_reader_lost_from_growing(qtbot):
+    """spec point 5: Run/Stop and page visibility are DISPLAY-only -
+    the ring (RING_COUNT=256 records) must never overflow just because
+    nobody is looking. Simulates the always-on slow drain timer's
+    periodic ticks by calling its handler (_drain_once) directly
+    between step() bursts, each comfortably under RING_COUNT, so no
+    single gap between drains ever exceeds the ring - this proves the
+    PERIODIC cadence (not any single call) is what keeps the reader
+    caught up, even while stopped, even though the cumulative total of
+    stepped records (400) far exceeds the ring size.
+
+    Uses an isolated FakeTraceFirmware (not ui/demo.py's
+    animate-thread-driven one) so this test's own step() calls are the
+    only writer - the demo module's animate thread calls step()
+    concurrently on ITS OWN instance every ~50 ms, and driving that
+    same instance from a second thread would be a genuine data race
+    with no lock on either side (see core/trace/sim.py's own module
+    docstring on the safety of concurrent READS, which does not extend
+    to concurrent WRITES from two threads)."""
+    adapter = MockAdapter({})
+    engine = Engine.load(TARGET, adapter, interval_s=0.01)
+    engine.start()
+    try:
+        fw = FakeTraceFirmware(adapter, period_us=1000)
+        engine.trace_desc_addr = fw.desc_addr
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+        page.set_stopped(True)
+
+        for _ in range(8):
+            fw.step(50)
+            page._drain_once()
+        assert page.reader.lost == 0
+
+        page.set_stopped(False)
+        page.refresh_plot()
+        assert page.reader.lost == 0
+    finally:
+        engine.stop()
+
+
+# -- v2 (M6): channel/plot behavior, adapted to the M7 trace path -----------
+
+def test_scope_plots_polled_register(qtbot):
+    """Adapted for M7: channels ride the trace path now, not a polled
+    register via History - add_address_slot()/engine._demo_trace_fw.
+    step() replace the old add_channel()/wait-for-the-poller pattern.
+    Uses the isolated (non-animate-thread) _make_demo_like_engine() so
+    this test's own deterministic step() call is the only writer."""
+    engine = _make_demo_like_engine()
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        slot = page.add_address_slot(0x20000000, "adc_sample", "u16.lo")
+        assert slot is not None
+        engine._demo_trace_fw.step(5)
+        page.refresh_plot()
+        assert page.curve_point_count(slot) >= 5
+    finally:
+        engine.stop()
+
+
+def test_scope_addr_channel_via_engine(qtbot):
+    engine = _make_demo_like_engine()
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        slot = page.add_address_slot(0x20000000, "buf0")
+        assert slot == 0
+        engine._demo_trace_fw.step(3)
+        page.refresh_plot()
+        assert page.channel_sample_count(slot) >= 3
+    finally:
+        engine.stop()
+
+
+def test_add_address_channel_relabels_existing(qtbot, monkeypatch):
+    """M7 channels are slot-based (slot i == trace watch index == table
+    row), not deduped by address the way the old (deleted)
+    engine.add_addr_watch() path this test used to exercise was -
+    re-adding the same address just occupies a second, independent
+    slot; renaming an existing slot in place is the Name column's job
+    (see test_rename_channel_via_table_updates_label_and_legend)."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot1 = page.add_address_slot(0x20000000, "first")
+    slot2 = page.add_address_slot(0x20000000, "second")
+
+    assert slot1 != slot2
+    assert page.channel_slots()[slot1]["label"] == "first"
+    assert page.channel_slots()[slot2]["label"] == "second"
+    assert page.channel_table.item(slot1, COL_NAME).text() == "first"
+    assert page.channel_table.item(slot2, COL_NAME).text() == "second"
 
 
 def test_gapped_xy_even_interval_count_uses_averaged_median():
@@ -262,35 +523,28 @@ def test_repaint_timer_stops_when_hidden(qtbot):
     """Same bug class as tests/ui/test_memory_page.py's
     test_auto_refresh_timer_stops_when_hidden: a hidden ScopePage
     (tabbed away behind Event log) must not keep repainting every
-    200 ms forever."""
-    engine = make_demo_engine("targets/f411")
-    engine.start()
-    try:
-        page = ScopePage(engine)
-        qtbot.addWidget(page)
-        page.show()
-        assert page._timer.isActive()
-        page.hide()
-        assert not page._timer.isActive()
-        page.show()
-        assert page._timer.isActive()
-    finally:
-        engine.stop()
+    200 ms forever. The FAST repaint timer starts/stops on show/hide
+    unconditionally, independent of trace discovery state, so a plain
+    (NO_SOURCE) engine is enough - no poller needed."""
+    page = ScopePage(_make_plain_engine())
+    qtbot.addWidget(page)
+    page.show()
+    assert page._timer.isActive()
+    page.hide()
+    assert not page._timer.isActive()
+    page.show()
+    assert page._timer.isActive()
 
 
 def test_plot_theme_is_light(qtbot):
     """pathscope is light-theme only by design - pyqtgraph's own
     defaults (black background, grey-on-black foreground) must be
-    overridden before any PlotWidget is constructed."""
-    engine = make_demo_engine("targets/f411")
-    engine.start()
-    try:
-        page = ScopePage(engine)
-        qtbot.addWidget(page)
-        assert pg.getConfigOption("background") == "w"
-        assert pg.getConfigOption("foreground") == "k"
-    finally:
-        engine.stop()
+    overridden before any PlotWidget is constructed. Module-level
+    config, independent of trace discovery state."""
+    page = ScopePage(_make_plain_engine())
+    qtbot.addWidget(page)
+    assert pg.getConfigOption("background") == "w"
+    assert pg.getConfigOption("foreground") == "k"
 
 
 def _make_overrun_engine():
@@ -353,7 +607,7 @@ def test_log_click_moves_scope_cursor_to_event_time(qtbot):
 
 def test_value_at():
     """Pure helper: newest sample with sample_t <= t, sorted-ascending
-    series (History.series()'s own guarantee)."""
+    series."""
     series = [(0, 10), (1, 20), (2, 30)]
     assert value_at(series, 1.5) == 20
     assert value_at(series, 0) == 10
@@ -361,62 +615,64 @@ def test_value_at():
     assert value_at([], 5) is None
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_crosshair_readout_shows_raw_values(qtbot):
+def test_crosshair_readout_shows_raw_values(qtbot, monkeypatch):
     """_update_crosshair(view_t) takes plot-relative seconds (the same
     domain mapSceneToView would hand it - roll mode: sample_t -
     self._last_now, the last refresh's now) and must update both the
     channel row's Value cell and the time label - reading only the
-    per-channel series cached by the prior refresh_plot(), per the
-    module's cheapness requirement. History.record() is called
-    directly (no engine.start()) so sample timestamps are fully
-    controlled and the test needs no polling wait."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
-    engine.history.record(key, t0 + 1.0, 200)
-    engine.history.record(key, t0 + 2.0, 300)
+    per-slot series cached by the prior refresh_plot(). store.append()
+    feeds synthetic TraceRecords directly (M7: replaces the old
+    History.record() call) so sample timestamps are fully controlled
+    and the test needs no polling wait."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=1_000_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    records = [TraceRecord(seq=i, gen=0, slots=_slot_tuple(slot, v))
+              for i, v in enumerate([100, 200, 300])]
+    page.store.append(records)
     page.refresh_plot()
 
-    page._update_crosshair(1.5)
+    # 1.5s: comfortably between seq=1 (t=1.0s) and seq=2 (t=2.0s) -
+    # not exactly ON a sample boundary, since the float round-trip
+    # through page._last_now (subtract here, re-add in
+    # _value_text_for) is not guaranteed bit-exact for an arbitrary
+    # time.monotonic() magnitude, and value_at()'s "<=" comparison
+    # would be one-ULP-fragile against a sample sitting exactly at the
+    # boundary.
+    view_t = 1.5 - page._last_now
+    page._update_crosshair(view_t)
 
-    value_text = page._channels[key]["value_item"].text()
+    value_text = page.channel_slots()[slot]["value_item"].text()
     assert value_text == format_value(200, DEFAULT_TYPE)
-    assert page.time_label.text() == "t-now = 1.50 s"
+    assert page.time_label.text() == "t-now = %.2f s" % view_t
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_scale_offset_transforms_curve(qtbot):
+def test_scale_offset_transforms_curve(qtbot, monkeypatch):
     """set_channel_transform() is the programmatic surface the table's
-    scale/offset text fields drive; refresh_plot() must apply y' =
+    scale/offset text fields drive; the redraw must apply y' =
     (y-offset) * scale when building the curve's data."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
     values = [100, 200, 300, 400]
-    for i, v in enumerate(values):
-        engine.history.record(key, t0 + i * 0.1, v)
+    records = [TraceRecord(seq=i, gen=0, slots=_slot_tuple(slot, v))
+              for i, v in enumerate(values)]
+    page.store.append(records)
 
-    page.set_channel_transform(key, scale=2.0, offset=5.0)
+    page.set_channel_transform(slot, scale=2.0, offset=5.0)
     page.refresh_plot()
 
-    ys = page.curve_y(key)
+    ys = page.curve_y(slot)
     expected = [(v - 5.0) * 2.0 for v in values]
     assert len(ys) == len(expected)
     for e, a in zip(expected, ys):
         assert a == pytest.approx(e)
 
     # the Value column always shows the raw decoded value, never the
-    # scaled display curve - the whole point of the readout.
-    page._update_crosshair(0.1)
-    value_text = page._channels[key]["value_item"].text()
+    # scaled display curve - the whole point of the readout. 0.15s:
+    # comfortably between seq=1 (t=0.1s) and seq=2 (t=0.2s), not
+    # exactly on a sample boundary - see the identical note in
+    # test_crosshair_readout_shows_raw_values.
+    page._update_crosshair(0.15 - page._last_now)
+    value_text = page.channel_slots()[slot]["value_item"].text()
     assert value_text == format_value(200, DEFAULT_TYPE)
 
 
@@ -468,28 +724,23 @@ def test_crosshair_and_cursor_excluded_from_autorange(qtbot):
     assert after_cursor == baseline
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_per_row_minus_button_removes_channel(qtbot):
+def test_per_row_minus_button_removes_channel(qtbot, monkeypatch):
     """Each channel row's leftmost "-" button removes THAT channel
-    directly - no selection step, no separate Remove button (which no
-    longer exists)."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    page.add_channel("DMA2.S0NDTR")
-    page.add_channel("ADC1.SR")
-    assert page.channel_table.rowCount() == 2
+    directly - no selection step, no separate Remove button (which
+    doesn't exist)."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    page.add_address_slot(0x20000000, "chan0")
+    page.add_address_slot(0x20000004, "chan1")
     assert not hasattr(page, "remove_btn")
 
-    row = page._row_for_key("DMA2.S0NDTR")
-    minus_box = page.channel_table.cellWidget(row, 0)
+    minus_box = page.channel_table.cellWidget(0, 0)
     from PySide6.QtWidgets import QPushButton
     minus_btn = minus_box.findChild(QPushButton)
     minus_btn.click()
 
-    assert "DMA2.S0NDTR" not in page._channels
-    assert page.channel_table.rowCount() == 1
-    assert "ADC1.SR" in page._channels
+    slots = page.channel_slots()
+    assert slots[0]["label"] == "chan1"    # compacted into row 0
+    assert slots[1] is None
 
 
 def test_roll_mode_viewport_fixed(qtbot):
@@ -589,42 +840,35 @@ def test_default_type_for_size():
     assert _default_type_for_size(16) == "u32"
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_type_change_updates_curve_and_value_column(qtbot):
+def test_type_change_updates_curve_and_value_column(qtbot, monkeypatch):
     """Changing a row's type combo re-decodes both the plotted curve
-    and the Value column readout - display-side only, core untouched
-    (the History still stores the plain 32-bit raw word)."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 0xFFFFFFFF)
+    and the Value column readout - display-side only, the store still
+    keeps the plain raw f64 word."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([TraceRecord(seq=0, gen=0,
+                                   slots=_slot_tuple(slot, 0xFFFFFFFF))])
     page.refresh_plot()
 
-    assert page.curve_y(key) == [pytest.approx(0xFFFFFFFF)]
+    assert page.curve_y(slot) == [pytest.approx(0xFFFFFFFF)]
 
-    page._channels[key]["type_combo"].setCurrentText("i32")
-    assert page._channels[key]["type"] == "i32"
-    assert page.curve_y(key) == [pytest.approx(-1)]
+    page.channel_slots()[slot]["type_combo"].setCurrentText("i32")
+    assert page.channel_slots()[slot]["type"] == "i32"
+    assert page.curve_y(slot) == [pytest.approx(-1)]
 
-    page._update_crosshair(0.1)
-    assert page._channels[key]["value_item"].text() == "-1 (0xFFFFFFFF)"
+    page._update_crosshair(0.0 - page._last_now)
+    assert page.channel_slots()[slot]["value_item"].text() == \
+        "-1 (0xFFFFFFFF)"
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_scale_offset_text_field_commit_and_invalid_revert(qtbot):
+def test_scale_offset_text_field_commit_and_invalid_revert(qtbot, monkeypatch):
     """Scale/offset cells are plain text fields (spec point 2), not
     spinboxes - Enter commits a valid numeric entry (including
     scientific notation), and an invalid entry reverts to the last
     good value and flashes the field's background."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    entry = page._channels[key]
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    entry = page.channel_slots()[slot]
 
     entry["scale_edit"].setText("2.5e1")
     entry["scale_edit"].returnPressed.emit()
@@ -638,15 +882,12 @@ def test_scale_offset_text_field_commit_and_invalid_revert(qtbot):
     assert entry["scale_edit"].text() == "%g" % 25.0
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_add_symbol_channel_preselects_type_by_size(qtbot):
+def test_add_symbol_channel_preselects_type_by_size(qtbot, monkeypatch):
     """ELF preselect (spec point 3): a channel added from a loaded
     symbol starts at a type chosen from the symbol's declared size,
     unsigned default - 1 byte -> u8.0, 2 bytes -> u16.lo, anything
     else -> u32."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
     page.elf_symbols = {
         "byte_flag": Symbol(name="byte_flag", addr=0x20000100, size=1),
         "half_word": Symbol(name="half_word", addr=0x20000200, size=2),
@@ -655,9 +896,9 @@ def test_add_symbol_channel_preselects_type_by_size(qtbot):
     k1 = page.add_symbol_channel("byte_flag")
     k2 = page.add_symbol_channel("half_word")
     k3 = page.add_symbol_channel("full_word")
-    assert page._channels[k1]["type"] == "u8.0"
-    assert page._channels[k2]["type"] == "u16.lo"
-    assert page._channels[k3]["type"] == "u32"
+    assert page.channel_slots()[k1]["type"] == "u8.0"
+    assert page.channel_slots()[k2]["type"] == "u16.lo"
+    assert page.channel_slots()[k3]["type"] == "u32"
 
 
 def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
@@ -666,9 +907,10 @@ def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
     picker starts collapsed, and load_elf() auto-expands it once
     symbols actually land - no reason to show an empty list before
     anything is loaded, but no reason to hide it once something is.
-    The ELF group survives the M7 rework as the page's only add-source
-    control, so this stays a real (not skipped) test - a plain engine
-    is enough since it doesn't need discovery to succeed."""
+    The ELF group survives the M7 rework as the page's primary
+    add-source control, so this stays a real (not skipped) test - a
+    plain engine is enough since it doesn't need discovery to
+    succeed."""
     page = ScopePage(_make_plain_engine())
     qtbot.addWidget(page)
     # isVisibleTo(page), not isVisible(): the test never shows the
@@ -688,29 +930,24 @@ def test_elf_symbol_section_collapsed_by_default_and_auto_expands(
     assert page.symbol_list.count() == 1
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_rename_channel_via_table_updates_label_and_legend(qtbot):
+def test_rename_channel_via_table_updates_label_and_legend(qtbot, monkeypatch):
     """Name is inline-editable too (spec point 2: "ALL
     inline-editable") - committing an edit to the Name cell updates
     the channel's stored label, the curve's legend entry, and (an
     empty name is rejected, reverting to the previous label)."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    entry = page._channels[key]
-    row = page._row_for_key(key)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    entry = page.channel_slots()[slot]
 
-    page.channel_table.item(row, COL_NAME).setText("ndtr")
+    page.channel_table.item(slot, COL_NAME).setText("ndtr")
     assert entry["label"] == "ndtr"
     assert entry["curve"].opts["name"] == "ndtr"
     legend_label = page.plot.legend.getLabel(entry["curve"])
     assert legend_label.text == "ndtr"
 
-    page.channel_table.item(row, COL_NAME).setText("   ")
+    page.channel_table.item(slot, COL_NAME).setText("   ")
     assert entry["label"] == "ndtr"
-    assert page.channel_table.item(row, COL_NAME).text() == "ndtr"
+    assert page.channel_table.item(slot, COL_NAME).text() == "ndtr"
 
 
 # -- v2: Fit / Auto-lane replace Normalize, y-axis follows selection -------
@@ -737,88 +974,79 @@ def test_fit_scale_offset_flat_window_centers_on_band():
     assert (0.0 - offset) * scale == pytest.approx(0.5)
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_auto_lane_stacks_every_channel_into_own_lane(qtbot):
+def test_auto_lane_stacks_every_channel_into_own_lane(qtbot, monkeypatch):
     """Auto-lane (spec point 4, simplified - the per-row Fill/Own Fit
-    column is gone): every channel gets one equal band of the [0, 1]
-    view, in add order, its own window min..max mapped into just its
-    band."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    t0 = page._t0
+    column is gone): every occupied channel gets one equal band of the
+    [0, 1] view, in slot order, its own window min..max mapped into
+    just its band."""
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot1 = page.add_address_slot(0x20000000, "chan1")
+    slot2 = page.add_address_slot(0x20000004, "chan2")
 
-    key1 = "DMA2.S0NDTR"
-    page.add_channel(key1)
-    for i, v in enumerate([100, 200, 300]):
-        engine.history.record(key1, t0 + i * 0.1, v)
-
-    key2 = "SCOPE.LANE2"
-    page.add_channel(key2)
-    for i, v in enumerate([1000, 2000]):
-        engine.history.record(key2, t0 + i * 0.1, v)
+    v1 = [100, 200, 300]
+    v2 = [1000, 2000, 2000]
+    records = []
+    for i in range(3):
+        slots = [0] * MAX_CH
+        slots[slot1] = v1[i]
+        slots[slot2] = v2[i]
+        records.append(TraceRecord(seq=i, gen=0, slots=tuple(slots)))
+    page.store.append(records)
 
     page.auto_lane_check.setChecked(True)
     page.refresh_plot()
 
-    ys1 = page.curve_y(key1)
+    ys1 = page.curve_y(slot1)
     assert min(ys1) == pytest.approx(0.0)
     assert max(ys1) == pytest.approx(0.5)
 
-    ys2 = page.curve_y(key2)
+    ys2 = page.curve_y(slot2)
     assert min(ys2) == pytest.approx(0.5)
     assert max(ys2) == pytest.approx(1.0)
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_auto_lane_off_leaves_last_computed_values_editable(qtbot):
+def test_auto_lane_off_leaves_last_computed_values_editable(qtbot, monkeypatch):
     """Turning Auto-lane off stops the recompute but does not reset
     scale/offset - they stay exactly as last computed, still plain
     editable fields the user can hand-tune from there."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
-    engine.history.record(key, t0 + 0.1, 300)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([
+        TraceRecord(seq=0, gen=0, slots=_slot_tuple(slot, 100)),
+        TraceRecord(seq=1, gen=0, slots=_slot_tuple(slot, 300)),
+    ])
 
     page.auto_lane_check.setChecked(True)
     page.refresh_plot()
-    computed = dict(page._channels[key]["transform"])
+    computed = dict(page.channel_slots()[slot]["transform"])
     assert computed != {"scale": 1.0, "offset": 0.0}
 
     page.auto_lane_check.setChecked(False)
     page.refresh_plot()
-    assert page._channels[key]["transform"] == computed
+    assert page.channel_slots()[slot]["transform"] == computed
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
+def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(
+        qtbot, monkeypatch):
     """Spec point 7: no selection hides the axis tick numbers; a
     selected row titles the axis with that channel's name/color and
     makes the tick numbers that channel's own raw decoded domain (the
     inverse of its scale/offset), not the transformed display range
     the curve is drawn in."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000000, "buf0")
     axis = page.plot.getAxis("left")
 
     assert axis.style["showValues"] is False
 
-    row = page._row_for_key(key)
-    page.channel_table.selectRow(row)
-    assert page._selected_key == key
+    page.channel_table.selectRow(slot)
+    assert page._selected_row == slot
     assert axis.style["showValues"] is True
-    entry = page._channels[key]
+    entry = page.channel_slots()[slot]
     assert entry["label"] in axis.labelText
     assert entry["color"] in axis.labelText
 
-    page.set_channel_transform(key, scale=2.0, offset=5.0)
+    page.set_channel_transform(slot, scale=2.0, offset=5.0)
     # displayed = (raw - offset) * scale, so tickStrings must invert:
     # raw = displayed / scale + offset.
     ticks = axis.tickStrings([0.0, 1.0], 1, 1)
@@ -826,64 +1054,57 @@ def test_y_axis_hidden_with_no_selection_and_follows_selected_channel(qtbot):
     assert ticks[1] == "%g" % (1.0 / 2.0 + 5.0)
 
     page.channel_table.clearSelection()
-    assert page._selected_key is None
+    assert page._selected_row is None
     assert axis.style["showValues"] is False
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_removing_selected_channel_clears_y_axis(qtbot):
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    row = page._row_for_key(key)
-    page.channel_table.selectRow(row)
-    assert page._selected_key == key
+def test_removing_selected_channel_clears_y_axis(qtbot, monkeypatch):
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.channel_table.selectRow(slot)
+    assert page._selected_row == slot
 
-    page.remove_channel(key)
-    assert page._selected_key is None
+    page.remove_channel(slot)
+    assert page._selected_row is None
     axis = page.plot.getAxis("left")
     assert axis.style["showValues"] is False
 
 
 # -- v2: two-state cursor readout, no PIN (spec point 5) -------------------
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_value_column_shows_newest_sample_when_mouse_off_plot(qtbot):
+def test_value_column_shows_newest_sample_when_mouse_off_plot(qtbot, monkeypatch):
     """State 1 (mouse off the plot, the default - no PIN, no third
-    "locked" state): the Value column shows each channel's newest
+    "locked" state): the Value column shows each channel's newest real
     sample and the column header reads plain "Value"."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
-    engine.history.record(key, t0 + 1.0, 200)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=1_000_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([
+        TraceRecord(seq=0, gen=0, slots=_slot_tuple(slot, 100)),
+        TraceRecord(seq=1, gen=0, slots=_slot_tuple(slot, 200)),
+    ])
     page.refresh_plot()
 
-    assert page._channels[key]["value_item"].text() == \
+    assert page.channel_slots()[slot]["value_item"].text() == \
         format_value(200, DEFAULT_TYPE)
     assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == "Value"
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_value_column_switches_to_hover_value_and_header_on_crosshair(qtbot):
+def test_value_column_switches_to_hover_value_and_header_on_crosshair(
+        qtbot, monkeypatch):
     """State 2 (mouse on the plot): the Value column shows the value
     at the crosshair's time and the header switches to "Value @
     -X.Xs"."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=100_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
     page.refresh_plot()
     now = page._last_now
-    engine.history.record(key, now - 2.0, 100)
-    engine.history.record(key, now - 1.0, 200)
-    engine.history.record(key, now - 0.5, 300)
+    period_s = page.desc.period_us * 1e-6
+    base_seq = int(now / period_s)
+    page.store.append([
+        TraceRecord(seq=base_seq - 20, gen=0, slots=_slot_tuple(slot, 100)),
+        TraceRecord(seq=base_seq - 10, gen=0, slots=_slot_tuple(slot, 200)),
+        TraceRecord(seq=base_seq - 5, gen=0, slots=_slot_tuple(slot, 300)),
+    ])
     page.refresh_plot()
 
     page._update_crosshair(-0.4)
@@ -891,22 +1112,19 @@ def test_value_column_switches_to_hover_value_and_header_on_crosshair(qtbot):
     assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == \
         "Value @ -0.4s"
     # -0.4s relative to the last refresh's now is just after the
-    # newest (now-0.5) sample - value_at finds the newest sample at or
+    # newest (~now-0.5) sample - value_at finds the newest sample at or
     # before that absolute time, which is 300.
-    assert page._channels[key]["value_item"].text() == \
+    assert page.channel_slots()[slot]["value_item"].text() == \
         format_value(300, DEFAULT_TYPE)
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot):
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
-    engine.history.record(key, t0 + 1.0, 200)
+def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot, monkeypatch):
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=1_000_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([
+        TraceRecord(seq=0, gen=0, slots=_slot_tuple(slot, 100)),
+        TraceRecord(seq=1, gen=0, slots=_slot_tuple(slot, 200)),
+    ])
     page.refresh_plot()
 
     page._update_crosshair(0.5)
@@ -915,7 +1133,7 @@ def test_clear_crosshair_reverts_to_newest_and_default_header(qtbot):
     page._clear_crosshair()
 
     assert page.channel_table.horizontalHeaderItem(COL_VALUE).text() == "Value"
-    assert page._channels[key]["value_item"].text() == \
+    assert page.channel_slots()[slot]["value_item"].text() == \
         format_value(200, DEFAULT_TYPE)
     assert page._crosshair_t is None
 
@@ -937,31 +1155,27 @@ def test_leave_event_on_plot_widget_clears_crosshair(qtbot):
     assert page._crosshair_t is None
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_event_log_click_only_moves_cursor_line_not_value_column(qtbot):
+def test_event_log_click_only_moves_cursor_line_not_value_column(
+        qtbot, monkeypatch):
     """spec point 5: an event-log click (jump_to) is a purely visual
     cursor-line move - it must never touch the Value column or its
     header (no value-locking, no PIN); cursor_time() still returns
     exactly the t passed in, unchanged from the pre-v2 contract."""
-    engine = make_demo_engine(TARGET)
-    page = ScopePage(engine)
-    qtbot.addWidget(page)
-    key = "DMA2.S0NDTR"
-    page.add_channel(key)
-    t0 = page._t0
-    engine.history.record(key, t0 + 0.0, 100)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch, period_us=1_000_000)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    page.store.append([TraceRecord(seq=0, gen=0, slots=_slot_tuple(slot, 100))])
     page.refresh_plot()
     page._update_crosshair(0.0)
 
     header_before = page.channel_table.horizontalHeaderItem(COL_VALUE).text()
-    value_before = page._channels[key]["value_item"].text()
+    value_before = page.channel_slots()[slot]["value_item"].text()
 
-    page.jump_to(t0 + 50.0)
+    page.jump_to(page._t0 + 50.0)
 
-    assert page.cursor_time() == t0 + 50.0
+    assert page.cursor_time() == page._t0 + 50.0
     header_after = page.channel_table.horizontalHeaderItem(COL_VALUE).text()
     assert header_after == header_before
-    assert page._channels[key]["value_item"].text() == value_before
+    assert page.channel_slots()[slot]["value_item"].text() == value_before
 
 
 # -- v2: per-page run/stop replaces global freeze (spec point 1) -----------
@@ -969,7 +1183,7 @@ def test_event_log_click_only_moves_cursor_line_not_value_column(qtbot):
 def test_set_stopped_and_hidden_timer_matrix(qtbot):
     """Same bug class the old set_frozen()/hideEvent() pairing guarded
     against (Task 2's "hidden-dock timer pause w/ frozen matrix" fix,
-    carried into the run/stop rename): the repaint timer's active
+    carried into the run/stop rename): the FAST repaint timer's active
     state must be exactly (visible AND NOT stopped) after every
     visibility/stop transition, in either order - in particular,
     stopping while hidden must not let a later show() wake the timer

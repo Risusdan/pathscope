@@ -3,12 +3,31 @@ import subprocess
 
 import pytest
 
-from ui.demo import make_demo_engine
+from core.adapter.mock import MockAdapter
+from core.engine.core import Engine
+from core.trace.sim import FakeTraceFirmware
 from ui.elf_symbols import load_symbols
 from ui.panels.scope_page import ScopePage
 
 FWDIR = "firmware/blackpill_adc_dma"
-ADC_BUF_KEY = "@20000000"
+TARGET = "targets/f411"
+
+
+def _make_demo_like_engine(period_us=5000):
+    """A real engine + real FakeTraceFirmware wired like ui/demo.py's
+    make_demo_engine() (engine.trace_desc_addr set) but WITHOUT its
+    background animate thread, which never stops for the life of the
+    test process - none of this file's tests need that thread's own
+    simulated behavior, only the trace_desc_addr convenience, and one
+    permanent daemon thread per make_demo_engine() call measurably
+    slowed the whole scope test suite down (see
+    tests/ui/test_scope_page.py's identical helper for the full
+    writeup)."""
+    adapter = MockAdapter({})
+    engine = Engine.load(TARGET, adapter, interval_s=0.01)
+    fw = FakeTraceFirmware(adapter, period_us=period_us)
+    engine.trace_desc_addr = fw.desc_addr
+    return engine
 
 
 def _built_fw_elf():
@@ -67,7 +86,7 @@ def _list_texts(list_widget):
 
 def test_load_elf_populates_symbol_list(qtbot):
     path = _built_fw_elf()
-    engine = make_demo_engine("targets/f411")
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         page = ScopePage(engine)
@@ -88,7 +107,7 @@ def test_load_elf_populates_symbol_list(qtbot):
 
 def test_symbol_filter_narrows_list(qtbot):
     path = _built_fw_elf()
-    engine = make_demo_engine("targets/f411")
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         page = ScopePage(engine)
@@ -101,28 +120,44 @@ def test_symbol_filter_narrows_list(qtbot):
         engine.stop()
 
 
-@pytest.mark.skip(reason="channels land in T8")
-def test_add_symbol_channel_uses_add_address_channel(qtbot):
-    """add_symbol_channel must ride the same add_address_channel path
-    as the manual address row - same synthetic "@%08X" key, same
-    EngineError-through behavior - not a separate code path."""
+def test_add_symbol_channel_uses_add_address_channel(qtbot, monkeypatch):
+    """add_symbol_channel must ride the same add_address_slot path as
+    a manual address add - not a separate code path. TraceReader.
+    discover/set_watch are stubbed so this test exercises the REAL ELF
+    symbol table (adc_buf's real addr/size, from a real toolchain
+    build) against a deterministic trace target, independent of
+    whether THIS firmware's own ps_trace_desc symbol happens to be
+    backed by the demo engine's simulated memory (it isn't - see
+    test_load_elf_populates_symbol_list's comment above)."""
+    from core.trace.contract import MAX_CH, RING_COUNT, TraceDesc
+    from core.trace.reader import TraceReader
+
     path = _built_fw_elf()
-    engine = make_demo_engine("targets/f411")
+    desc = TraceDesc(endian="<", version=1, max_ch=MAX_CH, status=0,
+                     period_us=5000, record_size=8 + 4 * MAX_CH,
+                     ring_count=RING_COUNT, ring_addr=0x20001000, wr_seq=0,
+                     watch_addrs=tuple([0] * MAX_CH), watch_count=0,
+                     generation=0)
+    monkeypatch.setattr(TraceReader, "discover", lambda self, addr: desc)
+    monkeypatch.setattr(TraceReader, "set_watch", lambda self, addrs: None)
+
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         page = ScopePage(engine)
         qtbot.addWidget(page)
         page.load_elf(path)
-        key = page.add_symbol_channel("adc_buf")
-        assert key == ADC_BUF_KEY
-        assert key in page._channels
-        assert page._channels[key]["label"] == "adc_buf"
+        slot = page.add_symbol_channel("adc_buf")
+        assert slot is not None
+        entry = page.channel_slots()[slot]
+        assert entry["label"] == "adc_buf"
+        assert entry["addr"] == page.elf_symbols["adc_buf"].addr
     finally:
         engine.stop()
 
 
 def test_load_elf_bad_path_shows_inline_error_not_dialog(qtbot):
-    engine = make_demo_engine("targets/f411")
+    engine = _make_demo_like_engine()
     engine.start()
     try:
         page = ScopePage(engine)

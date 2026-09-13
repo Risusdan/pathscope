@@ -35,8 +35,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "before saving the frame")
     p.add_argument("--shot-scope", action="store_true",
                    help="manual check only, requires --shot: switch to "
-                        "the Scope tab before saving the frame (channel "
-                        "wiring lands in Task 8)")
+                        "the Scope tab, add the demo trace channel, and "
+                        "let it ramp before saving the frame")
     return p
 
 
@@ -85,12 +85,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                 while time.monotonic() < select_deadline:
                     app.processEvents()
             if args.shot_scope:
-                # Channel wiring (watching an address on a trace slot,
-                # plotting its curve) lands in Task 8 - for now this
-                # flag only exercises trace discovery and the fixed
-                # slot table skeleton (Task 7).
+                # Switch to the Scope tab (lazily constructs the real
+                # ScopePage) and watch the demo trace target's own
+                # lively ADC-sample slot (ui/demo.py's ADC_SAMPLE,
+                # 0x20000000 - a u16-range sine the animate thread
+                # keeps moving) so the screenshot shows a real curve,
+                # not an empty plot. add_address_slot() is the
+                # primitive add_symbol_channel()/add_register_channel()
+                # both wrap - used directly here since the demo target
+                # has no register model to resolve a reg_key against.
                 win.tabs.setCurrentIndex(1)
                 app.processEvents()
+                win.scope_page.add_address_slot(
+                    0x20000000, "adc_sample", type_name="u16.lo")
+                ramp_deadline = time.monotonic() + 2.5
+                while time.monotonic() < ramp_deadline:
+                    app.processEvents()
                 win.scope_page.refresh_plot()
             app.processEvents()
             win.grab().save(args.shot)

@@ -3,7 +3,8 @@ import dataclasses
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from core.trace.contract import TraceRecord
+from core.trace.contract import (WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
+                                 TraceRecord)
 from core.trace.reader import TraceError, TraceReader, _filter_stable
 from tests.trace_sim import FakeTraceFirmware
 
@@ -64,6 +65,39 @@ def test_overflow_counts_lost_and_resumes():
         assert r.lost == K + 1
         assert recs[0].seq == 3 + K + 1   # resumed past the hole and
                                            # the unprovable margin slot
+    finally:
+        engine.stop()
+
+
+def test_naive_raw_count_write_pins_generation_but_set_watch_does_not():
+    # CRITICAL 1 regression: WATCH_COUNT_OFFSET is a real 32-bit word
+    # shared by watch_count, generation and 2 reserved bytes
+    # (contract.py offsets 64/65/66-67). A naive write of just the
+    # count - the bug this guards against - clobbers generation to
+    # whatever the write's own upper bytes are (0, for a plain
+    # literal), and the sim (post-fix) reproduces that exactly like
+    # real SRAM would: every such "close gate, write addr, request
+    # count" cycle re-clobbers generation to 0 right before firmware's
+    # own accept bumps it straight back to 1, so it never advances no
+    # matter how many edits happen.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+
+        for _ in range(2):
+            engine.write_word(fw.desc_addr + WATCH_COUNT_OFFSET, 0)
+            engine.write_word(fw.desc_addr + WATCH_ADDRS_OFFSET, 0x20000000)
+            engine.write_word(fw.desc_addr + WATCH_COUNT_OFFSET, 1)
+        assert r.status().generation == 1     # pinned - reproduces the bug
+
+        # TraceReader.set_watch composes every count-word write from
+        # the current word instead (TraceReader._write_count) -
+        # generation advances normally, edit after edit.
+        r.set_watch([0x20000004])
+        assert r.status().generation == 2
+        r.set_watch([0x20000000])
+        assert r.status().generation == 3
     finally:
         engine.stop()
 

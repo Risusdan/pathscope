@@ -54,11 +54,27 @@ by then in exactly the way self.lost already accounts for on the
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
 written one word each, then the new count is written to request the
-transition. Firmware validates only on a 0->N transition and reports
-the result by bumping generation (accepted) or setting a nonzero
-status (rejected) - set_watch polls status() for that instead of
-assuming success.
+transition. Firmware validates whenever count != 0 and reports the
+result by bumping generation (accepted) or setting a nonzero status
+(rejected) - set_watch polls status() for that instead of assuming
+success.
+
+The word at WATCH_COUNT_OFFSET physically holds four fields -
+watch_count, generation, and two reserved bytes (contract.py:
+offsets 64/65/66-67) - so any write to it is a real 32-bit store that
+touches all four bytes at once, generation included, no matter what
+the host meant to change. Every count-word write set_watch makes
+(both the count=0 and the count=N write) is therefore composed from
+the CURRENT word read back from the target first, changing only the
+count byte and leaving generation/reserved exactly as read
+(_compose_count_word/_write_count below) - writing the raw count
+alone would clobber generation to whatever the write's other bytes
+happened to be, pinning it there on real hardware forever after
+(every subsequent naive write repeats the same clobber). This is
+race-free: firmware only ever changes generation on an accept, which
+cannot precede the host's own final write of that same word.
 """
+import struct
 import time
 from typing import List, Optional, Tuple
 
@@ -171,12 +187,11 @@ class TraceReader:
                 % (len(addrs), self.desc.max_ch))
 
         prev_gen = self.desc.generation
-        self.engine.write_word(self.desc_addr + WATCH_COUNT_OFFSET, 0)
+        self._write_count(0)
         for i, addr in enumerate(addrs):
             self.engine.write_word(
                 self.desc_addr + WATCH_ADDRS_OFFSET + 4 * i, addr)
-        self.engine.write_word(
-            self.desc_addr + WATCH_COUNT_OFFSET, len(addrs))
+        self._write_count(len(addrs))
 
         desc = self.status()
         tries = 1
@@ -189,6 +204,39 @@ class TraceReader:
         if desc.status != STATUS_OK:
             name = _STATUS_NAMES.get(desc.status, str(desc.status))
             raise TraceError("firmware rejected table: %s" % name)
+
+    def _compose_count_word(self, new_count: int, current_word: int) -> int:
+        """CRITICAL 1: the word at WATCH_COUNT_OFFSET physically holds
+        watch_count (byte 0), generation (byte 1) and 2 reserved bytes
+        (bytes 2-3) - see contract.py's WATCH_COUNT_OFFSET/
+        GENERATION_OFFSET. `current_word` is the wire word most
+        recently read back from that address; this recovers its raw
+        target bytes the same way contract.py's _words_to_bytes does
+        (struct.pack("<I", word) - a word is always the LE composition
+        of the raw bytes, regardless of target endianness), reads
+        watch_count/generation/reserved out of that raw byte order,
+        and repacks with new_count in place of the old watch_count
+        byte, generation and reserved carried through unchanged.
+        Single-byte struct fields are never reordered by endianness,
+        so this is correct for either target byte order, but is still
+        routed through self.desc.endian's pack/unpack calls to match
+        the idiom contract.py uses everywhere else for this data."""
+        raw = struct.pack("<I", current_word & 0xFFFFFFFF)
+        endian = self.desc.endian
+        _old_count, gen, res0, res1 = struct.unpack(endian + "BBBB", raw)
+        new_raw = struct.pack(endian + "BBBB", new_count & 0xFF, gen,
+                              res0, res1)
+        return struct.unpack("<I", new_raw)[0]
+
+    def _write_count(self, count: int) -> None:
+        """Read-modify-write the watch_count word, preserving whatever
+        generation/reserved bytes are currently there (see
+        _compose_count_word and the module docstring) - used for both
+        the count=0 and count=N writes set_watch makes."""
+        current_word = self.engine.read_words(
+            self.desc_addr + WATCH_COUNT_OFFSET, 1)[0]
+        new_word = self._compose_count_word(count, current_word)
+        self.engine.write_word(self.desc_addr + WATCH_COUNT_OFFSET, new_word)
 
     def _read_desc(self) -> TraceDesc:
         words = self.engine.read_words(self.desc_addr, _DESC_WORDS)

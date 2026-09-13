@@ -9,10 +9,19 @@ monkey-patching a MockAdapter - both core - so the core zero-dependency
 rule holds.
 
 It interprets writes into the descriptor's watch-table fields the way
-real firmware would (count=0 closes the gate, a 0->N count transition
-validates the pending addresses against a whitelist and, on success,
-bumps generation and starts sampling), and step() advances the ring
-the way the periodic ISR would.
+real firmware would (count=0 closes the gate, a nonzero count
+transition validates the pending addresses against a whitelist and,
+on success, bumps generation and starts sampling), and step() advances
+the ring the way the periodic ISR would. The count-word write in
+particular is modeled as the real 32-bit store it is: watch_count,
+generation and 2 reserved bytes all physically share that one word
+(contract.py: offsets 64/65/66-67), so writing it decomposes the full
+word and overwrites this sim's own generation state from whatever byte
+pattern the write carried, exactly as SRAM would - a host that writes
+a raw, non-generation-preserving count word sees generation pinned
+here exactly like it would on real hardware (see
+core/trace/reader.py's TraceReader._write_count for the write host
+code actually makes, which preserves it).
 
 The sim never keeps a second copy of "what the descriptor/ring
 contain" that could drift from what a reader actually parses: after
@@ -143,12 +152,31 @@ class FakeTraceFirmware:
             idx = (offset - WATCH_ADDRS_OFFSET) // 4
             self._watch_addrs[idx] = value & 0xFFFFFFFF
         elif offset == WATCH_COUNT_OFFSET:
-            self._handle_count_write(value & 0xFF)
+            self._handle_count_word_write(value & 0xFFFFFFFF)
         # Any other in-range offset (status, period_us, ring geometry,
         # wr_seq, generation, ...) is firmware-owned, not part of the
         # host write protocol - ignore it rather than let a stray write
         # corrupt state that _current_desc() re-derives below.
         self._resync()
+
+    def _handle_count_word_write(self, word: int) -> None:
+        """CRITICAL 1: model the real 32-bit write, not just "the host
+        wants watch_count changed" - the word at WATCH_COUNT_OFFSET
+        physically holds watch_count (byte 0), generation (byte 1) and
+        2 reserved bytes (bytes 2-3), so a real store to this address
+        overwrites all four bytes in SRAM at once, generation included,
+        regardless of what the host meant to change. Decompose the
+        full word and OVERWRITE self._generation from it exactly as
+        hardware would - deriving generation only from this sim's own
+        accept logic and silently discarding whatever byte pattern the
+        write actually carried would structurally hide a host bug that
+        writes a raw, non-generation-preserving count word (which pins
+        generation at 1 forever on real hardware: every such write
+        clobbers generation to 0 first, and an accept always
+        increments from whatever base is currently there)."""
+        count = word & 0xFF
+        self._generation = (word >> 8) & 0xFF
+        self._handle_count_write(count)
 
     def _handle_count_write(self, new_count: int) -> None:
         if self._watch_count == 0 and new_count != 0:

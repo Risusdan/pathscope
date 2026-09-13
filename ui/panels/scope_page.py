@@ -96,7 +96,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                                QFileDialog, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QScrollArea, QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
@@ -270,6 +270,15 @@ class ScopePage(QWidget):
         self.channel_list = QListWidget()
         side.addWidget(self.channel_list, 1)
 
+        # Removal is a channel-list operation, so it belongs directly
+        # under the list - both for locality and for reachability: on
+        # a short dock (see the QScrollArea wrap below), this keeps
+        # "Remove channel" visible without scrolling even when the ELF
+        # section further down is scrolled out of view.
+        self.remove_btn = QPushButton("Remove channel")
+        self.remove_btn.clicked.connect(self._on_remove_clicked)
+        side.addWidget(self.remove_btn)
+
         # per-channel scale/offset/normalize edit strip (feature 2) -
         # hidden until a channel row is selected, populated from that
         # channel's stored transform, and hidden again on deselection
@@ -385,18 +394,31 @@ class ScopePage(QWidget):
         self.error_label.setWordWrap(True)
         side.addWidget(self.error_label)
 
-        remove_btn = QPushButton("Remove channel")
-        remove_btn.clicked.connect(self._on_remove_clicked)
-        side.addWidget(remove_btn)
-
         self.window_label = QLabel(
             "window: %.0f s (History)" % engine.history.window_s)
         side.addWidget(self.window_label)
 
         side_widget = QWidget()
         side_widget.setLayout(side)
-        side_widget.setMaximumWidth(SIDE_MAX_WIDTH)
-        outer.addWidget(side_widget)
+
+        # The side panel's content (channel list, transform strip, add
+        # rows, budget label, ELF section, Remove channel, window
+        # label) can exceed the dock's height at typical sizes -
+        # without a scroll area, the bottom controls are pushed
+        # off-screen with no way to reach them (a hardware-session
+        # screenshot showed the panel cut off at "Add symbol").
+        # setWidgetResizable(True) lets side_widget track the
+        # viewport's width (so its own child layouts still fill it
+        # horizontally) while its height is free to exceed the
+        # viewport and scroll.
+        self.side_scroll = QScrollArea()
+        self.side_scroll.setWidgetResizable(True)
+        self.side_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff)
+        self.side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.side_scroll.setWidget(side_widget)
+        self.side_scroll.setMaximumWidth(SIDE_MAX_WIDTH)
+        outer.addWidget(self.side_scroll)
 
         plot_side = QVBoxLayout()
         self.time_label = QLabel("t=-- s")

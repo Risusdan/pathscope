@@ -2,6 +2,7 @@ import math
 
 import pyqtgraph as pg
 import pytest
+from PySide6.QtCore import Qt
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -428,3 +429,36 @@ def test_normalize_checkbox_full_label_and_disables_spinboxes(qtbot):
     page.normalize_check.setChecked(False)
     assert page.scale_spin.isEnabled()
     assert page.offset_spin.isEnabled()
+
+
+def test_side_panel_scrolls_and_remove_button_above_transform_strip(qtbot):
+    """Hardware-session finding: at typical dock heights the side
+    panel's content (channel list, transform strip, add rows, budget
+    label, ELF section, Remove channel, window label) exceeds the
+    available height with no scrollbar, pushing the bottom controls
+    off-screen and unreachable (a screenshot showed the panel cut off
+    at "Add symbol"). The panel must now scroll, and "Remove channel"
+    - a channel-list operation - must sit directly under the channel
+    list (above the transform strip), so it stays reachable even when
+    the ELF section further down is scrolled out of view."""
+    engine = make_demo_engine(TARGET)
+    page = ScopePage(engine)
+    qtbot.addWidget(page)
+    page.resize(360, 400)
+    page.show()
+    qtbot.waitExposed(page)
+
+    # content taller than the viewport => a vertical scrollbar with
+    # room to move.
+    assert page.side_scroll.verticalScrollBar().maximum() > 0
+    assert (page.side_scroll.horizontalScrollBarPolicy()
+           == Qt.ScrollBarAlwaysOff)
+
+    # order assertion via layout index, not geometry - geometry alone
+    # is unreliable for a widget (transform_strip) that starts hidden
+    # and so may report a stale/zero position before ever being shown.
+    side_layout = page.side_scroll.widget().layout()
+    remove_index = side_layout.indexOf(page.remove_btn)
+    strip_index = side_layout.indexOf(page.transform_strip)
+    assert remove_index >= 0 and strip_index >= 0
+    assert remove_index < strip_index

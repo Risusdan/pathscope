@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
             engine.flowspec, self._flow_edges, self.wires)
         self._mux_select_ref = self._find_mux_select(engine)
 
+        self.scope_page = None
+        self.scope_dock = None
+
         self._build_toolbar()
         self._build_docks()
         self.diagram_state.on_block_clicked = self._select_block
@@ -175,6 +178,11 @@ class MainWindow(QMainWindow):
         self.fit_act.triggered.connect(self.fit_view)
         tb.addAction(self.fit_act)
 
+        self.scope_act = QAction("Scope", self)
+        self.scope_act.setCheckable(True)
+        self.scope_act.toggled.connect(self._toggle_scope)
+        tb.addAction(self.scope_act)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
@@ -202,11 +210,11 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         self.event_log = EventLog()
-        log_dock = QDockWidget("Event log", self)
-        log_dock.setWidget(self.event_log)
-        log_dock.setMinimumHeight(100)
-        self.addDockWidget(Qt.BottomDockWidgetArea, log_dock)
-        self.resizeDocks([log_dock], [140], Qt.Vertical)
+        self.log_dock = QDockWidget("Event log", self)
+        self.log_dock.setWidget(self.event_log)
+        self.log_dock.setMinimumHeight(100)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        self.resizeDocks([self.log_dock], [140], Qt.Vertical)
 
     def fit_view(self) -> None:
         rect = self.scene.itemsBoundingRect()
@@ -229,8 +237,29 @@ class MainWindow(QMainWindow):
 
     def _toggle_freeze(self, on: bool) -> None:
         self.frozen = on
+        if self.scope_page is not None:
+            self.scope_page.set_frozen(on)
         if not on and self.last_update is not None:
             self._apply(self.last_update)
+
+    def _toggle_scope(self, on: bool) -> None:
+        """Wired to the toolbar's "Scope" action. Lazy dock creation
+        (task-2-brief.md): the pyqtgraph-importing module is only
+        imported here, on first open, not at MainWindow import time -
+        pyqtgraph's import cost is paid only if the user ever opens
+        the scope. Docked bottom-tabbed next to the event log."""
+        if self.scope_dock is None:
+            from .panels.scope_page import ScopePage
+            self.scope_page = ScopePage(self.engine)
+            self.scope_page.set_frozen(self.frozen)
+            self.scope_dock = QDockWidget("Scope", self)
+            self.scope_dock.setWidget(self.scope_page)
+            self.scope_dock.setMinimumHeight(200)
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.scope_dock)
+            self.tabifyDockWidget(self.log_dock, self.scope_dock)
+        self.scope_dock.setVisible(on)
+        if on:
+            self.scope_dock.raise_()
 
     def _toggle_tint(self, on: bool) -> None:
         self.diagram_state.tinted = on
@@ -335,6 +364,10 @@ class MainWindow(QMainWindow):
         # double-log that update's events, since _apply() itself never
         # touches the log.
         self.event_log.add_events(u.events)
+        if self.scope_page is not None:
+            for ev in u.events:
+                self.scope_page.add_event_marker(
+                    ev.t, "%s: %s" % (ev.flow, ev.msg))
         if self.frozen:
             return
         self._apply(u)

@@ -33,6 +33,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="manual check only, requires --shot: select this "
                         "block (opens the register inspector on it) "
                         "before saving the frame")
+    p.add_argument("--shot-scope", action="store_true",
+                   help="manual check only, requires --shot: open the "
+                        "Scope dock, add a DMA2.S0NDTR channel, and wait "
+                        "for samples before saving the frame")
     return p
 
 
@@ -80,6 +84,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 select_deadline = time.monotonic() + 1.0
                 while time.monotonic() < select_deadline:
                     app.processEvents()
+            if args.shot_scope:
+                win.scope_act.setChecked(True)
+                win.scope_page.add_channel("DMA2.S0NDTR")
+                # the demo's S0NDTR sawtooth (ui/demo.py) has a ~1.4 s
+                # period (1000 counts, -37 per 50 ms tick) - wait out a
+                # full period plus margin so the ramp-and-wrap is
+                # actually visible in the captured frame, not just its
+                # first few samples.
+                scope_deadline = time.monotonic() + 2.5
+                while time.monotonic() < scope_deadline:
+                    app.processEvents()
+                win.scope_page.refresh_plot()
             app.processEvents()
             win.grab().save(args.shot)
             print("saved", args.shot)

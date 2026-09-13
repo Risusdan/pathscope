@@ -110,13 +110,12 @@ import time
 from typing import List, Optional, Tuple
 
 from ..engine.core import Engine
-from .contract import (DESC_SIZE, STATUS_BAD_ADDR, STATUS_BAD_COUNT,
-                       STATUS_OK, WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
-                       ContractError, TraceDesc, TraceRecord, parse_desc,
-                       parse_records, record_word_addr)
+from .contract import (DESC_SIZE, STATUS_OK, WATCH_ADDRS_OFFSET,
+                       WATCH_COUNT_OFFSET, ContractError, TraceDesc,
+                       TraceRecord, parse_desc, parse_records,
+                       record_word_addr, status_name)
 
 _DESC_WORDS = DESC_SIZE // 4
-_STATUS_NAMES = {STATUS_BAD_ADDR: "BAD_ADDR", STATUS_BAD_COUNT: "BAD_COUNT"}
 
 
 class TraceError(Exception):
@@ -296,8 +295,8 @@ class TraceReader:
             # rather than a verdict on this submission. Only once no
             # accept ever arrived is status consulted, to name why.
             if desc.status != STATUS_OK:
-                name = _STATUS_NAMES.get(desc.status, str(desc.status))
-                raise TraceError("firmware rejected table: %s" % name)
+                raise TraceError(
+                    "firmware rejected table: %s" % status_name(desc.status))
             raise TraceError("firmware did not accept watch table")
 
         # IMPORTANT 3+4: this reader now trusts the NEW generation -

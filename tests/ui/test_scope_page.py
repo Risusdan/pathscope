@@ -265,6 +265,18 @@ def test_add_address_slot_occupies_first_free_slot_in_order(qtbot, monkeypatch):
     assert page.error_label.text() == ""
 
 
+def test_address_cell_uses_mono_font(qtbot, monkeypatch):
+    """MUST-FIX m5: the Address column's font is MONO - lost in the T8
+    rework (this module's own MONO constant went unused) and restored
+    here."""
+    from ui.panels.scope_page import COL_ADDR, MONO
+
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    page.add_address_slot(0x20000000, "a")
+    addr_item = page.channel_table.item(0, COL_ADDR)
+    assert addr_item.font().families() == MONO.families()
+
+
 def test_add_address_slot_table_full(qtbot, monkeypatch):
     page = _make_stubbed_trace_page(qtbot, monkeypatch)
     for i in range(MAX_CH):
@@ -513,6 +525,41 @@ def test_stop_and_hidden_drain_keeps_reader_lost_from_growing(qtbot):
         page.set_stopped(False)
         page.refresh_plot()
         assert page.reader.lost == 0
+    finally:
+        engine.stop()
+
+
+def test_drain_surfaces_nonzero_status_inline(qtbot):
+    """MUST-FIX m3 (spec 3.4): a nonzero desc.status observed during a
+    drain tick must be surfaced inline, naming the code - previously
+    only a set_watch() rejection (synchronously, from
+    add_address_slot()'s own try/except) ever raised on a bad status.
+    Triggers the rejection directly through reader.set_watch()
+    (bypassing add_address_slot()'s own error_label write) so the ONLY
+    thing that can have written error_label afterward is
+    _drain_once()'s own status check. A subsequent valid table clears
+    it again once status returns OK."""
+    adapter = MockAdapter({0x20000000: 0})
+    engine = Engine.load(TARGET, adapter, interval_s=0.01)
+    engine.start()
+    try:
+        fw = FakeTraceFirmware(adapter, period_us=1000)
+        engine.trace_desc_addr = fw.desc_addr
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+
+        with pytest.raises(TraceError):
+            page.reader.set_watch([0x99999990])   # outside sim whitelist
+
+        page._drain_once()
+        assert "BAD_ADDR" in page.error_label.text()
+        assert page._status_error_active
+
+        page.reader.set_watch([0x20000000])       # a valid retry
+        page._drain_once()
+        assert page.error_label.text() == ""
+        assert not page._status_error_active
     finally:
         engine.stop()
 

@@ -242,7 +242,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
 from core.engine.core import Engine, EngineError
 from core.engine.poller import PollerState
 from core.target.registers import SvdError
-from core.trace.contract import MAX_CH
+from core.trace.contract import MAX_CH, STATUS_OK, status_name
 from core.trace.reader import TraceError, TraceReader
 from ui.trace_store import TraceStore
 
@@ -283,10 +283,11 @@ REFRESH_MS = 200
 # Slow drain timer bounds (see _drain_interval_ms and the module
 # docstring's "Drain independent of paint state" paragraph): the
 # actual interval is derived per-descriptor, never this pair alone -
-# DRAIN_MS_FLOOR keeps a very slow/large-ring firmware from draining
-# needlessly often, DRAIN_MS_CAP keeps a very fast/small-ring firmware
-# from picking an interval so short it competes with the fast timer
-# for no benefit.
+# DRAIN_MS_FLOOR keeps a very fast/small-ring firmware from picking an
+# interval so short it drains needlessly often (competing with the
+# fast timer for no benefit), DRAIN_MS_CAP keeps a very slow/large-ring
+# firmware from being read so rarely the interval stops working as a
+# meaningful safety margin against ring overwrite while stopped.
 DRAIN_MS_FLOOR = 50
 DRAIN_MS_CAP = 500
 GAP_FACTOR = 3.0
@@ -371,7 +372,7 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
     anything reads it. Halving the span rather than using it exactly
     leaves headroom for scheduling jitter (Qt timer delivery is not
     real-time) to still land inside a single ring lifetime. The
-    DRAIN_MS_CAP floor keeps this from being read as "recompute every
+    DRAIN_MS_CAP keeps this from being read as "recompute every
     firmware's cadence with no ceiling" - a slow/huge-ring firmware
     that would compute an interval past 500ms still drains at least
     that often, matching the pre-fix behavior for any geometry that
@@ -595,6 +596,11 @@ class ScopePage(QWidget):
         # message (e.g. "table full") that happens to still be
         # showing.
         self._refresh_error_active = False
+        # MUST-FIX m3: tracks whether error_label currently shows a
+        # nonzero desc.status observed during a drain tick (see
+        # _update_status_health), same non-clobbering rationale as
+        # _refresh_error_active above.
+        self._status_error_active = False
         # Rolling (t, cumulative reader.lost) samples, pruned to the
         # roll-mode window - see _update_drain_health (spec point 6).
         self._lost_window: List[Tuple[float, int]] = []
@@ -1306,6 +1312,7 @@ class ScopePage(QWidget):
         self.channel_table.setItem(row, COL_NAME, name_item)
 
         addr_item = QTableWidgetItem("0x%08X" % entry["addr"])
+        addr_item.setFont(MONO)
         addr_item.setFlags(addr_item.flags() & ~Qt.ItemIsEditable)
         self.channel_table.setItem(row, COL_ADDR, addr_item)
 
@@ -1696,7 +1703,28 @@ class ScopePage(QWidget):
             self.error_label.setText("")
             self._refresh_error_active = False
         self.store.append(records)
+        self._update_status_health()
         self._update_drain_health(time.monotonic())
+
+    def _update_status_health(self) -> None:
+        """MUST-FIX m3 (spec 3.4): a nonzero desc.status observed
+        during a drain tick is surfaced inline, naming the code -
+        previously only a set_watch() rejection ever raised on a bad
+        status, so a status that stayed (or went) bad through any
+        other path had no on-screen surface at all. Mirrors
+        _refresh_error_active's own non-clobbering rule via
+        self._status_error_active: an OK status only ever clears a
+        message THIS method set, never an unrelated refusal (e.g.
+        "table full") left showing by add_address_slot()/
+        remove_channel()."""
+        desc = self.reader.desc
+        status = desc.status if desc is not None else STATUS_OK
+        if status != STATUS_OK:
+            self.error_label.setText("trace status: %s" % status_name(status))
+            self._status_error_active = True
+        elif self._status_error_active:
+            self.error_label.setText("")
+            self._status_error_active = False
 
     def _update_drain_health(self, now: float) -> None:
         """Spec point 6: reader.lost delta within roughly the last

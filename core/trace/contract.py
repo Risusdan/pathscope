@@ -25,6 +25,18 @@ RING_COUNT = 256
 RECORD_SIZE = 8 + 4 * MAX_CH          # 48
 DESC_SIZE = 24 + 4 * MAX_CH + 4       # 68: header 24 + table 40 + tail 4
 STATUS_OK, STATUS_BAD_ADDR, STATUS_BAD_COUNT = 0, 1, 2
+# Display names for the STATUS_* codes above - the one place this
+# mapping is defined, so reader.py's own error text and any UI surface
+# naming a status code (MUST-FIX m3, ui/panels/scope_page.py) can never
+# drift apart on what a code is called.
+STATUS_NAMES = {STATUS_OK: "OK", STATUS_BAD_ADDR: "BAD_ADDR",
+                STATUS_BAD_COUNT: "BAD_COUNT"}
+
+
+def status_name(code: int) -> str:
+    """STATUS_NAMES lookup with a numeric fallback for an unrecognized
+    code (e.g. a future firmware version's new status value)."""
+    return STATUS_NAMES.get(code, str(code))
 
 # struct format bodies (endian prefix added by caller). Standard size,
 # no implicit alignment - the wire layout is the spec table verbatim.

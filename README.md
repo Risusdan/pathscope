@@ -35,3 +35,16 @@ Gate: PASS (threshold 20 Hz; 4 registers polled in 2 batched block reads).
 - [x] PC13 LED heartbeat visually confirmed
 
 Session rate: avg 37.9 Hz over 3191 snapshots (90 s including the outage).
+
+## M3/M4 GUI validation (2026-09-13, Blackpill + clone ST-Link, macOS)
+
+- [x] real-adapter GUI connects; diagram live, ACTIVE path animating, ~38 Hz
+- [x] register inspector: live values flash; ADC1.DR shows guarded (overlay),
+      forced read prompts and updates on confirm, declines read nothing
+- [x] double-click read keeps register rows expanded (fixed during session)
+- [x] KEY fault: badges + red events + flow idle; badge click clears count;
+      recovery clean
+- [x] memory viewer: SRAM buffer churns under auto-refresh; guarded-range
+      read (0x40012000 x 256B over ADC1.DR) refused as designed
+- [x] USB unplug: animation stops, rate shows --, auto-recovery on replug
+- [x] freeze: anomaly events still reach the log while panels hold

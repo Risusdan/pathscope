@@ -2,7 +2,7 @@ import time
 
 import pytest
 from core.adapter.mock import MockAdapter
-from core.engine.core import Engine
+from core.engine.core import Engine, EngineError
 from core.engine.poller import PollerState
 
 TARGET = "tests/fixtures/minitarget"
@@ -105,6 +105,38 @@ def test_halt_resume_via_engine(rig):
     assert a.is_running() is False
     e.resume()
     assert a.is_running() is True
+
+
+def test_addr_watch_polls_and_records(rig):
+    a, e, updates = rig
+    a.set_word(0x20000010, 0xBEEF)
+    key = e.add_addr_watch(0x20000010, "my_var")
+    assert key == "@20000010"
+    assert e.addr_watch_labels[key] == "my_var"
+    assert wait_for(
+        lambda: updates and updates[-1].snapshot.value(key) == 0xBEEF)
+    assert wait_for(lambda: len(e.history.series(key)) >= 2)
+
+
+def test_addr_watch_guarded_refused(rig):
+    a, e, updates = rig
+    import pytest as _pytest
+    with _pytest.raises(EngineError):
+        e.add_addr_watch(0x4001204C, "adc_dr")   # ADC1.DR readAction
+
+
+def test_addr_watch_alignment_refused(rig):
+    a, e, updates = rig
+    import pytest as _pytest
+    with _pytest.raises(EngineError):
+        e.add_addr_watch(0x20000001, "misaligned")
+
+
+def test_remove_addr_watch(rig):
+    a, e, updates = rig
+    key = e.add_addr_watch(0x20000020, "gone")
+    e.remove_addr_watch(key)
+    assert key not in e.polled
 
 
 def test_overlay_guards_needed_register(tmp_path):

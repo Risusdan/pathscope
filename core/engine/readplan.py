@@ -1,9 +1,7 @@
 """Groups the registers a sweep needs into as few block reads as the
 address map allows."""
 from dataclasses import dataclass
-from typing import FrozenSet, List, Set, Tuple
-
-from ..target.registers import RegisterModel
+from typing import Dict, FrozenSet, List, Tuple
 
 
 @dataclass
@@ -13,14 +11,14 @@ class ReadOp:
     targets: List[Tuple[str, int]]
 
 
-def build_read_plan(reg_keys: Set[str], model: RegisterModel,
+def build_read_plan(entries: Dict[str, int],
                     merge_gap_words: int = 8,
                     forbidden_addrs: FrozenSet[int] = frozenset()
                     ) -> List[ReadOp]:
-    entries = sorted((model.resolve(k).address, k) for k in reg_keys)
+    sorted_entries = sorted((addr, key) for key, addr in entries.items())
     forbidden = sorted(forbidden_addrs)
     plan: List[ReadOp] = []
-    for addr, key in entries:
+    for addr, key in sorted_entries:
         if addr in forbidden_addrs:
             # guarded target: isolated single-word op, never merged
             plan.append(ReadOp(addr=addr, count=1, targets=[(key, 0)]))

@@ -3,7 +3,7 @@ rules -> callbacks. The only class UI or CLI code needs to touch."""
 import glob
 import os
 import queue
-from typing import Any, Callable, List, Set
+from typing import Any, Callable, Dict, List, Set, Union
 
 from ..adapter.base import TargetAdapter
 from ..target.flows import FlowSpec, load_flows, needed_registers
@@ -12,7 +12,7 @@ from ..target.topology import Topology, load_topology
 from .evaluator import Evaluator
 from .history import History
 from .poller import Poller, PollerState
-from .readplan import build_read_plan
+from .readplan import ReadOp, build_read_plan
 from .rules import EngineUpdate, RuleEngine
 from .snapshot import Snapshot
 
@@ -43,6 +43,8 @@ class Engine:
         self._guarded_addrs = guarded_addrs
         self._base_polled = set(base_polled)
         self._extra: Set[str] = set()
+        self._addr_watches: Dict[str, int] = {}
+        self.addr_watch_labels: Dict[str, str] = {}
         self.polled: Set[str] = set(self._base_polled)
         self._poller = poller
         self._rules = rules
@@ -79,7 +81,8 @@ class Engine:
                 excluded.append(key)
             else:
                 base_polled.add(key)
-        plan = build_read_plan(base_polled, model,
+        entries = {k: model.resolve(k).address for k in base_polled}
+        plan = build_read_plan(entries,
                                forbidden_addrs=frozenset(guarded_addrs))
         poller = Poller(adapter, plan, interval_s=interval_s)
         rules = RuleEngine(flowspec)
@@ -116,20 +119,62 @@ class Engine:
             else:
                 accepted.add(key)
         self._extra = accepted
-        self.polled = set(self._base_polled) | accepted
+        self._recompute_polled()
         self._swap_plan()
         return sorted(refused)
 
+    def add_addr_watch(self, addr: int, label: str) -> str:
+        """Register a 32-bit word watch at a fixed address, keyed by
+        the synthetic "@%08X" % addr key used everywhere else (snapshot
+        values, History). Idempotent for the same addr: calling it
+        again just re-sets the label. Refuses guarded or misaligned
+        addresses."""
+        if addr % 4 != 0:
+            raise EngineError(
+                "address 0x%08X is not word-aligned" % addr)
+        if addr in self.guarded_addrs:
+            raise EngineError("address 0x%08X is guarded" % addr)
+        key = "@%08X" % addr
+        self._addr_watches[key] = addr
+        self.addr_watch_labels[key] = label
+        self._recompute_polled()
+        self._swap_plan()
+        return key
+
+    def remove_addr_watch(self, addr_or_key: Union[int, str]) -> None:
+        if isinstance(addr_or_key, int):
+            key = "@%08X" % addr_or_key
+        else:
+            key = addr_or_key
+        self._addr_watches.pop(key, None)
+        self.addr_watch_labels.pop(key, None)
+        self._recompute_polled()
+        self._swap_plan()
+
+    def _recompute_polled(self) -> None:
+        self.polled = (set(self._base_polled) | self._extra
+                       | set(self._addr_watches.keys()))
+
+    def _build_plan(self) -> List[ReadOp]:
+        entries: Dict[str, int] = {}
+        for key in self.polled:
+            addr = self._addr_watches.get(key)
+            if addr is None:
+                addr = self.model.resolve(key).address
+            entries[key] = addr
+        return build_read_plan(
+            entries, forbidden_addrs=frozenset(self._guarded_addrs))
+
     def _swap_plan(self) -> None:
         """Rebuild the read plan from the current self.polled and
-        submit it as a poller command. Used both by set_watch() and by
+        submit it as a poller command. Used both by set_watch() (and
+        add_addr_watch()/remove_addr_watch()) and by
         _on_poller_state() below - always rebuilds from self.polled
         (the engine's source of truth for what should be watched)
         rather than closing over a plan computed earlier, so a
         re-swap is idempotent: replaying it against an already-current
         plan is harmless."""
-        plan = build_read_plan(self.polled, self.model,
-                               forbidden_addrs=frozenset(self._guarded_addrs))
+        plan = self._build_plan()
         poller = self._poller
 
         def swap(_adapter):

@@ -10,13 +10,16 @@ of its own callers.
 refresh() never re-delivers a record: it tracks the highest sequence
 number it has already returned (self.last_seq) and only asks for
 [last_seq+1, wr_seq). Firmware's ring can overwrite unread records
-faster than the reader drains them; when that happens (wr_seq has
-advanced by more than ring_count since the last refresh) the
-overwritten span is counted into self.lost and the read window is
-clamped to start at wr_seq - ring_count instead of an address that no
-longer holds what its sequence number would claim. The window is
-contiguous in ring order except when it straddles the wrap point, so
-at most two block reads cover it.
+faster than the reader drains them; the ring only ever holds the most
+recent ring_count records, so wr_seq - ring_count is always the oldest
+still-live sequence number regardless of what has been delivered. When
+that oldest-live point has moved past last_seq+1 (the first
+undelivered record), everything strictly between them was both
+undelivered and overwritten - that gap is counted into self.lost and
+the read window is clamped to start at wr_seq - ring_count instead of
+an address that no longer holds what its sequence number would claim.
+The window is contiguous in ring order except when it straddles the
+wrap point, so at most two block reads cover it.
 
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
@@ -77,11 +80,19 @@ class TraceReader:
         wr_seq = desc.wr_seq
         ring_count = desc.ring_count
 
-        if wr_seq - self.last_seq > ring_count:
-            self.lost += (wr_seq - self.last_seq) - ring_count
-            start = wr_seq - ring_count
+        # The ring only ever holds the most recent ring_count records,
+        # so the oldest still-live sequence number is wr_seq -
+        # ring_count regardless of what the reader has consumed.
+        # last_seq + 1 is the first record the reader hasn't delivered
+        # yet; whenever that lags behind the oldest still-live seq, the
+        # gap between them was both undelivered and overwritten.
+        first_live = wr_seq - ring_count
+        first_undelivered = self.last_seq + 1
+        if first_undelivered < first_live:
+            self.lost += first_live - first_undelivered
+            start = first_live
         else:
-            start = self.last_seq + 1
+            start = first_undelivered
 
         if start >= wr_seq:
             self.last_seq = wr_seq - 1

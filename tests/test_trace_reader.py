@@ -30,16 +30,26 @@ def test_discover_and_drain_records():
 
 
 def test_overflow_counts_lost_and_resumes():
+    # ring_count is fixed at 256 (contract.RING_COUNT). Consuming 3
+    # records first (seq 0,1,2) leaves last_seq=2, so the first
+    # undelivered seq is 3. Producing 256+K more records advances
+    # wr_seq to 3+256+K, making the oldest still-live seq
+    # wr_seq-256 = 3+K. Everything from 3 (inclusive) up to 3+K
+    # (exclusive) - exactly K records - was undelivered and then
+    # overwritten before refresh() ever asked for it, so lost must
+    # equal K exactly and the resumed read must start exactly at
+    # seq 3+K.
+    K = 8
     adapter, fw, engine = _rig()
     try:
         r = TraceReader(engine)
         r.discover(fw.desc_addr)
         r.set_watch([0x20000000])
-        fw.step(3); r.refresh()
-        fw.step(300)                      # > ring_count: oldest overwritten
+        fw.step(3); r.refresh()           # last_seq becomes 2
+        fw.step(256 + K)                  # > ring_count: oldest overwritten
         recs = r.refresh()
-        assert r.lost > 0
-        assert recs[0].seq > 3            # resumed past the hole
+        assert r.lost == K
+        assert recs[0].seq == 3 + K       # resumed exactly past the hole
     finally:
         engine.stop()
 

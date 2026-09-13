@@ -1,16 +1,7 @@
-import pytest
 from core.engine.readplan import build_read_plan
-from core.target.registers import RegisterModel
-from tests.test_registers import FIXTURE
 
 
-@pytest.fixture
-def model(tmp_path):
-    (tmp_path / "t.svd").write_text(FIXTURE)
-    return RegisterModel.from_svd(str(tmp_path / "t.svd"))
-
-
-def test_adjacent_registers_merge(model):
+def test_adjacent_registers_merge():
     # DMA2.S0CR @ +0x10 and DMA2.S1CR @ +0x28: gap 5 words -> one op
     plan = build_read_plan({"DMA2.S0CR": 0x40026410,
                             "DMA2.S1CR": 0x40026428})
@@ -22,21 +13,21 @@ def test_adjacent_registers_merge(model):
     assert ("DMA2.S1CR", 6) in op.targets
 
 
-def test_distant_registers_split(model):
+def test_distant_registers_split():
     plan = build_read_plan({"ADC1.SR": 0x40012000,
                             "DMA2.S0CR": 0x40026410})
     assert len(plan) == 2
     assert plan[0].addr == 0x40012000         # sorted by address
 
 
-def test_merge_gap_zero_never_merges(model):
+def test_merge_gap_zero_never_merges():
     plan = build_read_plan({"DMA2.S0CR": 0x40026410,
                             "DMA2.S1CR": 0x40026428},
                            merge_gap_words=0)
     assert len(plan) == 2
 
 
-def test_merge_refused_across_forbidden_address(model):
+def test_merge_refused_across_forbidden_address():
     # S0CR @ +0x10 and S1CR @ +0x28 normally merge into one op; forbid an
     # address inside the gap and the merge must split.
     plan = build_read_plan({"DMA2.S0CR": 0x40026410,
@@ -46,7 +37,7 @@ def test_merge_refused_across_forbidden_address(model):
     assert plan[0].count == 1 and plan[1].count == 1
 
 
-def test_forbidden_target_still_readable_alone(model):
+def test_forbidden_target_still_readable_alone():
     # A force-polled guarded register is a legitimate target; it must get
     # its own op, and neighbours must not merge across it.
     plan = build_read_plan({"DMA2.S0CR": 0x40026410,

@@ -128,7 +128,15 @@ class Engine:
         the synthetic "@%08X" % addr key used everywhere else (snapshot
         values, History). Idempotent for the same addr: calling it
         again just re-sets the label. Refuses out-of-range, guarded,
-        or misaligned addresses."""
+        or misaligned addresses.
+
+        Builds the post-add dict first and only then rebinds
+        self._addr_watches and self.polled - same build-then-rebind
+        pattern remove_addr_watch uses below, for the same reason:
+        each is a single, whole-object assignment (atomic under the
+        GIL) rather than a mutation of the existing dict/set in place,
+        so a concurrent _swap_plan -> _build_plan never sees the two
+        fall out of sync."""
         if not (0 <= addr <= 0xFFFFFFFC):
             raise EngineError("address out of 32-bit range: %#x" % addr)
         if addr % 4 != 0:
@@ -137,17 +145,20 @@ class Engine:
         if addr in self.guarded_addrs:
             raise EngineError("address 0x%08X is guarded" % addr)
         key = "@%08X" % addr
-        self._addr_watches[key] = addr
+        new_watches = dict(self._addr_watches)
+        new_watches[key] = addr
+        new_polled = self._polled_union(new_watches)
+        self._addr_watches = new_watches
+        self.polled = new_polled
         self.addr_watch_labels[key] = label
-        self._recompute_polled()
         self._swap_plan()
         return key
 
     def remove_addr_watch(self, addr_or_key: Union[int, str]) -> None:
-        """Popping the key from self._addr_watches and then calling
-        _recompute_polled() as two separate steps leaves a window,
-        visible to the poller thread's _on_poller_state -> _swap_plan
-        -> _build_plan, where self.polled (not yet reassigned) still
+        """Popping the key from self._addr_watches and then recomputing
+        self.polled as two separate steps leaves a window, visible to
+        the poller thread's _on_poller_state -> _swap_plan ->
+        _build_plan, where self.polled (not yet reassigned) still
         carries this "@" key after self._addr_watches has already
         lost it - _build_plan then falls through to
         model.resolve("@XXXXXXXX"), which raises SvdError. Avoid that
@@ -162,16 +173,23 @@ class Engine:
             key = addr_or_key
         new_watches = dict(self._addr_watches)
         new_watches.pop(key, None)
-        new_polled = (set(self._base_polled) | self._extra
-                     | set(new_watches.keys()))
+        new_polled = self._polled_union(new_watches)
         self._addr_watches = new_watches
         self.polled = new_polled
         self.addr_watch_labels.pop(key, None)
         self._swap_plan()
 
+    def _polled_union(self, addr_watches: Dict[str, int]) -> Set[str]:
+        """The one place the "what should be polled" union formula is
+        written - base registers, set_watch()'s extras, and the given
+        addr-watch keys - shared by _recompute_polled() and both
+        add_addr_watch()/remove_addr_watch() so the three call sites
+        can never drift apart."""
+        return (set(self._base_polled) | self._extra
+               | set(addr_watches.keys()))
+
     def _recompute_polled(self) -> None:
-        self.polled = (set(self._base_polled) | self._extra
-                       | set(self._addr_watches.keys()))
+        self.polled = self._polled_union(self._addr_watches)
 
     def _build_plan(self) -> List[ReadOp]:
         entries: Dict[str, int] = {}

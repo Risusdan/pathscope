@@ -127,8 +127,10 @@ class Engine:
         """Register a 32-bit word watch at a fixed address, keyed by
         the synthetic "@%08X" % addr key used everywhere else (snapshot
         values, History). Idempotent for the same addr: calling it
-        again just re-sets the label. Refuses guarded or misaligned
-        addresses."""
+        again just re-sets the label. Refuses out-of-range, guarded,
+        or misaligned addresses."""
+        if not (0 <= addr <= 0xFFFFFFFC):
+            raise EngineError("address out of 32-bit range: %#x" % addr)
         if addr % 4 != 0:
             raise EngineError(
                 "address 0x%08X is not word-aligned" % addr)
@@ -142,13 +144,29 @@ class Engine:
         return key
 
     def remove_addr_watch(self, addr_or_key: Union[int, str]) -> None:
+        """Popping the key from self._addr_watches and then calling
+        _recompute_polled() as two separate steps leaves a window,
+        visible to the poller thread's _on_poller_state -> _swap_plan
+        -> _build_plan, where self.polled (not yet reassigned) still
+        carries this "@" key after self._addr_watches has already
+        lost it - _build_plan then falls through to
+        model.resolve("@XXXXXXXX"), which raises SvdError. Avoid that
+        by computing the post-removal dict/set first and only then
+        rebinding self._addr_watches and self.polled (each a single,
+        whole-object assignment - atomic under the GIL, unlike
+        mutating the existing dict/set in place) before touching the
+        plan."""
         if isinstance(addr_or_key, int):
             key = "@%08X" % addr_or_key
         else:
             key = addr_or_key
-        self._addr_watches.pop(key, None)
+        new_watches = dict(self._addr_watches)
+        new_watches.pop(key, None)
+        new_polled = (set(self._base_polled) | self._extra
+                     | set(new_watches.keys()))
+        self._addr_watches = new_watches
+        self.polled = new_polled
         self.addr_watch_labels.pop(key, None)
-        self._recompute_polled()
         self._swap_plan()
 
     def _recompute_polled(self) -> None:
@@ -160,6 +178,8 @@ class Engine:
         for key in self.polled:
             addr = self._addr_watches.get(key)
             if addr is None:
+                if key.startswith("@"):
+                    continue  # defensive: see remove_addr_watch
                 addr = self.model.resolve(key).address
             entries[key] = addr
         return build_read_plan(

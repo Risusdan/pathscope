@@ -139,6 +139,61 @@ def test_remove_addr_watch(rig):
     assert key not in e.polled
 
 
+def test_addr_watch_survives_reconnect(rig):
+    """FIX 1 regression: the RUNNING re-swap (_on_poller_state) must
+    repopulate an address watch's plan entry after a reconnect, the
+    same way test_set_watch_survives_target_lost_reconnect covers
+    set_watch()."""
+    a, e, updates = rig
+    states = []
+    e.on_state(states.append)
+    key = e.add_addr_watch(0x20000030, "keeper")
+    assert key == "@20000030"
+    assert wait_for(lambda: updates and key in updates[-1].snapshot.values)
+    a.fail_next(1)                             # force one TARGET_LOST
+    assert wait_for(lambda: PollerState.TARGET_LOST in states)
+    assert wait_for(lambda: states and states[-1] == PollerState.RUNNING,
+                    timeout=3.0)
+    assert wait_for(
+        lambda: updates and key in updates[-1].snapshot.values,
+        timeout=3.0)
+
+
+def test_removed_addr_watch_gone_after_reconnect(rig):
+    """FIX 1 regression: once a watch is removed, it must not
+    reappear via a stale poller.plan after a reconnect, and the
+    ordering fix in remove_addr_watch must not itself raise (the old
+    pop-then-recompute race could leave self.polled carrying the key
+    while self._addr_watches had already dropped it, sending
+    _build_plan into model.resolve("@XXXXXXXX") -> SvdError, swallowed
+    by the poller's _emit_state)."""
+    a, e, updates = rig
+    states = []
+    e.on_state(states.append)
+    key = e.add_addr_watch(0x20000034, "temp")
+    assert wait_for(
+        lambda: updates and key in updates[-1].snapshot.values)
+    e.remove_addr_watch(key)
+    assert key not in e.polled
+    a.fail_next(1)                             # force one TARGET_LOST
+    assert wait_for(lambda: PollerState.TARGET_LOST in states)
+    assert wait_for(lambda: states and states[-1] == PollerState.RUNNING,
+                    timeout=3.0)
+    assert wait_for(
+        lambda: updates and updates[-1].snapshot.rate_hz >= 0
+        and len(updates) >= 1, timeout=3.0)
+    assert key not in updates[-1].snapshot.values
+    assert key not in e.polled
+
+
+def test_addr_watch_range_refused(rig):
+    a, e, updates = rig
+    with pytest.raises(EngineError):
+        e.add_addr_watch(-4, "neg")
+    with pytest.raises(EngineError):
+        e.add_addr_watch(0x1_0000_0000, "big")
+
+
 def test_overlay_guards_needed_register(tmp_path):
     import shutil
     tdir = tmp_path / "t"

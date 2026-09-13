@@ -85,12 +85,26 @@ def _live_engine() -> "tuple[Engine, PyOCDAdapter]":
     Engine.load() (Poller.run() reads through the adapter directly,
     with no connect() call of its own - see core/engine/poller.py),
     then start() to bring the poller thread up. Caller owns both
-    returned objects and must stop()/disconnect() them, in that order,
-    in a finally block."""
+    returned objects on success and must stop()/disconnect() them, in
+    that order, in a finally block (see every call site below).
+
+    The connect-succeeds-but-setup-fails case is handled HERE, not by
+    callers: once connect() has claimed the probe, an exception from
+    Engine.load() or engine.start() must still disconnect it before
+    propagating - otherwise a dead session keeps holding the ST-Link
+    and every LATER test in the same run fails to connect too (the
+    cross-test poisoning this suite exists to rule out). Centralizing
+    the try/except here, rather than a None-guarded finally at each of
+    the four call sites, means a fifth test added later gets this for
+    free just by calling _live_engine()."""
     adapter = PyOCDAdapter()
     adapter.connect()
-    engine = Engine.load(TARGET_DIR, adapter, interval_s=0.02)
-    engine.start()
+    try:
+        engine = Engine.load(TARGET_DIR, adapter, interval_s=0.02)
+        engine.start()
+    except Exception:
+        adapter.disconnect()
+        raise
     return engine, adapter
 
 

@@ -16,6 +16,7 @@ license = {file = "LICENSE"}
 [project.optional-dependencies]
 ui = ["PySide6>=6.5"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2"]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 pathscope = "cli:main"

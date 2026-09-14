@@ -21,8 +21,7 @@ from ui.panels.scope_page import (COL_NAME, COL_SWATCH, COL_VALUE,
                                   NO_SOURCE_TEXT, TYPES, ScopePage,
                                   _decode_series, _default_type_for_size,
                                   _drain_interval_ms, _fit_scale_offset,
-                                  _gapped_xy, decode_value, format_value,
-                                  value_at)
+                                  decode_value, format_value, value_at)
 
 TARGET = "targets/f411"
 
@@ -663,12 +662,13 @@ def test_slow_drain_interval_caps_at_default_for_slower_firmware(qtbot):
 
 # -- v2 (M6): channel/plot behavior, adapted to the M7 trace path -----------
 
-def test_scope_plots_polled_register(qtbot):
-    """Adapted for M7: channels ride the trace path now, not a polled
-    register via History - add_address_slot()/engine._demo_trace_fw.
-    step() replace the old add_channel()/wait-for-the-poller pattern.
-    Uses the isolated (non-animate-thread) _make_demo_like_engine() so
-    this test's own deterministic step() call is the only writer."""
+def test_scope_plots_trace_channel(qtbot):
+    """Channels ride the trace path (M7): add_address_slot()/
+    engine._demo_trace_fw.step() replace the M6-era add_channel()/
+    wait-for-the-poller pattern that plotted a polled register via
+    History. Uses the isolated (non-animate-thread)
+    _make_demo_like_engine() so this test's own deterministic step()
+    call is the only writer."""
     engine = _make_demo_like_engine()
     engine.start()
     try:
@@ -700,11 +700,13 @@ def test_scope_addr_channel_via_engine(qtbot):
 
 def test_add_address_channel_relabels_existing(qtbot, monkeypatch):
     """M7 channels are slot-based (slot i == trace watch index == table
-    row), not deduped by address the way the old (deleted)
-    engine.add_addr_watch() path this test used to exercise was -
-    re-adding the same address just occupies a second, independent
-    slot; renaming an existing slot in place is the Name column's job
-    (see test_rename_channel_via_table_updates_label_and_legend)."""
+    row), not deduped by address the way this test used to exercise via
+    engine.add_addr_watch() before the M7 rework (add_addr_watch itself
+    is still kept as public Engine API, just no longer used by this
+    panel) - re-adding the same address just occupies a second,
+    independent slot; renaming an existing slot in place is the Name
+    column's job (see
+    test_rename_channel_via_table_updates_label_and_legend)."""
     page = _make_stubbed_trace_page(qtbot, monkeypatch)
     slot1 = page.add_address_slot(0x20000000, "first")
     slot2 = page.add_address_slot(0x20000000, "second")
@@ -714,26 +716,6 @@ def test_add_address_channel_relabels_existing(qtbot, monkeypatch):
     assert page.channel_slots()[slot2]["label"] == "second"
     assert page.channel_table.item(slot1, COL_NAME).text() == "first"
     assert page.channel_table.item(slot2, COL_NAME).text() == "second"
-
-
-def test_gapped_xy_even_interval_count_uses_averaged_median():
-    """_gapped_xy's median-of-intervals must average the two middle
-    values for an even interval count, not pick the upper one
-    (intervals[len//2]) - the old code's choice is always the larger
-    of a pair, which can never itself exceed GAP_FACTOR times itself,
-    so it under-detects gaps. A 2-interval (3-sample) series can never
-    demonstrate this either way - the gap value is necessarily one of
-    only two numbers averaged into its own threshold, so 3x the
-    average can never exceed it, regardless of which of the two
-    formulas is used. The smallest series where the fix is observable
-    has one more interval: 3 evenly-spaced samples (dt=0.05) followed
-    by a stall - the old median (intervals[2], one of the two largest
-    values) sets a threshold the gap fails to clear, while the
-    correct average of the two middle intervals sets it low enough
-    to flag the stall with a NaN."""
-    series = [(0.0, 0), (0.05, 1), (0.10, 2), (1.10, 3), (4.0, 4)]
-    _x, y = _gapped_xy(series, 0.0)
-    assert any(math.isnan(v) for v in y)
 
 
 def test_event_marker_hard_cap_guards_unbounded_growth(qtbot):

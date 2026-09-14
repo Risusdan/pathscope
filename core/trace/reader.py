@@ -51,7 +51,7 @@ refresh() (there is nothing to redeliver - the ring has moved past it
 by then in exactly the way self.lost already accounts for on the
 "before we even asked" side).
 
-Reducing refresh's round trips (T11 hardware gate, fix round 1): every
+Reducing refresh's round trips (found through hardware validation): every
 Engine command is a submit-and-block round trip through the poller
 thread, and on a real probe each one costs real fixed overhead (tens
 of ms) on top of whatever it actually transfers - the sim never
@@ -99,11 +99,11 @@ records accumulate between calls) under that same cap, or a slow-
 draining caller (e.g. a UI's Stop path, which only runs the slow timer)
 will silently rebuild the exact backlog this module fixed on its own
 side - see ui/panels/scope_page.py's _drain_interval_ms, which reads
-this constant for exactly that reason (T11 hardware gate, fix round 2:
-the round-1 fix alone still let a >1kHz-at-256-cap Stop hold reopen
-self.lost growth once held long enough, because the drain interval
-that round derived was sized only against the ring's own span, not
-against this per-call read cap at all).
+this constant for exactly that reason (found through hardware
+validation: an earlier version of that derivation sized the drain
+interval only against the ring's own span, not against this per-call
+read cap, which still let a >1kHz-at-256-cap Stop hold reopen
+self.lost growth once held long enough).
 
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
@@ -170,7 +170,7 @@ from .contract import (DESC_SIZE, STATUS_OK, WATCH_ADDRS_OFFSET,
                        record_word_addr, status_name)
 
 _DESC_WORDS = DESC_SIZE // 4
-# THROUGHPUT (T11 hardware gate, fix round 1): a single refresh() call
+# THROUGHPUT (found through hardware validation): a single refresh() call
 # never attempts to read more than ring_count // READ_CAP_DIVISOR
 # records - see refresh()'s own comment. A quarter of the ring keeps a
 # capped call's own transfer time a safe multiple below the ring's
@@ -179,7 +179,7 @@ _DESC_WORDS = DESC_SIZE // 4
 # traffic is virtually never actually capped (only a genuinely large
 # backlog is). Public (not module-private) - see the module docstring's
 # note on why a caller's own drain cadence must be sized against this
-# same constant (fix round 2).
+# same constant (also found through hardware validation).
 READ_CAP_DIVISOR = 4
 
 
@@ -217,7 +217,7 @@ def _filter_stable(records: List[TraceRecord], start: int, new_wr_seq: int,
 
 def _filter_current_gen(records: List[TraceRecord], expected_gen: Optional[int]
                         ) -> Tuple[List[TraceRecord], int]:
-    """IMPORTANT 3+4's honest-gap filter (see the module docstring): a
+    """The honest-gap filter (see the module docstring): a
     record surviving _filter_stable() can still have been sampled
     under a table this reader no longer trusts - a gate-window zero
     from mid-edit, or a pre-edit straggler drained after the caller
@@ -241,11 +241,11 @@ class TraceReader:
         self.desc = None  # type: Optional[TraceDesc]
         self.last_seq = -1
         self.lost = 0
-        # IMPORTANT 3+4: the generation this reader currently trusts -
+        # The generation this reader currently trusts -
         # see the module docstring and _filter_current_gen. Set at
         # discover() and on every successful set_watch().
         self._expected_gen = None  # type: Optional[int]
-        # THROUGHPUT (T11 hardware gate, fix round 1): the descriptor
+        # THROUGHPUT (found through hardware validation): the descriptor
         # read that closes out a refresh() cycle doubles as the NEXT
         # cycle's starting reference - see refresh()'s own comment and
         # the module docstring's "Reducing refresh's round trips"
@@ -300,8 +300,8 @@ class TraceReader:
         # module docstring) - and a cycle slowed that way produces an
         # even bigger backlog for the NEXT cycle to attempt, a
         # feedback loop this reader can spiral into under sustained
-        # load, confirmed directly against real hardware (T11 hardware
-        # gate, fix round 1). Capping the window read per call keeps
+        # load, confirmed directly against real hardware. Capping the
+        # window read per call keeps
         # every call's transfer time bounded, safely under the ring's
         # span, regardless of how far behind the reader ever gets - the
         # remainder simply stays live in the ring, still fully
@@ -325,7 +325,7 @@ class TraceReader:
                                        post_desc.ring_count)
         self.lost += dropped
 
-        # IMPORTANT 3+4: drop anything sampled under a table this
+        # Drop anything sampled under a table this
         # reader no longer trusts (a gate-window zero, or a pre-edit
         # straggler) - see the module docstring and
         # _filter_current_gen.
@@ -368,7 +368,7 @@ class TraceReader:
                 % (len(addrs), self.desc.max_ch))
 
         if not addrs:
-            # MUST-FIX m4: firmware's gate never validates - and so
+            # Firmware's gate never validates - and so
             # never bumps generation - for an empty table (count == 0
             # is always the "gate closed" state, never itself
             # accepted). Polling for a generation change here would
@@ -383,7 +383,7 @@ class TraceReader:
 
         prev_gen = self.desc.generation
         self._write_count(0)
-        # IMPORTANT 2(c): dwell at least one sample period after
+        # Dwell at least one sample period after
         # closing the gate before writing the new addresses - ps_trace.h
         # documents this as a should, not a must (the firmware's
         # level-based gate, see ps_trace.c, no longer depends on it for
@@ -405,11 +405,13 @@ class TraceReader:
             tries += 1
 
         if desc.generation == prev_gen:
-            # IMPORTANT 5(b): generation advancing is the only
-            # trustworthy accept signal (reliable now that CRITICAL 1
-            # keeps a stray write from ever clobbering it) - a status
+            # Generation advancing is the only
+            # trustworthy accept signal (reliable now that
+            # _compose_count_word's read-modify-write keeps a stray
+            # write from ever clobbering it) - a status
             # observed WHILE still polling is not trusted, since
-            # firmware (and the sim, faithfully - see IMPORTANT 5(a))
+            # firmware (and the sim, faithfully - see
+            # FakeTraceFirmware._handle_count_word_write in sim.py)
             # leaves a REJECTED status in place until the next accept,
             # so it could be stale from a wholly earlier rejection
             # rather than a verdict on this submission. Only once no
@@ -419,14 +421,14 @@ class TraceReader:
                     "firmware rejected table: %s" % status_name(desc.status))
             raise TraceError("firmware did not accept watch table")
 
-        # IMPORTANT 3+4: this reader now trusts the NEW generation -
+        # This reader now trusts the NEW generation -
         # every record still in flight under the old one (gate-window
         # zeros, pre-edit stragglers) will read as a mismatch on the
         # next refresh() and be dropped as an honest gap instead of
         # rendered under a layout it no longer describes.
         self._expected_gen = desc.generation
 
-        # THROUGHPUT (T11 hardware gate, fix round 1): fast-forward past
+        # THROUGHPUT (found through hardware validation): fast-forward past
         # that same in-flight backlog NOW instead of leaving refresh()
         # to read it and then drop it. Anything with seq in
         # [last_seq+1, desc.wr_seq) was necessarily sampled before this
@@ -454,7 +456,7 @@ class TraceReader:
         self.last_seq = desc.wr_seq - 1
 
     def _compose_addr_word(self, addr: int) -> int:
-        """IMPORTANT 6: wire word for one watch_addrs[] uint32 slot,
+        """Wire word for one watch_addrs[] uint32 slot,
         byte-swapped for a big-endian target the same way
         contract.encode_desc handles every multi-byte field - pack the
         value in the target's own byte order, then reinterpret those
@@ -465,7 +467,7 @@ class TraceReader:
         return struct.unpack("<I", raw)[0]
 
     def _compose_count_word(self, new_count: int, current_word: int) -> int:
-        """CRITICAL 1: the word at WATCH_COUNT_OFFSET physically holds
+        """The word at WATCH_COUNT_OFFSET physically holds
         watch_count (byte 0), generation (byte 1) and 2 reserved bytes
         (bytes 2-3) - see contract.py's WATCH_COUNT_OFFSET/
         GENERATION_OFFSET. `current_word` is the wire word most

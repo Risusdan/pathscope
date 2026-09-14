@@ -1,11 +1,9 @@
 """Scope panel: M7 replaces polling (a History-fed channel table) with
-a firmware trace-buffer scope. Task 7 ("trace plumbing") got this page
-as far as: discover the trace target, show discovery/error state, and
-render the channel table's fixed MAX_CH-row skeleton. This task
-(task 8, "channels, protocol, render") finishes the page: occupying a
-slot (watching an address on a trace channel), the watch-table
-protocol (TraceReader.set_watch), and the plotted curves themselves,
-now driven by TraceStore rather than the old per-register History.
+a firmware trace-buffer scope: this page discovers the trace target,
+shows discovery/error state, renders the channel table, occupies slots
+(watching an address on a trace channel) via the watch-table protocol
+(TraceReader.set_watch), and plots the resulting curves - all driven
+by TraceStore rather than the old per-register History.
 
 Page states (spec point 1), all rendered inline in `error_label` -
 never a dialog, the same convention as every other Inspector-family
@@ -49,13 +47,13 @@ READY. A missing symbol after a real ELF load leaves the page in
 NO_SOURCE rather than silently keeping whatever unrelated state was
 already showing.
 
-Channel slots (spec point 2, this task): `self._slots` is a
+Channel slots (spec point 2): `self._slots` is a
 List[Optional[dict]] of exactly MAX_CH entries, always kept COMPACTED
 - every occupied entry sits in a contiguous prefix starting at index 0,
 every trailing entry is None. Index i is simultaneously: the trace
 watch-table index sent to TraceReader.set_watch (slot i's address is
 list element i), the channel table's row i (CURVE_COLORS[i] is
-permanently bound to row i's swatch, per Task 7), and TraceStore
+permanently bound to row i's swatch), and TraceStore
 column i (TraceStore.series(i)/.newest(i) read that same index). Three
 different systems staying in lockstep through one shared integer is
 the whole point of the compaction invariant: add_address_slot() always
@@ -98,9 +96,8 @@ then rebuilds each occupied slot's curve from `self.store.series(row)`
 `_decode_series()` runs `decode_value()` over the finite (non-NaN)
 elements of y (cast back to int first - TraceStore's f64 is an exact
 integer-valued encoding of the wire's raw u32) and leaves NaN gap rows
-(TraceStore's own seq/gen-exact break detection, not this module's
-older statistical `_gapped_xy` - see below) untouched, so a curve drawn
-with connect="finite" still breaks there. `_apply_transform()` then
+(TraceStore's own seq/gen-exact break detection) untouched, so a curve
+drawn with connect="finite" still breaks there. `_apply_transform()` then
 applies the row's scale/offset. x is `t - t_latest`, t_latest being the
 newest real sample time across every occupied slot this tick, so the
 newest data always sits at x=0 (roll-mode, the same convention the
@@ -110,14 +107,13 @@ once, at creation (_make_slot_entry) - pyqtgraph decimates the huge
 in-memory series down to what the pixel width can actually show,
 rather than this page doing that work itself.
 
-`_gapped_xy`/`value_at` (below) are this panel's ORIGINAL (M6) gap/
-lookup helpers - both are still directly unit-tested as pure functions
-and `value_at` is still reused by the crosshair hover readout
-(`_value_text_for`, against a NaN-filtered view of the cached
-per-slot series), but neither channel curve any longer runs through
-`_gapped_xy` itself: TraceStore already knows exactly (from seq/gen,
-not a statistical median-interval guess) where a break happened, so
-gap detection for channel data moved there in this task.
+`value_at` (below) is this panel's ORIGINAL (M6) sample-lookup helper -
+still directly unit-tested as a pure function and still reused by the
+crosshair hover readout (`_value_text_for`, against a NaN-filtered view
+of the cached per-slot series). M6 also had a statistical gap detector
+here (`_gapped_xy`); it was removed once TraceStore took over exact
+seq/gen-based gap detection for channel curves (see the "Rendering"
+paragraph above) and no channel curve ran through it any longer.
 
 Drain independent of paint state (spec point 5): a SEPARATE QTimer
 (`self._drain_timer`) calls `_drain_once()` on its own, and is started
@@ -134,7 +130,7 @@ coordinate.
 While STOPPED (or tabbed away), the slow timer is the ONLY thing
 draining the ring, which makes its interval load-bearing rather than
 cosmetic: the trace ring holds only RING_COUNT records (contract.py -
-1024 as of the T11 hardware gate), so if the slow timer's period
+1024, hardware-validated), so if the slow timer's period
 exceeds the ring's own span at the firmware's sampling rate
 (ring_count * period_us), records get overwritten faster than they're
 drained and TraceReader.lost grows on every stopped tick, by
@@ -143,7 +139,7 @@ fixed interval cannot honor this for every firmware: M7's own demo
 default (period_us=5000, a 1.28s ring span at the original
 RING_COUNT=256) tolerated a fixed 500ms drain comfortably, but a real
 board sampling at 1 kHz (period_us=1000) did not at that same original
-RING_COUNT - a hardware run of the Task 10 E2E suite's run/stop test
+RING_COUNT - a hardware run of the E2E suite's run/stop test
 caught exactly this. `_drain_interval_ms()` (below) computes the
 interval fresh from whatever descriptor was actually discovered - the
 tightest of the ring's own span, DRAIN_MS_CAP, and TraceReader's own
@@ -159,7 +155,7 @@ in roughly the last roll-mode window (`engine.history.window_s`) and
 is blank otherwise - `_update_drain_health()`, called from every
 `_drain_once()`.
 
-X axis: ROLL MODE, standard-scope style, unchanged from Task 7/M6.
+X axis: ROLL MODE, standard-scope style, unchanged since M6.
 Every sample plots at sample_t - now, where now = time.monotonic() is
 captured once per refresh_plot() call and cached as `self._last_now`
 (channel curves instead use `self._last_t_latest`, the newest real
@@ -178,7 +174,11 @@ refresh (t - now) so they scroll left with their moment in history,
 exactly like the data curves. `self._t0` (dock-open time, still
 captured at construction) is no longer used for axis positioning -
 only `self._last_now` is; it survives only as a convenience anchor for
-a few tests.
+a few tests. Consequence of sharing one plot between two clock
+domains: markers/cursor track host `time.monotonic` while channel
+curves track sample_t derived from the trace-buffer seq, so a marker
+can sit up to a drain interval away from the waveform feature it
+annotates - this is inherent to the two domains, not a bug.
 
 Event markers: `add_event_marker(t, msg)` (fed by MainWindow from the
 same update path that feeds the event log) adds a vertical
@@ -227,7 +227,7 @@ clicking "Add symbol" calls `add_symbol_channel()` on the selected
 list item's text. load_symbols() reports every OBJECT symbol
 regardless of size; symbol_list carries a tooltip noting that a
 channel only ever reads one 32-bit word once wired up - this is
-documented here rather than filtered at load time, per the brief.
+documented here rather than filtered at load time.
 """
 import struct
 import time
@@ -293,17 +293,16 @@ REFRESH_MS = 200
 # firmware from being read so rarely the interval stops working as a
 # meaningful safety margin against ring overwrite while stopped.
 # _drain_interval_ms also weighs a THIRD constraint, on top of these
-# two (T11 hardware gate, fix round 2) - see its own docstring.
+# two (found through hardware validation) - see its own docstring.
 DRAIN_MS_FLOOR = 50
 DRAIN_MS_CAP = 500
-# T11 hardware gate, fix round 2: how much slack a derived drain
+# Found through hardware validation: how much slack a derived drain
 # interval leaves against TraceReader's own per-call read cap
 # (core.trace.reader.READ_CAP_DIVISOR) - see _drain_interval_ms. 0.8
 # means the interval is sized so a single refresh() call's cap can
 # drain what accumulates in one interval with 20% to spare, absorbing
 # ordinary scheduling jitter (Qt timer delivery is not real-time).
 DRAIN_CAP_SLACK = 0.8
-GAP_FACTOR = 3.0
 MARKER_PEN = "#C62828"
 CURSOR_PEN = "#1565C0"
 CROSSHAIR_PEN = "#9E9E9E"
@@ -395,8 +394,8 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
 
     INVARIANT 2 (per-call read cap): satisfying invariant 1 alone is
     NOT sufficient - TraceReader.refresh() itself never reads more than
-    ring_count // READ_CAP_DIVISOR records in one call (T11 hardware
-    gate, fix round 1's own per-call cap; core.trace.reader), and
+    ring_count // READ_CAP_DIVISOR records in one call (that per-call
+    cap; core.trace.reader), and
     _drain_once() calls refresh() exactly once per tick. A ring 4x
     bigger than before let DRAIN_MS_CAP alone bind at 1 kHz
     (ring_count=1024 -> span_ms/2 = 512, past the 500ms cap) - but the
@@ -404,9 +403,9 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
     at 1 kHz, while a single refresh() call can only ever drain 256
     (1024 // 4) of them: a ~244/tick backlog that compounds, silently
     reopening TraceReader.lost growth during a long-enough Stop hold
-    even though invariant 1 alone looked satisfied (found in T11
-    hardware gate, fix round 2 - the round-1 hw test's ~1s Stop window
-    was too short to expose it). So the interval must ALSO stay under
+    even though invariant 1 alone looked satisfied (found through
+    hardware validation - an earlier hw test's ~1s Stop window was too
+    short to expose it). So the interval must ALSO stay under
     DRAIN_CAP_SLACK of the time it takes firmware to produce a full
     cap's worth of records, guaranteeing one refresh() call can always
     drain everything a single interval accumulates, with slack to
@@ -427,44 +426,6 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
     cap_span_ms = cap_records * period_us / 1000.0 * DRAIN_CAP_SLACK
     return int(max(DRAIN_MS_FLOOR, min(DRAIN_MS_CAP, span_ms / 2.0,
                                        cap_span_ms)))
-
-
-def _gapped_xy(series: List[Tuple[float, int]], t0: float
-              ) -> Tuple[List[float], List[float]]:
-    """series -> (x, y) with a NaN inserted wherever the gap to the
-    previous sample exceeds GAP_FACTOR times the median sample
-    interval, so a pyqtgraph curve drawn with connect="finite" breaks
-    the line instead of interpolating across a stall. This is the
-    panel's original (M6) statistical gap detector; no channel curve
-    runs through it any longer (TraceStore does exact seq/gen-based
-    detection instead - see the module docstring's "Rendering"
-    paragraph) but it stays as a directly-tested pure function."""
-    if not series:
-        return [], []
-    xs = [t - t0 for t, _v in series]
-    ys = [float(v) for _t, v in series]
-    if len(xs) < 3:
-        return xs, ys
-    intervals = sorted(xs[i + 1] - xs[i] for i in range(len(xs) - 1))
-    mid = len(intervals) // 2
-    if len(intervals) % 2 == 1:
-        median = intervals[mid]
-    else:
-        # even count: true median is the average of the two middle
-        # values, not the upper one - intervals[mid] alone skews high,
-        # raising GAP_FACTOR * median enough to under-detect real
-        # gaps in a short series (see the _gapped_xy test cases).
-        median = (intervals[mid - 1] + intervals[mid]) / 2.0
-    out_x = [xs[0]]
-    out_y = [ys[0]]
-    for i in range(1, len(xs)):
-        dt = xs[i] - xs[i - 1]
-        if median > 0 and dt > GAP_FACTOR * median:
-            out_x.append((xs[i - 1] + xs[i]) / 2.0)
-            out_y.append(float("nan"))
-        out_x.append(xs[i])
-        out_y.append(ys[i])
-    return out_x, out_y
 
 
 def value_at(series: List[Tuple[float, int]], t: float) -> Optional[int]:
@@ -643,7 +604,7 @@ class ScopePage(QWidget):
         # message (e.g. "table full") that happens to still be
         # showing.
         self._refresh_error_active = False
-        # MUST-FIX m3: tracks whether error_label currently shows a
+        # Tracks whether error_label currently shows a
         # nonzero desc.status observed during a drain tick (see
         # _update_status_health), same non-clobbering rationale as
         # _refresh_error_active above.
@@ -689,8 +650,8 @@ class ScopePage(QWidget):
         # subscription never needs to be torn down and re-added.
         self.engine.on_state(self._on_engine_state)
 
-        # Top-bottom layout (a T5 hardware finding replacing the
-        # original left-right split): the channel table needs the
+        # Top-bottom layout (changed after a live hardware session found
+        # the original left-right split too cramped): the channel table needs the
         # window's full width to show its columns comfortably, so
         # the controls block sits ON TOP of the plot, the two joined
         # by a draggable vertical splitter. The page's first row is
@@ -760,7 +721,7 @@ class ScopePage(QWidget):
         self.channel_table.setSelectionMode(QTableWidget.SingleSelection)
         self.channel_table.setEditTriggers(
             QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed)
-        # No Stretch column (a T5 finding: Name in Stretch mode ate
+        # No Stretch column (found in a live hardware session: Name in Stretch mode ate
         # the whole window width and squeezed Value/Scale/Offset into
         # truncation) - every column gets a fixed sensible width and
         # the leftover space simply stays blank on the right.
@@ -825,7 +786,7 @@ class ScopePage(QWidget):
         self.elf_content.setVisible(False)
         side.addWidget(self.elf_content)
 
-        # No outer scroll area (a T5 finding: the controls block
+        # No outer scroll area (found in a live hardware session: the controls block
         # inside one let the splitter squeeze the add rows out of
         # sight behind a subtle scrollbar - "where did Load ELF
         # go?"). The block's only variable-height child is the
@@ -1143,7 +1104,7 @@ class ScopePage(QWidget):
         top_h = header_h + rows_h + frame + 40
         self.splitter.setSizes([top_h, 400])
 
-    # -- channel slots (spec point 2, this task) ------------------------------
+    # -- channel slots (spec point 2) ------------------------------------------
 
     def channel_slots(self) -> List[Optional[dict]]:
         """Test-support + the panel's own produced interface: the raw
@@ -1756,7 +1717,7 @@ class ScopePage(QWidget):
         self._update_drain_health(time.monotonic())
 
     def _update_status_health(self) -> None:
-        """MUST-FIX m3 (spec 3.4): a nonzero desc.status observed
+        """Per spec 3.4: a nonzero desc.status observed
         during a drain tick is surfaced inline, naming the code -
         previously only a set_watch() rejection ever raised on a bad
         status, so a status that stayed (or went) bad through any

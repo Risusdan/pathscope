@@ -91,8 +91,9 @@ class FakeTraceFirmware:
                  ((0x20000000, 0x20020000),), endian: str = "<"):
         # The ring physically spans RING_COUNT * RECORD_SIZE bytes from
         # ring_addr (0xC000 bytes at the contract's current constants,
-        # since the T11 hardware gate's RING_COUNT bump to 1024 - was
-        # 0x3000 at the old 256) - a desc_addr inside that span would
+        # since RING_COUNT was bumped to 1024 for hardware-validated
+        # headroom - was 0x3000 at the old 256) - a desc_addr inside
+        # that span would
         # have the descriptor's own resync silently clobbering
         # whichever ring record(s) land on the same bytes. Guard it
         # here instead of letting a future caller rediscover that the
@@ -166,7 +167,7 @@ class FakeTraceFirmware:
         self._resync()
 
     def _decode_addr_word(self, word: int) -> int:
-        """IMPORTANT 6: inverse of TraceReader._compose_addr_word -
+        """Inverse of TraceReader._compose_addr_word -
         recover the logical address a watch_addrs[] write actually
         means from the wire word it carried. The wire word is always
         the little-endian composition of the raw target bytes
@@ -181,7 +182,7 @@ class FakeTraceFirmware:
         return struct.unpack(self._endian + "I", raw)[0]
 
     def _handle_count_word_write(self, word: int) -> None:
-        """CRITICAL 1: model the real 32-bit write, not just "the host
+        """Model the real 32-bit write, not just "the host
         wants watch_count changed" - the word at WATCH_COUNT_OFFSET
         physically holds watch_count (byte 0), generation (byte 1) and
         2 reserved bytes (bytes 2-3), so a real store to this address
@@ -211,7 +212,7 @@ class FakeTraceFirmware:
                 # Rejected: count stays 0, the pending addresses simply
                 # never get committed.
         else:
-            # IMPORTANT 5(a): closing the gate (N->0) or restating a
+            # Closing the gate (N->0) or restating a
             # count needs no validation - and, matching real firmware
             # exactly (ps_trace.c only ever touches status inside the
             # accept/reject branch above), does NOT touch status

@@ -14,10 +14,11 @@ field) both mean real samples are missing or no longer comparable to
 what came before. Both are treated identically: a break, surfaced to
 series() as one inserted (t, NaN) sample pair so a pyqtgraph curve
 drawn with connect="finite" stops interpolating across it - the same
-gap-honesty contract M6's _gapped_xy (ui/panels/scope_page.py)
-applies, just detected exactly (from seq/gen equality) rather than
-statistically (from a median sample interval), since trace records
-carry an exact seq instead of M6's jittered wall-clock timestamps. The
+gap-honesty contract M6's scope page originally applied with a
+statistical detector (a median sample interval; removed once this
+store's exact detection took over), just detected exactly (from
+seq/gen equality) instead, since trace records carry an exact seq
+instead of M6's jittered wall-clock timestamps. The
 break's NaN sample pair is placed at the midpoint between the t of the
 last real sample before it and the t of the first real sample after
 it - an arbitrary but documented choice; only that it falls strictly

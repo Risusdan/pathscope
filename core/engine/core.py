@@ -103,7 +103,11 @@ class Engine:
 
     @property
     def read_ops(self) -> int:
-        """Number of block-read transactions the current sweep issues
+        """No in-tree caller since M7 (scope moved to the trace path);
+        kept deliberately as public engine API - see the M7 plan's
+        Global Constraints.
+
+        Number of block-read transactions the current sweep issues
         - len(poller.plan), one entry per contiguous block
         build_read_plan (readplan.py) merged the polled registers/
         addr-watches into. A scattered address far from everything
@@ -149,7 +153,11 @@ class Engine:
         return sorted(refused)
 
     def add_addr_watch(self, addr: int, label: str) -> str:
-        """Register a 32-bit word watch at a fixed address, keyed by
+        """No in-tree caller since M7 (scope moved to the trace path);
+        kept deliberately as public engine API - see the M7 plan's
+        Global Constraints.
+
+        Register a 32-bit word watch at a fixed address, keyed by
         the synthetic "@%08X" % addr key used everywhere else (snapshot
         values, History). Idempotent for the same addr: calling it
         again just re-sets the label. Refuses out-of-range, guarded,

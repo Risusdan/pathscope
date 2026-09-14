@@ -23,7 +23,7 @@
 /** @brief Maximum number of watched channels (contract section 3.1). */
 #define PS_TRACE_MAX_CH      10u
 /** @brief Ring buffer depth, in records.
- *  @details CONTRACT-VALUE CHANGE (T11 hardware gate, fix round 1):
+ *  @details CONTRACT-VALUE CHANGE (found through hardware validation):
  *           256 -> 1024. A real probe's per-command latency (tens of
  *           ms of fixed overhead plus real transfer time for a large
  *           block read) made the 256-deep/256ms-span ring too small

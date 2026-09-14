@@ -3,7 +3,9 @@ page will plot from. Records arrive already stability-filtered by
 TraceReader (Task 3) - the store does not re-validate them, but a seq
 gap or a generation change in what it receives is a real loss and must
 become a NaN break in series(), matching M6's gap-honest
-connect="finite" plotting (_gapped_xy in ui/panels/scope_page.py)."""
+connect="finite" plotting (originally scope_page.py's own statistical
+gap detector, since removed in favor of this store's exact detection).
+"""
 import numpy as np
 
 from core.trace.contract import TraceRecord, parse_desc

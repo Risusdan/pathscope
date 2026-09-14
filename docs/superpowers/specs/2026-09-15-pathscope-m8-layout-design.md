@@ -102,7 +102,13 @@ painful part.
 - Explicit-path endpoint auto-tracking on block move (v1: endpoints
   are draggable anchors, never deletable; re-anchor by hand after
   moving a block - a documented limitation of the full-polyline
-  points schema).
+  points schema). This is scoped to edges that HAVE an explicit path
+  only - a pointless (auto-routed) edge's anchors already follow a
+  moved block live (section 3), including immediately after
+  auto-layout, undo, and revert, and a pointed edge whose waypoints
+  get deleted back down to auto-routing picks up a fresh
+  block-anchored line at that moment rather than replaying its old
+  explicit path.
 
 ## 8. Validation
 

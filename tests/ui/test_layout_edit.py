@@ -885,6 +885,23 @@ def test_revert_restores_original_geometry(qtbot, tmp_path):
     assert win.layout_dirty_label.isVisible() is False
 
 
+def _point_on_block_boundary(pt, geom) -> bool:
+    """True if `pt` (a QPointF) sits on the boundary rectangle of a
+    block whose geometry() is `geom` - used to check a re-routed
+    wire's endpoint actually anchors to its (possibly just-moved)
+    block, without depending on straight_route_points' exact side/frac
+    choice (which side of the rect it lands on is a routing detail;
+    landing ON the rect at all is the invariant under test)."""
+    x, y, w, h = geom
+    px, py = pt.x(), pt.y()
+    eps = 1e-6
+    on_vertical = ((abs(px - x) < eps or abs(px - (x + w)) < eps)
+                  and y - eps <= py <= y + h + eps)
+    on_horizontal = ((abs(py - y) < eps or abs(py - (y + h)) < eps)
+                     and x - eps <= px <= x + w + eps)
+    return on_vertical or on_horizontal
+
+
 def test_auto_layout_moves_blocks_clears_wire_points_and_one_undo_restores(
         qtbot):
     engine, win = _build_window(qtbot)
@@ -894,7 +911,10 @@ def test_auto_layout_moves_blocks_clears_wire_points_and_one_undo_restores(
                        for bid, item in win.blocks.items()}
     original_wire_points = {eid: list(wire.edge.points)
                             for eid, wire in win.wires.items()}
+    original_wire_pts = {eid: list(wire.pts)
+                         for eid, wire in win.wires.items()}
     assert any(original_wire_points.values())   # sanity: some start pointed
+    assert any(not p for p in original_wire_points.values())  # some don't
 
     from core.target.autolayout import auto_layout
     expected = auto_layout(list(engine.topology.blocks.values()),
@@ -902,13 +922,31 @@ def test_auto_layout_moves_blocks_clears_wire_points_and_one_undo_restores(
 
     win._on_auto_layout()
 
+    moved_blocks = {bid: item.geometry() for bid, item in win.blocks.items()}
     for bid, item in win.blocks.items():
         assert item.geometry()[:2] == expected[bid]
     assert all(wire.edge.points == [] for wire in win.wires.values())
     assert win._layout_dirty is True
     assert win.layout_dirty_label.isVisible() is True
-    assert all(w.edge_key() in win._dirty_wire_keys
-              for w in win.wires.values())
+
+    # M8 fix round 2 CRITICAL: every wire is now pointless (cleared
+    # above) and must actually re-route to the MOVED blocks - not keep
+    # rendering whatever it was drawing before auto-layout ran.
+    for wire in win.wires.values():
+        src_geom = moved_blocks[wire.edge.src]
+        dst_geom = moved_blocks[wire.edge.dst]
+        assert _point_on_block_boundary(wire.pts[0], src_geom)
+        assert _point_on_block_boundary(wire.pts[-1], dst_geom)
+
+    # M8 fix round 2 IMPORTANT: only a wire that ACTUALLY had explicit
+    # points before the clear is dirty - an already-pointless wire's
+    # yaml entry must stay untouched by Save (see the dedicated
+    # byte-identical save test below).
+    for eid, wire in win.wires.items():
+        if original_wire_points[eid]:
+            assert wire.edge_key() in win._dirty_wire_keys
+        else:
+            assert wire.edge_key() not in win._dirty_wire_keys
 
     win._on_layout_undo()
 
@@ -916,6 +954,119 @@ def test_auto_layout_moves_blocks_clears_wire_points_and_one_undo_restores(
         assert item.geometry() == original_blocks[bid]
     for eid, wire in win.wires.items():
         assert wire.edge.points == original_wire_points[eid]
+        # M8 fix round 2: the RENDERED path is back too, not just the
+        # logical edge.points - matters for the 2 originally-pointless
+        # wires, whose auto-route fallback must also have been
+        # refreshed back to the restored block positions.
+        assert wire.pts == original_wire_pts[eid]
+
+
+def test_wire_auto_route_fallback_is_correct_immediately_after_construction(
+        qtbot):
+    # M8 fix round 2 CRITICAL, isolating the construction-time half of
+    # the fix from the gesture-triggered half: apply_points([]) is
+    # callback-silent (never fires on_geometry_changed, so none of
+    # MainWindow's gesture-driven refresh_auto_route calls can be
+    # responsible) - if this already renders a fresh straight route
+    # instead of the frozen original dog-leg, WireItem's auto-route
+    # fallback must have been corrected by the time MainWindow's
+    # __init__ finished, before any gesture ever ran.
+    engine, win = _build_window(qtbot)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    original_dogleg = list(wire.pts)
+    assert len(wire.edge.points) == 4   # f411's adc1->mux0 dog-leg
+
+    wire.apply_points([])
+
+    from ui.diagram.items import _straight_route_points
+    expected = _straight_route_points(win.blocks["adc1"], win.blocks["mux0"],
+                                      wire.edge)
+    assert wire.pts == expected
+    assert wire.pts != original_dogleg
+
+
+def test_born_pointed_edge_delete_to_auto_route_renders_fresh_straight_line(
+        qtbot):
+    # M8 fix round 2 CRITICAL, end to end via the real interactive
+    # delete path (handles included): deleting a born-pointed edge's
+    # waypoints down to auto-route must render a fresh 2-point
+    # straight line between the CURRENT block anchors, not the frozen
+    # original dog-leg - and the handles must be gone.
+    engine, win = _build_window(qtbot)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    original_dogleg = list(wire.pts)
+    win.edit_layout_btn.setChecked(True)
+    assert len(wire._handles) == 4
+
+    # 4 points (2 anchors + 2 interior) -> one interior delete leaves 3
+    # (still explicit) -> a second interior delete collapses to [].
+    wire._handles[1].keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
+    wire._handles[1].keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
+
+    assert wire.edge.points == []
+    assert wire._handles == []
+    from ui.diagram.items import _straight_route_points
+    expected = _straight_route_points(win.blocks["adc1"], win.blocks["mux0"],
+                                      wire.edge)
+    assert wire.pts == expected
+    assert wire.pts != original_dogleg
+
+
+def test_block_drag_commit_reroutes_attached_pointless_wires(qtbot):
+    # M8 fix round 2 CRITICAL: spec 3's "anchors follow their block"
+    # for a pointless (auto-routed) edge, live during a plain drag -
+    # not just after auto-layout/undo/revert.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+    assert wire.edge.points == []          # f411's born-pointless edge
+    original_pts = list(wire.pts)
+
+    _drag_block(win.blocks["dma2"], 700, 700)
+
+    from ui.diagram.items import _straight_route_points
+    expected = _straight_route_points(win.blocks["mux0"], win.blocks["dma2"],
+                                      wire.edge)
+    assert wire.pts == expected
+    assert wire.pts != original_pts
+    assert wire.edge.points == []          # still pointless - only the
+                                            # RENDERED path moved
+
+
+def test_auto_layout_save_leaves_never_pointed_edge_lines_byte_identical(
+        qtbot, tmp_path):
+    # M8 fix round 2 IMPORTANT: auto-layout used to mark EVERY wire
+    # dirty, so Save stamped `points: []` onto edges that never had a
+    # points: entry - breaking the clean-diff promise (spec section
+    # 5). Only a wire that ACTUALLY had explicit points before the
+    # clear may end up in the saved patch.
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    yaml_path = tdir / "f411.topology.yaml"
+    original_lines = yaml_path.read_text().splitlines()
+    orig_pointless_line = next(l for l in original_lines
+                               if "from: mux0" in l and "to: dma2" in l)
+    assert "points" not in orig_pointless_line   # sanity: born pointless
+
+    engine, win = _build_window(qtbot, str(tdir))
+    win.edit_layout_btn.setChecked(True)
+    win._on_auto_layout()
+    win._on_save_layout()
+
+    new_lines = yaml_path.read_text().splitlines()
+    new_pointless_line = next(l for l in new_lines
+                              if "from: mux0" in l and "to: dma2" in l)
+    assert new_pointless_line == orig_pointless_line   # byte-identical
+
+    # Contrast: an edge that DID start with explicit points is cleared
+    # and DOES get saved.
+    reloaded = load_topology(str(yaml_path), engine.model)
+    trgo_edge = next(e for e in reloaded.edges
+                     if e.src == "tim1" and e.dst == "mux0")
+    assert trgo_edge.points == []
 
 
 def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):

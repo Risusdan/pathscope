@@ -13,7 +13,7 @@ changes are per task-8's porting instructions:
     the prototype's stub dicts (`spec["x"]` -> `block.x`, etc).
   - badge lookups go through the sparse `state.badges` dict via .get().
 """
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
@@ -319,15 +319,81 @@ def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
     return (p.x() - cx) ** 2 + (p.y() - cy) ** 2
 
 
+# ---------------------------------------------------------------------------
+# M8 task 5 fix round 2: live auto-route recompute. Duplicates
+# scene.py's _side_point/_ranges_overlap/_facing_sides/_straight_route
+# routing math rather than importing it - scene.py already imports
+# BlockItem/WireItem FROM this module, so the reverse import would
+# cycle. Keep this in sync with scene.py's copy if the routing
+# algorithm ever changes (same side-facing preference, same declared-
+# port lookup, same 2-point straight result).
+# ---------------------------------------------------------------------------
+
+
+def _side_point(block: Block, w: float, h: float, side: str,
+                frac: float) -> Tuple[float, float]:
+    if side == "l":
+        return block.x, block.y + h * frac
+    if side == "r":
+        return block.x + w, block.y + h * frac
+    if side == "t":
+        return block.x + w * frac, block.y
+    return block.x + w * frac, block.y + h   # "b"
+
+
+def _ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
+    return a0 < b1 and b0 < a1
+
+
+def _facing_sides(src: Block, sw: float, sh: float, dst: Block, dw: float,
+                  dh: float) -> Tuple[str, str]:
+    if not _ranges_overlap(src.x, src.x + sw, dst.x, dst.x + dw):
+        if src.x + sw <= dst.x:
+            return "r", "l"
+        return "l", "r"
+    if src.y + sh <= dst.y:
+        return "b", "t"
+    return "t", "b"
+
+
+def _straight_route_points(src_item: "BlockItem", dst_item: "BlockItem",
+                           edge: Edge) -> List[QPointF]:
+    """Two-point straight route between src_item/dst_item's CURRENT
+    geometry, honoring the edge's declared ports if any - identical
+    algorithm to scene.py's _straight_route (see the module comment
+    above for why it is duplicated rather than imported), just reading
+    block position/size off the two BlockItems directly instead of a
+    topology+blocks-dict pair. Used both by build_scene indirectly (a
+    pointless edge's initial path) and by WireItem.refresh_auto_route
+    (recomputing that same route later, after a block has moved)."""
+    src_b, dst_b = src_item.block, dst_item.block
+    side_s, side_d = _facing_sides(src_b, src_item.w, src_item.h,
+                                   dst_b, dst_item.w, dst_item.h)
+    frac_s = frac_d = 0.5
+    port = src_b.ports.get(edge.src_port) if edge.src_port else None
+    if port:
+        side_s, frac_s = port
+    port = dst_b.ports.get(edge.dst_port) if edge.dst_port else None
+    if port:
+        side_d, frac_d = port
+    p0 = _side_point(src_b, src_item.w, src_item.h, side_s, frac_s)
+    p1 = _side_point(dst_b, dst_item.w, dst_item.h, side_d, frac_d)
+    return [QPointF(*p0), QPointF(*p1)]
+
+
 class WireItem(QGraphicsItem):
     """Renders one Edge as a polyline: the explicit full path from
     edge.points when non-empty (index 0 and -1 are the source/dest
     anchors, everything between is an interior waypoint), an
     auto-routed straight line to the connected blocks' ports
-    otherwise. Limitation: once an edge has an explicit path its
-    anchors do not re-track a moved block (this has always been true
-    of hand-authored edges too) - drag the endpoint's WaypointHandle
-    to manually re-anchor it after moving a block."""
+    otherwise. An auto-routed (pointless) wire's line DOES follow its
+    blocks live - MainWindow calls refresh_auto_route() after every
+    block-geometry change (M8 task 5 fix round 2; see that method's
+    docstring). The one remaining limitation is explicit paths: once
+    an edge has one, its own anchors do not re-track a moved block
+    (this has always been true of hand-authored edges too) - drag the
+    endpoint's WaypointHandle to manually re-anchor it after moving a
+    block."""
 
     def __init__(self, edge: Edge, pts, state):
         super().__init__()
@@ -338,18 +404,22 @@ class WireItem(QGraphicsItem):
         # M8 task 4 (waypoint editing): _editable gates whether
         # WaypointHandle children exist at all - they are created
         # lazily by set_editable(True) and torn down by
-        # set_editable(False), never merely hidden. _auto_pts is the
-        # path this WireItem was FIRST constructed with, cached
-        # unconditionally: for an edge that started pointless (no
-        # edge.points) this is exactly the auto-routed 2-point line
-        # from build_scene's _straight_route, so it is the correct
-        # fallback when the user deletes every explicit waypoint back
-        # to edge.points == [] (see remove_point). WireItem has no
+        # set_editable(False), never merely hidden.
+        #
+        # _auto_pts is this wire's cached straight-line auto-route
+        # fallback - what edge.points collapses back to on deleting
+        # the last waypoint (remove_point) or via apply_points([]).
+        # Seeded from `pts` unconditionally here, which is only
+        # correct for an edge that started pointless (build_scene
+        # passes the true auto-route as `pts` in that case); for an
+        # edge that started WITH an explicit path this seed is wrong
+        # (it is that original path, not a straight route) until
+        # refresh_auto_route() runs at least once - see that method's
+        # docstring for who calls it and when. WireItem has no
         # reference to the src/dst BlockItems (only DiagramState,
-        # which carries no block geometry), so it cannot recompute a
-        # fresh auto-route on demand if the blocks have since moved -
-        # this cached snapshot is the best available fallback without
-        # widening this task's touched files.
+        # which carries no block geometry), so it cannot compute a
+        # correct route on its own; refresh_auto_route(blocks) is the
+        # owner-supplied fix for that.
         self._editable = False
         self._handles: List["WaypointHandle"] = []
         self._auto_pts = list(pts)
@@ -416,6 +486,49 @@ class WireItem(QGraphicsItem):
         if self._editable:
             self._rebuild_handles()
         self.update()
+
+    def refresh_auto_route(self, blocks: "Dict[str, BlockItem]") -> None:
+        """Recomputes this wire's straight-line auto-route fallback
+        (_straight_route_points, above - the same side-facing +
+        declared-port routing build_scene used to seed a pointless
+        edge's initial path) from `blocks`' CURRENT geometry, and
+        refreshes self._auto_pts to match.
+
+        If this wire is CURRENTLY auto-routed (edge.points is empty -
+        no explicit path), the fresh route is also applied as the
+        rendered path immediately (prepareGeometryChange + repaint) -
+        so a pointless edge's line keeps following its connected
+        blocks, per spec section 3's "anchors follow their block".
+        An edge with an explicit path only gets its _auto_pts fallback
+        refreshed quietly; self.pts (the explicit path itself) is
+        untouched - explicit-path endpoints still do not re-track a
+        moved block (see the class docstring's one remaining
+        limitation).
+
+        MainWindow - the only owner with a full id -> BlockItem map -
+        is responsible for calling this for every wire: once right
+        after build_scene (a wire that started with an explicit path
+        seeds _auto_pts wrong, from its OWN original path rather than
+        a straight route - see __init__'s comment - so this call
+        corrects that before any gesture can expose it), and again
+        after every block-geometry change - a drag/resize commit,
+        auto-layout, undo, or revert - so both a currently-pointless
+        wire's rendering and any wire's fallback (for a LATER delete/
+        apply_points([]) back to auto-route) stay correct. Never fires
+        on_geometry_changed - this is a passive re-derivation, not a
+        new user gesture. A no-op if either endpoint block is missing
+        from `blocks` (defensive only; MainWindow always passes its
+        own complete self.blocks, which contains every block)."""
+        src_item = blocks.get(self.edge.src)
+        dst_item = blocks.get(self.edge.dst)
+        if src_item is None or dst_item is None:
+            return
+        self._auto_pts = _straight_route_points(src_item, dst_item,
+                                                self.edge)
+        if not self.edge.points:
+            self.prepareGeometryChange()
+            self.pts = list(self._auto_pts)
+            self.update()
 
     def remove_point(self, index: int) -> None:
         """Delete key on a selected WaypointHandle: removes an

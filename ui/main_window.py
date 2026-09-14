@@ -87,6 +87,17 @@ class MainWindow(QMainWindow):
         self.diagram_state = DiagramState()
         self.scene, self.blocks, self.wires = build_scene(
             engine.topology, self.diagram_state)
+        # M8 task 5 fix round 2: a wire that started with an explicit
+        # path seeds its auto-route fallback wrong (WireItem.__init__'s
+        # comment) - correct every wire's fallback right away, before
+        # the window is ever shown, so even a first-interaction
+        # delete-back-to-auto-route already renders a fresh straight
+        # route instead of the frozen original path. Harmless/no-op
+        # rendering-wise for wires that still have explicit points
+        # (refresh_auto_route only touches the fallback cache for
+        # those, never self.pts).
+        for wire in self.wires.values():
+            wire.refresh_auto_route(self.blocks)
         self.legend = LegendItem(self.diagram_state)
         self.scene.addItem(self.legend)
 
@@ -460,6 +471,13 @@ class MainWindow(QMainWindow):
             wire = self.wires.get(eid)
             if wire is not None:
                 wire.apply_points(points)
+        # M8 task 5 fix round 2: blocks above may have just moved (this
+        # is undo's only call site) - re-route every currently-pointless
+        # wire from their RESTORED geometry, and refresh every wire's
+        # auto-route fallback to match, same as every other site that
+        # changes block geometry (see refresh_auto_route's docstring).
+        for wire in self.wires.values():
+            wire.refresh_auto_route(self.blocks)
 
     def _on_layout_geometry_changed(self) -> None:
         """Wired to diagram_state.on_geometry_changed - fires once per
@@ -483,6 +501,16 @@ class MainWindow(QMainWindow):
         self._layout_world = new
         self._layout_dirty = True
         self._update_layout_dirty_label()
+        # M8 task 5 fix round 2: this fires after EVERY gesture, block
+        # drag/resize commits included - re-route every currently-
+        # pointless wire from the blocks' now-current geometry (a no-op
+        # for a wire whose endpoints did not move) and refresh every
+        # wire's auto-route fallback, so a pointless edge's line keeps
+        # following a dragged block (spec 3) and a later delete-to-
+        # auto-route on an explicit-path wire never falls back to a
+        # stale route.
+        for wire in self.wires.values():
+            wire.refresh_auto_route(self.blocks)
 
     def _on_layout_undo(self) -> None:
         if not self.diagram_state.edit_mode or not self._undo_stack:
@@ -564,6 +592,13 @@ class MainWindow(QMainWindow):
         self.legend.apply_geometry(lx, ly, 0, 0)
         self.engine.topology.legend = fresh.legend
 
+        # M8 task 5 fix round 2: blocks above were just reverted to
+        # their on-disk geometry - re-route every currently-pointless
+        # wire from THAT geometry (and refresh every wire's fallback),
+        # same as every other block-geometry-changing site.
+        for wire in self.wires.values():
+            wire.refresh_auto_route(self.blocks)
+
         self._undo_stack = []
         self._dirty_wire_keys = set()
         self._layout_dirty = False
@@ -575,11 +610,19 @@ class MainWindow(QMainWindow):
         """auto_layout() only returns (x, y) - width/height are kept as
         they currently are on each item. Explicit edge points are
         cleared on EVERY wire (spec 6: auto-layout re-routes everything
-        straight, not just the blocks it moved), so every edge is
-        marked touched regardless of whether its points actually
-        changed. One undo snapshot is pushed up front (apply_geometry/
-        apply_points are callback-silent, so this method owns pushing
-        it) so a single Z restores the pre-auto-layout picture whole."""
+        straight, not just the blocks it moved) and every wire is
+        re-routed from the NEW block positions (fix round 2:
+        refresh_auto_route, so a pointless wire's line actually follows
+        its moved blocks instead of rendering its pre-auto-layout
+        path) - but only a wire that ACTUALLY HAD explicit points
+        before the clear is added to the dirty set (fix round 2: a
+        wire that was already pointless gains nothing to save, and
+        marking it dirty would stamp a needless `points: []` onto an
+        edge entry that never had one, breaking the clean-diff
+        promise - spec section 5). One undo snapshot is pushed up
+        front (apply_geometry/apply_points are callback-silent, so
+        this method owns pushing it) so a single Z restores the
+        pre-auto-layout picture whole."""
         self._undo_stack.append(self._layout_world)
 
         positions = auto_layout(list(self.engine.topology.blocks.values()),
@@ -592,8 +635,11 @@ class MainWindow(QMainWindow):
             item.apply_geometry(x, y, w, h)
 
         for wire in self.wires.values():
+            had_points = bool(wire.edge.points)
             wire.apply_points([])
-            self._dirty_wire_keys.add(wire.edge_key())
+            wire.refresh_auto_route(self.blocks)
+            if had_points:
+                self._dirty_wire_keys.add(wire.edge_key())
 
         self._layout_dirty = True
         self._layout_world = self._capture_layout_world()

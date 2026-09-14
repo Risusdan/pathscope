@@ -189,6 +189,100 @@ def test_resize_clamps_to_minimum(qtbot):
     assert (item.block.w, item.block.h) == (30, 24)
 
 
+# -- gesture no-op guard: a click-only press+release (no movement) must
+# -- not fire on_geometry_changed; a real move still fires exactly once.
+
+
+def test_block_click_only_press_release_fires_nothing(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    item.set_editable(True)
+
+    item.mousePressEvent(_FakeEvent())     # no setPos between press/release
+    item.mouseReleaseEvent(_FakeEvent())
+
+    assert calls == []
+
+
+def test_block_real_move_via_press_and_release_fires_once(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    item.set_editable(True)
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(103, 118)
+    item.mouseReleaseEvent(_FakeEvent())
+
+    assert (item.block.x, item.block.y) == (100, 120)
+    assert calls == [1]
+
+    # a second click-only press/release right after must stay silent -
+    # the baseline moved with the committed geometry.
+    item.mousePressEvent(_FakeEvent())
+    item.mouseReleaseEvent(_FakeEvent())
+    assert calls == [1]
+
+
+def test_resize_click_only_press_release_fires_nothing(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    item.set_editable(True)
+
+    item.handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(0, 0)))
+    # no mouseMoveEvent - handle released in place
+    item.handle.mouseReleaseEvent(_FakeEvent())
+
+    assert calls == []
+    assert (item.block.w, item.block.h) == (140, 80)
+
+
+def test_resize_real_move_fires_exactly_once(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    item.set_editable(True)
+
+    item.handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(0, 0)))
+    item.handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(23, 23)))
+    item.handle.mouseReleaseEvent(_FakeEvent())
+
+    assert calls == [1]
+
+
+def test_legend_click_only_press_release_fires_nothing(qtbot):
+    state = DiagramState()
+    legend = LegendItem(state)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    legend.set_editable(True)
+
+    legend.mousePressEvent(_FakeEvent())
+    legend.mouseReleaseEvent(_FakeEvent())
+
+    assert calls == []
+
+
+def test_legend_real_move_fires_exactly_once(qtbot):
+    state = DiagramState()
+    legend = LegendItem(state)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    legend.set_editable(True)
+
+    legend.mousePressEvent(_FakeEvent())
+    legend.setPos(103, 118)
+    legend.mouseReleaseEvent(_FakeEvent())
+
+    assert calls == [1]
+
+
 # -- BlockItem geometry()/apply_geometry() (undo restore path) -----------
 
 
@@ -203,6 +297,32 @@ def test_block_geometry_roundtrip(qtbot):
     assert (item.block.x, item.block.y) == (55, 66)
     assert (item.block.w, item.block.h) == (77, 88)
     assert (item.pos().x(), item.pos().y()) == (55, 66)
+
+
+def test_apply_geometry_on_editable_block_bypasses_snap(qtbot):
+    # 73/118 are not multiples of the 10-unit grid; apply_geometry's
+    # undo restore must land exactly there even mid-edit-mode, not get
+    # intercepted by itemChange's live snap like a real drag would.
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+
+    item.apply_geometry(73, 118, 77, 88)
+
+    assert (item.block.x, item.block.y) == (73, 118)
+    assert (item.pos().x(), item.pos().y()) == (73, 118)
+    assert item.geometry() == (73, 118, 77, 88)
+
+
+def test_apply_geometry_on_editable_legend_bypasses_snap(qtbot):
+    state = DiagramState()
+    legend = LegendItem(state)
+    legend.set_editable(True)
+
+    legend.apply_geometry(73, 118, 0, 0)
+
+    assert (legend.pos().x(), legend.pos().y()) == (73, 118)
+    assert legend.geometry() == (73, 118, 0, 0)
 
 
 # -- LegendItem: set_editable/geometry/apply_geometry, position source ---

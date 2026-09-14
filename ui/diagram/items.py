@@ -93,6 +93,16 @@ class BlockItem(QGraphicsItem):
         self.h = block.h if block.h is not None else dh
         self.setPos(block.x, block.y)
         self._editable = False
+        # _applying suppresses the itemChange grid-snap for
+        # apply_geometry's own programmatic setPos (undo restore must
+        # land the item at the exact requested x/y, snap-aligned or
+        # not, even while the item is editable). _geom_at_press is the
+        # gesture-start baseline (captured in mousePressEvent, and
+        # re-synced on every commit) so mouseReleaseEvent can skip a
+        # no-op click-only press/release instead of always firing
+        # on_geometry_changed.
+        self._applying = False
+        self._geom_at_press = (int(block.x), int(block.y))
         self.handle = _ResizeHandle(self)
         self.handle.setVisible(False)
         self._position_handle()
@@ -111,17 +121,26 @@ class BlockItem(QGraphicsItem):
         return (int(pos.x()), int(pos.y()), int(self.w), int(self.h))
 
     def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
-        """Undo restore path: moves the item AND updates self.block."""
+        """Undo restore path: moves the item AND updates self.block.
+        setPos is wrapped in _applying so itemChange's live grid-snap
+        does not intercept this programmatic move - the restored
+        position must land exactly, snap-aligned or not."""
         self.prepareGeometryChange()
         self.w, self.h = w, h
         self.block.w, self.block.h = w, h
-        self.setPos(x, y)
-        self.block.x, self.block.y = x, y
+        self._applying = True
+        try:
+            self.setPos(x, y)
+        finally:
+            self._applying = False
+        self.block.x, self.block.y = int(x), int(y)
+        self._geom_at_press = (int(x), int(y))
         self._position_handle()
         self.update()
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionChange and self._editable:
+        if (change == QGraphicsItem.ItemPositionChange and self._editable
+                and not self._applying):
             return QPointF(snap(value.x(), _fine_snap()),
                            snap(value.y(), _fine_snap()))
         return super().itemChange(change, value)
@@ -200,6 +219,9 @@ class BlockItem(QGraphicsItem):
             p.drawText(r, Qt.AlignCenter, str(badge.count))
 
     def mousePressEvent(self, ev):
+        if self._editable:
+            pos = self.pos()
+            self._geom_at_press = (int(pos.x()), int(pos.y()))
         if self.state.edit_mode:
             ev.accept()
             return
@@ -213,8 +235,11 @@ class BlockItem(QGraphicsItem):
     def mouseReleaseEvent(self, ev):
         if self._editable:
             pos = self.pos()
-            self.block.x, self.block.y = int(pos.x()), int(pos.y())
-            self.state.on_geometry_changed()
+            new_xy = (int(pos.x()), int(pos.y()))
+            if new_xy != self._geom_at_press:
+                self.block.x, self.block.y = new_xy
+                self.state.on_geometry_changed()
+            self._geom_at_press = new_xy
         ev.accept()
 
 
@@ -266,13 +291,15 @@ class _ResizeHandle(QGraphicsItem):
         fine = _fine_snap()
         w = max(_MIN_BLOCK_W, snap(block_item.w, fine))
         h = max(_MIN_BLOCK_H, snap(block_item.h, fine))
+        changed = (w, h) != (int(self._start_w), int(self._start_h))
         block_item.prepareGeometryChange()
         block_item.w, block_item.h = w, h
-        block_item.block.w, block_item.block.h = w, h
         block_item._position_handle()
         block_item.update()
+        if changed:
+            block_item.block.w, block_item.block.h = w, h
+            block_item.state.on_geometry_changed()
         self._drag_from = None
-        block_item.state.on_geometry_changed()
         ev.accept()
 
 
@@ -391,8 +418,15 @@ class LegendItem(QGraphicsItem):
         super().__init__()
         self.state = state
         self._editable = False
+        # See BlockItem's matching fields: _applying suppresses the
+        # itemChange grid-snap for apply_geometry's own setPos;
+        # _geom_at_press is the gesture-start baseline that lets
+        # mouseReleaseEvent skip firing on_geometry_changed for a
+        # no-op click-only press/release.
+        self._applying = False
         x, y = state.legend_pos or (700, 402)
         self.setPos(x, y)
+        self._geom_at_press = (int(x), int(y))
         self.setZValue(5)
 
     def set_editable(self, on: bool) -> None:
@@ -406,18 +440,36 @@ class LegendItem(QGraphicsItem):
 
     def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
         """Undo restore path; the legend has no w/h so those are
-        ignored, matching geometry()'s (x, y, 0, 0)."""
-        self.setPos(x, y)
+        ignored, matching geometry()'s (x, y, 0, 0). setPos is wrapped
+        in _applying so itemChange's live grid-snap does not
+        intercept this programmatic move."""
+        self._applying = True
+        try:
+            self.setPos(x, y)
+        finally:
+            self._applying = False
+        self._geom_at_press = (int(x), int(y))
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionChange and self._editable:
+        if (change == QGraphicsItem.ItemPositionChange and self._editable
+                and not self._applying):
             return QPointF(snap(value.x(), _fine_snap()),
                            snap(value.y(), _fine_snap()))
         return super().itemChange(change, value)
 
+    def mousePressEvent(self, ev):
+        if self._editable:
+            pos = self.pos()
+            self._geom_at_press = (int(pos.x()), int(pos.y()))
+        ev.accept()
+
     def mouseReleaseEvent(self, ev):
         if self._editable:
-            self.state.on_geometry_changed()
+            pos = self.pos()
+            new_xy = (int(pos.x()), int(pos.y()))
+            if new_xy != self._geom_at_press:
+                self.state.on_geometry_changed()
+            self._geom_at_press = new_xy
         ev.accept()
 
     def boundingRect(self):

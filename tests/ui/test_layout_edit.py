@@ -5,6 +5,7 @@ BlockItem/WireItem/WaypointHandle/LegendItem's own event handlers
 directly rather than going through Qt's event loop (offscreen
 platform, no real mouse)."""
 import dataclasses
+import shutil
 
 import pytest
 from PySide6.QtCore import QPointF, Qt
@@ -12,9 +13,13 @@ from PySide6.QtGui import QImage, QPainter
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from core.target.topology import Edge
+from core.target.layout_io import LayoutPatchError
+from core.target.topology import Edge, load_topology
+from ui.bridge import EngineBridge
+from ui.demo import make_demo_engine
 from ui.diagram.items import LegendItem, WireItem, snap
 from ui.diagram.scene import DiagramState, build_scene
+from ui.main_window import MainWindow
 
 
 class _FakeEvent:
@@ -696,3 +701,218 @@ def test_apply_points_rejects_single_point_list():
 
     with pytest.raises(ValueError):
         wire.apply_points([(5, 5)])
+
+
+# -- M8 task 5: MainWindow integration - mode toggle, undo, save/revert --
+#
+# Unlike the item-level tests above (which drive BlockItem/WireItem
+# handlers directly against a bare DiagramState), these build a real
+# MainWindow over Engine.load so the toggle/undo/save/revert/auto-
+# layout wiring under test is exercised end to end - the toolbar
+# button, the item layer, and (for save/revert) the actual target
+# directory's *.topology.yaml on disk.
+
+
+def _build_window(qtbot, target_dir="targets/f411"):
+    engine = Engine.load(target_dir, MockAdapter({}))
+    bridge = EngineBridge(engine)
+    win = MainWindow(engine, bridge)
+    qtbot.addWidget(win)
+    win.show()
+    return engine, win
+
+
+def _drag_block(item, x, y):
+    """Same press/setPos/release gesture the item-level tests above
+    drive directly - fires DiagramState.on_geometry_changed exactly
+    once via BlockItem.mouseReleaseEvent, this time through whatever
+    handler MainWindow wired there."""
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(x, y)
+    item.mouseReleaseEvent(_FakeEvent())
+
+
+def test_edit_toggle_sets_state_and_every_item_editable_both_ways(qtbot):
+    # The CRITICAL combination (task handover note): edit_mode and
+    # every item's own set_editable must always flip together, never
+    # independently - drag/resize commits gate on the latter, click
+    # suppression on the former.
+    engine, win = _build_window(qtbot)
+    assert win.diagram_state.edit_mode is False
+    assert win.layout_edit_strip.isVisible() is False
+
+    win.edit_layout_btn.setChecked(True)
+    assert win.diagram_state.edit_mode is True
+    assert win.blocks and all(item._editable for item in win.blocks.values())
+    assert win.wires and all(w._editable for w in win.wires.values())
+    assert win.legend._editable is True
+    assert win.layout_edit_strip.isVisible() is True
+
+    win.edit_layout_btn.setChecked(False)
+    assert win.diagram_state.edit_mode is False
+    assert all(not item._editable for item in win.blocks.values())
+    assert all(not w._editable for w in win.wires.values())
+    assert win.legend._editable is False
+    assert win.layout_edit_strip.isVisible() is False
+
+
+def test_drag_marks_dirty_and_shows_dirty_label(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    assert win.layout_dirty_label.isVisible() is False
+
+    item = win.blocks["adc1"]
+    _drag_block(item, 400, 500)
+
+    assert (item.block.x, item.block.y) == (400, 500)
+    assert win._layout_dirty is True
+    assert win.layout_dirty_label.isVisible() is True
+
+
+def test_undo_restores_previous_geometry(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+    original = item.geometry()
+
+    _drag_block(item, 400, 500)
+    assert item.geometry() != original
+
+    win._on_layout_undo()
+
+    assert item.geometry() == original
+    assert (item.block.x, item.block.y) == original[:2]
+
+
+def test_undo_is_a_noop_outside_edit_mode_and_when_stack_is_empty(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+    _drag_block(item, 400, 500)
+    moved = item.geometry()
+
+    win.edit_layout_btn.setChecked(False)   # leaves the undo stack populated
+    win._on_layout_undo()                   # must not apply outside edit mode
+    assert item.geometry() == moved
+
+    win.edit_layout_btn.setChecked(True)
+    win._on_layout_undo()                   # now it applies
+    assert item.geometry() != moved
+    win._on_layout_undo()                   # stack now empty: no-op, no raise
+
+
+def test_save_writes_yaml_and_reload_reproduces_positions(qtbot, tmp_path):
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    engine, win = _build_window(qtbot, str(tdir))
+
+    win.edit_layout_btn.setChecked(True)
+    _drag_block(win.blocks["adc1"], 400, 500)
+    assert win._layout_dirty is True
+
+    win._on_save_layout()
+
+    assert win._layout_dirty is False
+    assert win._undo_stack == []
+    assert win.layout_dirty_label.isVisible() is False
+
+    reloaded = load_topology(engine.topology_path, engine.model)
+    assert (reloaded.blocks["adc1"].x, reloaded.blocks["adc1"].y) == (400, 500)
+
+
+def test_save_layout_patch_error_shows_status_message(qtbot, tmp_path,
+                                                       monkeypatch):
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    engine, win = _build_window(qtbot, str(tdir))
+    win.edit_layout_btn.setChecked(True)
+    _drag_block(win.blocks["adc1"], 400, 500)
+
+    def _boom(*args, **kwargs):
+        raise LayoutPatchError("boom")
+    monkeypatch.setattr("ui.main_window.save_layout", _boom)
+
+    win._on_save_layout()
+
+    assert "boom" in win.statusBar().currentMessage()
+    assert win._layout_dirty is True   # unsaved edit is not discarded on error
+
+
+def test_revert_restores_original_geometry(qtbot, tmp_path):
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    engine, win = _build_window(qtbot, str(tdir))
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+    original = item.geometry()
+    _drag_block(item, 400, 500)
+    assert item.geometry() != original
+
+    win._on_revert_layout()
+
+    assert item.geometry() == original
+    assert win._layout_dirty is False
+    assert win._undo_stack == []
+    assert win.layout_dirty_label.isVisible() is False
+
+
+def test_auto_layout_moves_blocks_clears_wire_points_and_one_undo_restores(
+        qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+
+    original_blocks = {bid: item.geometry()
+                       for bid, item in win.blocks.items()}
+    original_wire_points = {eid: list(wire.edge.points)
+                            for eid, wire in win.wires.items()}
+    assert any(original_wire_points.values())   # sanity: some start pointed
+
+    from core.target.autolayout import auto_layout
+    expected = auto_layout(list(engine.topology.blocks.values()),
+                           engine.topology.edges)
+
+    win._on_auto_layout()
+
+    for bid, item in win.blocks.items():
+        assert item.geometry()[:2] == expected[bid]
+    assert all(wire.edge.points == [] for wire in win.wires.values())
+    assert win._layout_dirty is True
+    assert win.layout_dirty_label.isVisible() is True
+    assert all(w.edge_key() in win._dirty_wire_keys
+              for w in win.wires.values())
+
+    win._on_layout_undo()
+
+    for bid, item in win.blocks.items():
+        assert item.geometry() == original_blocks[bid]
+    for eid, wire in win.wires.items():
+        assert wire.edge.points == original_wire_points[eid]
+
+
+def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):
+    engine = make_demo_engine("targets/f411")
+    bridge = EngineBridge(engine)
+    win = MainWindow(engine, bridge)
+    qtbot.addWidget(win)
+    win.show()
+    # M7: activating the Scope tab discovers the trace target
+    # synchronously (ScopePage.__init__), which needs the poller thread
+    # actually running to service the read - same requirement as
+    # test_main_window.py's scope-switch tests.
+    engine.start()
+    try:
+        win.edit_layout_btn.setChecked(True)
+        _drag_block(win.blocks["adc1"], 400, 500)
+        assert win._layout_dirty is True
+        assert win.layout_dirty_label.isVisible() is True
+
+        win.tabs.setCurrentIndex(1)   # switch to Scope
+
+        assert win.edit_layout_btn.isChecked() is False
+        assert win.diagram_state.edit_mode is False
+        assert all(not item._editable for item in win.blocks.values())
+        assert win.layout_edit_strip.isVisible() is False
+        assert win.layout_dirty_label.isVisible() is True    # persists
+        assert win._layout_dirty is True                     # untouched
+    finally:
+        engine.stop()

@@ -12,10 +12,11 @@ none. The toolbar holds only the target name, the Data Path/Scope
 page switch (two exclusive buttons at a fixed position - the old
 QTabWidget tab bar rendered as a segmented control that shifted
 position with the page content) and the poll rate."""
-from typing import Dict, Optional, Set
+from collections import OrderedDict
+from typing import Any, Dict, Optional, Set
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsView,
                                QHBoxLayout, QLabel, QMainWindow,
                                QPushButton, QSizePolicy, QStackedWidget,
@@ -23,14 +24,24 @@ from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsView,
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
+from core.target.autolayout import auto_layout
+from core.target.layout_io import LayoutPatchError, save_layout
+from core.target.topology import load_topology
 
 from .bridge import EngineBridge
-from .diagram.items import MONO, LegendItem
+from .diagram.items import MONO, LegendItem, default_wh
 from .diagram.scene import DiagramState, build_scene
 from .panels.event_log import EventLog
 from .panels.flow_page import FlowPage, build_flow_edge_map
 from .panels.memory_page import MemoryPage
 from .panels.register_page import RegisterPage
+
+# M8 layout edit mode: dashed border cue applied to the diagram view's
+# viewport while editing (a plain stylesheet swap - cleared back to ""
+# on toggle-off), so the user always has an unambiguous "you are
+# editing the layout" cue independent of the toolbar button's own
+# checked state.
+_EDIT_VIEW_STYLE = "QGraphicsView { border: 2px dashed #999999; }"
 
 # Low sweep-rate warning on the toolbar's poll label (moved here from
 # the scope page's budget label, which used to repeat the same rate):
@@ -98,9 +109,12 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_docks()
         self._build_central_tabs()
+        self._init_layout_edit_state()
         self.diagram_state.on_block_clicked = self._select_block
         self.diagram_state.on_edge_clicked = self._on_edge_clicked
         self.diagram_state.on_badge_clicked = self._on_badge_clicked
+        self.diagram_state.on_geometry_changed = (
+            self._on_layout_geometry_changed)
         self.flow_page.on_pick = self._highlight_flow
         self.event_log.on_focus = self._on_log_focus
         self.event_log.on_event_time = self._on_log_time_focus
@@ -210,6 +224,39 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.datapath_page_btn)
         tb.addWidget(self.scope_page_btn)
 
+        # M8 layout edit mode (task 5): the one toggle - checked drives
+        # DiagramState.edit_mode + every item's set_editable together
+        # (see _on_edit_layout_toggled's docstring for why those two
+        # must never be set independently), shows the Data Path page's
+        # Save/Revert/Auto-layout strip, and applies the dashed
+        # viewport border cue. layout_dirty_label sits right next to
+        # this button - in the toolbar, not the strip - so "unsaved
+        # layout changes" stays visible even after the button is
+        # toggled back off.
+        self.edit_layout_btn = QToolButton()
+        self.edit_layout_btn.setText("Edit Layout")
+        self.edit_layout_btn.setCheckable(True)
+        self.edit_layout_btn.toggled.connect(self._on_edit_layout_toggled)
+        tb.addWidget(self.edit_layout_btn)
+
+        # A QToolBar wraps a widget passed to addWidget() in its own
+        # QWidgetAction and keeps that ACTION's visible flag authoritative
+        # - toggling the widget's own setVisible() straight off a
+        # toolbar gets silently overridden the next layout pass
+        # (reproduced directly against a bare QToolBar/QLabel). Wrapping
+        # the label in a plain (always-visible) container widget sidesteps
+        # that: the container is what the toolbar manages, and the
+        # label's own setVisible() - now an ordinary child-widget
+        # visibility toggle - behaves normally again.
+        dirty_holder = QWidget()
+        dirty_layout = QHBoxLayout(dirty_holder)
+        dirty_layout.setContentsMargins(0, 0, 0, 0)
+        self.layout_dirty_label = QLabel("unsaved layout changes")
+        self.layout_dirty_label.setStyleSheet("color: #B71C1C;")
+        self.layout_dirty_label.setVisible(False)
+        dirty_layout.addWidget(self.layout_dirty_label)
+        tb.addWidget(dirty_holder)
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
@@ -270,6 +317,11 @@ class MainWindow(QMainWindow):
         Scope page's own big button, deliberately (user requirement:
         Run/Stop sits in one consistent place on both pages).
 
+        Below that header, M8 (task 5) adds a second row -
+        layout_edit_strip - carrying the Save layout/Revert/Auto-layout
+        buttons; it is hidden until the toolbar's Edit Layout button
+        (_on_edit_layout_toggled) turns edit mode on.
+
         The Scope page starts as a plain placeholder label; the real
         ScopePage (and its pyqtgraph import) is constructed lazily on
         first activation, in _activate_scope_tab() - pay the import
@@ -297,6 +349,23 @@ class MainWindow(QMainWindow):
         self.dp_run_stop_btn.clicked.connect(self._on_dp_run_stop_clicked)
         header.addWidget(self.dp_run_stop_btn)
         dp_layout.addLayout(header)
+
+        self.layout_edit_strip = QWidget()
+        strip = QHBoxLayout(self.layout_edit_strip)
+        strip.setContentsMargins(8, 0, 8, 0)
+        self.layout_save_btn = QPushButton("Save layout")
+        self.layout_save_btn.clicked.connect(self._on_save_layout)
+        self.layout_revert_btn = QPushButton("Revert")
+        self.layout_revert_btn.clicked.connect(self._on_revert_layout)
+        self.layout_auto_btn = QPushButton("Auto-layout")
+        self.layout_auto_btn.clicked.connect(self._on_auto_layout)
+        strip.addWidget(self.layout_save_btn)
+        strip.addWidget(self.layout_revert_btn)
+        strip.addWidget(self.layout_auto_btn)
+        strip.addStretch(1)
+        self.layout_edit_strip.setVisible(False)
+        dp_layout.addWidget(self.layout_edit_strip)
+
         dp_layout.addWidget(self.view)
 
         self.tabs = QStackedWidget()
@@ -311,6 +380,211 @@ class MainWindow(QMainWindow):
         rect = self.scene.itemsBoundingRect()
         if not rect.isEmpty():
             self.view.fitInView(rect, Qt.KeepAspectRatio)
+
+    # -- M8 layout edit mode (task 5): mode toggle, undo, save/revert -------
+
+    def _init_layout_edit_state(self) -> None:
+        """Undo/dirty bookkeeping for the layout editor. self._layout_world
+        is a whole-scene snapshot - {"blocks": {id: geometry()},
+        "legend": geometry(), "wires": {edge id: points-list}} -
+        refreshed after every completed gesture; the undo stack holds
+        the PREVIOUS snapshot per gesture (simpler than per-item deltas,
+        and cheap at this diagram's scale - see _capture_layout_world/
+        _apply_layout_world). Dirty tracking is a single bool for
+        blocks/legend (Save always regenerates every block's geometry
+        and the legend line, so nothing needs a which-block-changed
+        set) but per-edge for wires (Save only rewrites TOUCHED edges'
+        points: lines, so self._dirty_wire_keys - edge_key() tuples -
+        tracks which edges changed this session). Undo does NOT clear
+        the dirty flag: landing back on the saved geometry via Z still
+        leaves layout_dirty_label showing until an explicit Save or
+        Revert (v1 simplification, not worth a byte-for-byte compare)."""
+        self._undo_stack = []
+        self._dirty_wire_keys = set()
+        self._layout_dirty = False
+        self._legend_moved = self.engine.topology.legend is not None
+        self._layout_world = self._capture_layout_world()
+
+        self._undo_shortcut = QShortcut(QKeySequence.Undo, self)
+        self._undo_shortcut.activated.connect(self._on_layout_undo)
+
+    def _on_edit_layout_toggled(self, on: bool) -> None:
+        """The ONE toggle for edit mode. diagram_state.edit_mode (gates
+        click-vs-drag routing in items.py) and every item's own
+        set_editable (gates whether a drag/resize/waypoint-drag
+        actually commits) are two independent switches upstream - see
+        the task handover note - and MUST always be flipped together
+        here so the two can never drift apart. Toggling off leaves
+        whatever is already dirty/undo-able untouched (spec: "unsaved
+        edits stay in the items/topology objects") - only editability,
+        the dashed viewport cue and the strip's visibility change."""
+        self.diagram_state.edit_mode = on
+        for item in self.blocks.values():
+            item.set_editable(on)
+        for wire in self.wires.values():
+            wire.set_editable(on)
+        self.legend.set_editable(on)
+        self.view.setStyleSheet(_EDIT_VIEW_STYLE if on else "")
+        self.layout_edit_strip.setVisible(on)
+
+    def _capture_layout_world(self) -> Dict[str, Any]:
+        return {
+            "blocks": {bid: item.geometry()
+                      for bid, item in self.blocks.items()},
+            "legend": self.legend.geometry(),
+            "wires": {eid: list(wire.edge.points)
+                     for eid, wire in self.wires.items()},
+        }
+
+    def _apply_layout_world(self, snapshot: Dict[str, Any]) -> None:
+        for bid, geom in snapshot["blocks"].items():
+            item = self.blocks.get(bid)
+            if item is not None:
+                item.apply_geometry(*geom)
+        lx, ly, _, _ = snapshot["legend"]
+        self.legend.apply_geometry(lx, ly, 0, 0)
+        for eid, points in snapshot["wires"].items():
+            wire = self.wires.get(eid)
+            if wire is not None:
+                wire.apply_points(points)
+
+    def _on_layout_geometry_changed(self) -> None:
+        """Wired to diagram_state.on_geometry_changed - fires once per
+        completed drag/resize/waypoint gesture, AFTER the item layer
+        has already applied it. Diffs the new world snapshot against
+        the previous one only to learn WHICH wire(s) moved (for the
+        per-edge dirty set) and whether the legend moved at all (Save's
+        "was the legend ever moved this session" condition) - blocks
+        need no such diff since Save regenerates all of them
+        unconditionally."""
+        old = self._layout_world
+        new = self._capture_layout_world()
+        if new["legend"] != old["legend"]:
+            self._legend_moved = True
+        for eid, points in new["wires"].items():
+            if points != old["wires"].get(eid):
+                wire = self.wires.get(eid)
+                if wire is not None:
+                    self._dirty_wire_keys.add(wire.edge_key())
+        self._undo_stack.append(old)
+        self._layout_world = new
+        self._layout_dirty = True
+        self._update_layout_dirty_label()
+
+    def _on_layout_undo(self) -> None:
+        if not self.diagram_state.edit_mode or not self._undo_stack:
+            return
+        snapshot = self._undo_stack.pop()
+        self._apply_layout_world(snapshot)
+        self._layout_world = snapshot
+
+    def _update_layout_dirty_label(self) -> None:
+        self.layout_dirty_label.setVisible(self._layout_dirty)
+
+    def _on_save_layout(self) -> None:
+        """Collects every block's current geometry (ordered as in
+        topology.blocks), only the TOUCHED wires' points, and the
+        legend position if it was ever moved this session (or the file
+        already had one) - then hands them to layout_io.save_layout,
+        which patches <target>.topology.yaml in place and validates the
+        patched file by reloading it before committing. A
+        LayoutPatchError (bad patch, or the reload validation itself
+        failing) is reported the same way _toggle_halt reports an
+        EngineError: an inline statusBar message, no dialog."""
+        blocks = OrderedDict(
+            (bid, self.blocks[bid].geometry())
+            for bid in self.engine.topology.blocks if bid in self.blocks)
+        edge_points = {
+            wire.edge_key(): list(wire.edge.points)
+            for wire in self.wires.values()
+            if wire.edge_key() in self._dirty_wire_keys}
+        legend = None
+        if self._legend_moved or self.engine.topology.legend is not None:
+            lx, ly, _, _ = self.legend.geometry()
+            legend = (lx, ly)
+
+        try:
+            save_layout(
+                self.engine.topology_path, blocks, edge_points, legend,
+                lambda p: load_topology(p, self.engine.model))
+        except LayoutPatchError as e:
+            self.statusBar().showMessage("error: %s" % e, 5000)
+            return
+
+        if legend is not None:
+            self.engine.topology.legend = legend
+        self._undo_stack = []
+        self._dirty_wire_keys = set()
+        self._layout_dirty = False
+        self._layout_world = self._capture_layout_world()
+        self._update_layout_dirty_label()
+
+    def _on_revert_layout(self) -> None:
+        """Reloads engine.topology_path from disk and re-applies its
+        block/edge/legend geometry over the live items via
+        apply_geometry/apply_points (callback-silent - this does not
+        re-fire on_geometry_changed or grow the undo stack), discarding
+        every unsaved edit. Block/legend/wire dataclass instances stay
+        the SAME objects the items already reference (apply_* mutates
+        their fields in place) - only their x/y/w/h/points values
+        change, so nothing elsewhere holding a Block/Edge reference
+        goes stale."""
+        fresh = load_topology(self.engine.topology_path, self.engine.model)
+        for index, (bid, item) in enumerate(self.blocks.items()):
+            block = fresh.blocks.get(bid)
+            if block is None:
+                continue
+            dw, dh = default_wh(block.kind)
+            x = block.x if block.x is not None else 40 + 200 * (index % 4)
+            y = block.y if block.y is not None else 40 + 140 * (index // 4)
+            w = block.w if block.w is not None else dw
+            h = block.h if block.h is not None else dh
+            item.apply_geometry(x, y, w, h)
+
+        fresh_edges_by_id = {e.id: e for e in fresh.edges}
+        for eid, wire in self.wires.items():
+            edge = fresh_edges_by_id.get(eid)
+            if edge is not None:
+                wire.apply_points(list(edge.points))
+
+        lx, ly = fresh.legend if fresh.legend is not None else (700, 402)
+        self.legend.apply_geometry(lx, ly, 0, 0)
+        self.engine.topology.legend = fresh.legend
+
+        self._undo_stack = []
+        self._dirty_wire_keys = set()
+        self._layout_dirty = False
+        self._legend_moved = fresh.legend is not None
+        self._layout_world = self._capture_layout_world()
+        self._update_layout_dirty_label()
+
+    def _on_auto_layout(self) -> None:
+        """auto_layout() only returns (x, y) - width/height are kept as
+        they currently are on each item. Explicit edge points are
+        cleared on EVERY wire (spec 6: auto-layout re-routes everything
+        straight, not just the blocks it moved), so every edge is
+        marked touched regardless of whether its points actually
+        changed. One undo snapshot is pushed up front (apply_geometry/
+        apply_points are callback-silent, so this method owns pushing
+        it) so a single Z restores the pre-auto-layout picture whole."""
+        self._undo_stack.append(self._layout_world)
+
+        positions = auto_layout(list(self.engine.topology.blocks.values()),
+                                self.engine.topology.edges)
+        for bid, item in self.blocks.items():
+            if bid not in positions:
+                continue
+            x, y = positions[bid]
+            _, _, w, h = item.geometry()
+            item.apply_geometry(x, y, w, h)
+
+        for wire in self.wires.values():
+            wire.apply_points([])
+            self._dirty_wire_keys.add(wire.edge_key())
+
+        self._layout_dirty = True
+        self._layout_world = self._capture_layout_world()
+        self._update_layout_dirty_label()
 
     # -- actions ---------------------------------------------------------
 
@@ -352,11 +626,21 @@ class MainWindow(QMainWindow):
         visible on both pages. Each page carries its own Run/Stop
         button holding its own flag, so a page switch has nothing to
         resync there. Lazily constructs the real ScopePage the first
-        time the Scope page is activated."""
+        time the Scope page is activated.
+
+        M8 (task 5): switching to Scope while the layout editor is on
+        turns it off - unlike the page buttons above, setChecked here
+        is meant to recurse into _on_edit_layout_toggled (via the
+        toggled signal, not clicked) so editability/the dashed cue/the
+        strip all unwind exactly as a manual click would; dirty state
+        is untouched (layout_dirty_label keeps showing on the
+        toolbar)."""
         on_scope = index == 1
         self.inspector_dock.setVisible(not on_scope)
         self.datapath_page_btn.setChecked(not on_scope)
         self.scope_page_btn.setChecked(on_scope)
+        if on_scope and self.edit_layout_btn.isChecked():
+            self.edit_layout_btn.setChecked(False)
         if on_scope and self.scope_page is None:
             self._activate_scope_tab()
 

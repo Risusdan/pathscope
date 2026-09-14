@@ -58,7 +58,8 @@ class Engine:
         model = RegisterModel.from_svd(_one(target_dir, "*.svd"))
         history = History()
         evaluator = Evaluator(model, history)
-        topology = load_topology(_one(target_dir, "*.topology.yaml"), model)
+        topology_path = _one(target_dir, "*.topology.yaml")
+        topology = load_topology(topology_path, model)
         flowspec = load_flows(_one(target_dir, "*.flows.yaml"), evaluator,
                               topology)
         needed = needed_registers(flowspec)
@@ -86,8 +87,13 @@ class Engine:
                                forbidden_addrs=frozenset(guarded_addrs))
         poller = Poller(adapter, plan, interval_s=interval_s)
         rules = RuleEngine(flowspec)
-        return cls(model, topology, flowspec, history, poller, rules,
-                   sorted(excluded), guarded_addrs, base_polled)
+        engine = cls(model, topology, flowspec, history, poller, rules,
+                    sorted(excluded), guarded_addrs, base_polled)
+        # M8 layout edit mode: topology_path is the *.topology.yaml this
+        # engine loaded from, retained so MainWindow's Save/Revert can
+        # re-read and patch that same file.
+        engine.topology_path = topology_path
+        return engine
 
     def start(self) -> None:
         self._poller.start()

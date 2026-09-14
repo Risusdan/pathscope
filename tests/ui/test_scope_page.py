@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine, EngineError
+from core.engine.poller import PollerState
 from core.trace.contract import MAX_CH, RING_COUNT, TraceDesc, TraceRecord
 from core.trace.reader import READ_CAP_DIVISOR, TraceError, TraceReader
 from core.trace.sim import FakeTraceFirmware
@@ -559,6 +560,87 @@ def test_drain_surfaces_nonzero_status_inline(qtbot):
         page._drain_once()
         assert page.error_label.text() == ""
         assert not page._status_error_active
+    finally:
+        engine.stop()
+
+
+def test_target_reboot_resyncs_trace_session(qtbot):
+    """T11 hardware gate: an interactive unplug/replug test found that,
+    because the Blackpill reference target is powered by the debug
+    probe's own USB connection, a replug is a REAL power cycle -
+    firmware reboots (wr_seq/generation/watch_count all reset near 0)
+    while this reader/page still carry session state (last_seq in the
+    hundreds of thousands by the time this matters in practice, the
+    occupied watch table) describing a target that no longer exists.
+    Drives a REAL TARGET_LOST -> RUNNING transition through the poller
+    (MockAdapter.fail_next() plus FakeTraceFirmware.reboot(), following
+    tests/test_poller.py's own test_target_lost_and_reconnect pattern)
+    rather than injecting a fake state string, so this exercises the
+    real _on_engine_state callback wiring end to end - not just
+    _recover_after_reboot() in isolation. Once RUNNING again, the next
+    _drain_once() tick (standing in for a real timer tick) must notice
+    the latch, re-discover, and re-submit the SAME channels in the SAME
+    order against a store that restarts from empty - never silently
+    freezing at whatever sample count it had at the moment of
+    disconnect."""
+    adapter = MockAdapter({0x20000000: 0, 0x20000004: 0})
+    engine = Engine.load(TARGET, adapter, interval_s=0.01)
+    engine._poller.reconnect_s = 0.05   # keep the test fast
+    fw = FakeTraceFirmware(adapter, period_us=1000)
+    engine.trace_desc_addr = fw.desc_addr
+    states = []
+    engine.on_state(states.append)
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+
+        slot_a = page.add_address_slot(0x20000000, "chan_a", "u32")
+        slot_b = page.add_address_slot(0x20000004, "chan_b", "u32")
+        assert slot_a == 0 and slot_b == 1
+
+        fw.step(20)
+        page._drain_once()
+        assert page.channel_sample_count(slot_a) > 0
+
+        # Simulate the unplug: the very next adapter command fails,
+        # tripping the poller's own TARGET_LOST detection and its
+        # reconnect loop - the same trigger tests/test_poller.py's
+        # test_target_lost_and_reconnect uses. The board is powered by
+        # the probe, so the firmware side of a real unplug is a power
+        # cycle too - modeled here by reboot() while disconnected,
+        # exactly as it would happen on real hardware (the board loses
+        # power before the probe itself reconnects).
+        adapter.fail_next(1)
+        qtbot.waitUntil(lambda: PollerState.TARGET_LOST in states,
+                        timeout=2000)
+        fw.reboot()
+        qtbot.waitUntil(lambda: states[-1] == PollerState.RUNNING,
+                        timeout=2000)
+
+        # The tick that notices "running again after lost" - recovery,
+        # not a normal drain.
+        page._drain_once()
+
+        assert page.error_label.text() == ""
+        slots = page.channel_slots()
+        assert slots[0] is not None
+        assert slots[0]["label"] == "chan_a"
+        assert slots[0]["addr"] == 0x20000000
+        assert slots[1] is not None
+        assert slots[1]["label"] == "chan_b"
+        assert slots[1]["addr"] == 0x20000004
+        assert slots[2] is None
+
+        # The store restarted, not spliced onto the old (huge) seq axis.
+        assert page.channel_sample_count(0) == 0
+
+        # Streaming actually resumes against the rebooted target - not
+        # just "channels look occupied".
+        fw.step(10)
+        page._drain_once()
+        assert page.channel_sample_count(0) > 0
     finally:
         engine.stop()
 

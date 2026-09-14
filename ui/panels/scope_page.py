@@ -155,6 +155,25 @@ in roughly the last roll-mode window (`engine.history.window_s`) and
 is blank otherwise - `_update_drain_health()`, called from every
 `_drain_once()`.
 
+Target reboot recovery (T11 hardware gate): the Blackpill reference
+target is powered by the debug probe's own USB connection, so a
+TARGET_LOST->RUNNING cycle (a probe replug) is a REAL power cycle for
+the target too, not just a reconnect - firmware reboots, and this
+page's session state (occupied channels, the store's seq->t axis) goes
+stale the instant that happens. `_drain_once()` recognizes this two
+ways - a `self._was_lost` latch (set by `_on_engine_state` on
+TARGET_LOST, consumed on the first tick that finds the poller RUNNING
+again) for the probe-drop case, and a `TraceRebootedError` caught
+around `reader.refresh()` itself for a target-only reset that never
+registers as TARGET_LOST at all - both routing into
+`_recover_after_reboot()`: re-discover at the same address (which
+itself clears every slot and swaps in a fresh `TraceStore` - see
+`_discover_at`), then re-submit the same channels, same order, via one
+`set_watch()` call, then post one `on_info()` line. `on_info` is a
+plain callback (default a no-op) MainWindow wires to the real
+`EventLog` after constructing this page - see `_recover_after_reboot`'s
+own comment.
+
 X axis: ROLL MODE, standard-scope style, unchanged since M6.
 Every sample plots at sample_t - now, where now = time.monotonic() is
 captured once per refresh_plot() call and cached as `self._last_now`
@@ -231,7 +250,7 @@ documented here rather than filtered at load time.
 """
 import struct
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -247,7 +266,8 @@ from core.engine.core import Engine, EngineError
 from core.engine.poller import PollerState
 from core.target.registers import SvdError
 from core.trace.contract import MAX_CH, STATUS_OK, status_name
-from core.trace.reader import READ_CAP_DIVISOR, TraceError, TraceReader
+from core.trace.reader import (READ_CAP_DIVISOR, TraceError,
+                               TraceRebootedError, TraceReader)
 from ui.style import ACTIVE_HEX, ANOM_HEX, MONO
 from ui.trace_store import TraceStore
 
@@ -538,6 +558,10 @@ def _apply_transform(ys: List[float], transform: dict) -> List[float]:
     return [(v - offset) * scale if v == v else v for v in ys]
 
 
+def _noop(_text: str) -> None:
+    pass
+
+
 class ScopePage(QWidget):
     def __init__(self, engine: Engine, parent=None):
         super().__init__(parent)
@@ -633,14 +657,45 @@ class ScopePage(QWidget):
         # _fail_pending(), not by blocking the full timeout the way a
         # fully stopped poller's abandoned queue does.
         self._poller_running = True
+        # True only while the poller is currently in TARGET_LOST -
+        # narrower than self._poller_running (True for BOTH RUNNING and
+        # TARGET_LOST) and needed to tell them apart: recovery below
+        # must wait for a genuine return to RUNNING, not merely
+        # "not stopped". Written only by _on_engine_state (poller
+        # thread), read only by _drain_once (Qt thread) - same plain-
+        # bool, no-lock-needed handoff as self._poller_running itself.
+        self._target_lost = False
+        # T11 hardware gate: latches True the moment the poller ever
+        # reports TARGET_LOST, consumed (cleared) by the next
+        # _drain_once() tick that finds the poller RUNNING again - see
+        # that method and _recover_after_reboot(). The Blackpill
+        # reference target is powered by the debug probe's own USB
+        # connection, so a replug after TARGET_LOST is a REAL power
+        # cycle: firmware reboots (wr_seq/generation/watch_count all
+        # reset), so this reader/page's SESSION state (last_seq in the
+        # hundreds of thousands, the occupied watch table) is entirely
+        # stale the moment RUNNING resumes and must be rebuilt, not
+        # merely reconnected to - unlike M6's stateless register
+        # polling, which needed no equivalent latch. Written only by
+        # _on_engine_state (poller thread, a plain bool assignment - no
+        # lock needed, same argument as self._poller_running's own
+        # comment); read AND cleared only by _drain_once (Qt thread).
+        self._was_lost = False
+        # T11 hardware gate: lets a page constructed with no wiring at
+        # all (most tests) stay silent, while MainWindow (which owns
+        # the actual EventLog) wires this to event_log.add_info after
+        # construction - see _recover_after_reboot's own comment for
+        # why this page cannot just reach into a log dock directly.
+        self.on_info: Callable[[str], None] = _noop
         # Subscribes directly to Engine.on_state() rather than routing
         # through EngineBridge/Qt signals - accepted (not an oversight)
         # because the callback contract here is narrow and fully safe
         # off the Qt thread: _on_engine_state() below runs on the
         # POLLER thread (Poller._emit_state calls every subscriber
         # synchronously from wherever it's invoked), does nothing but
-        # write a plain bool to self._poller_running, and touches no
-        # Qt object at all - not a widget, not a signal, nothing that
+        # write plain bools to self._poller_running/_target_lost/
+        # _was_lost, and touches no Qt object at all - not a widget,
+        # not a signal, nothing that
         # needs to live on the GUI thread. No unsubscribe is needed
         # either: a ScopePage is a per-engine singleton for the life of
         # the process (MainWindow constructs at most one), so this
@@ -1680,12 +1735,19 @@ class ScopePage(QWidget):
     # -- drain (spec point 5) -------------------------------------------------
 
     def _on_engine_state(self, state: str) -> None:
-        """See the __init__ comment on self._poller_running - the
-        single thing this flag exists for is letting _drain_once()
+        """See the __init__ comments on self._poller_running/
+        _target_lost/_was_lost. self._poller_running lets _drain_once()
         skip reader.refresh() outright once the poller has actually
         stopped, instead of blocking the Qt main thread for a full
-        Engine._exec timeout on every drain tick forever after."""
+        Engine._exec timeout on every drain tick forever after.
+        self._target_lost/_was_lost (T11 hardware gate) let a LATER
+        _drain_once() tick recognize "just recovered from a lost
+        target" so it can resync the trace session instead of quietly
+        resuming a now-stale one - see _recover_after_reboot()."""
         self._poller_running = state != PollerState.STOPPED
+        self._target_lost = state == PollerState.TARGET_LOST
+        if self._target_lost:
+            self._was_lost = True
 
     def _drain_once(self) -> None:
         """Drain the trace reader into the store, independent of paint
@@ -1697,11 +1759,29 @@ class ScopePage(QWidget):
         EngineError here (spec point 5) renders inline and the page
         stays alive - the next tick, from either timer, retries. Skips
         entirely once the poller has stopped (self._poller_running) -
-        see its own comment for why that guard exists."""
+        see its own comment for why that guard exists.
+
+        T11 hardware gate: runs _recover_after_reboot() instead of a
+        normal drain on the first tick that finds the poller RUNNING
+        again after having latched TARGET_LOST (self._was_lost,
+        consumed/cleared here) - or, if a reboot happens WITHOUT ever
+        registering as TARGET_LOST at all (a target-only reset that
+        never drops the probe's own USB connection), the moment
+        reader.refresh() itself raises TraceRebootedError. Both routes
+        converge on the same recovery because both mean the same
+        thing: this reader/page's session state no longer describes
+        the target that is actually there."""
+        if self._was_lost and self._poller_running and not self._target_lost:
+            self._was_lost = False
+            self._recover_after_reboot()
+            return
         if self.store is None or not self._poller_running:
             return
         try:
             records = self.reader.refresh()
+        except TraceRebootedError:
+            self._recover_after_reboot()
+            return
         except (TraceError, EngineError) as e:
             self.error_label.setText(str(e))
             self._refresh_error_active = True
@@ -1712,6 +1792,81 @@ class ScopePage(QWidget):
         self.store.append(records)
         self._update_status_health()
         self._update_drain_health(time.monotonic())
+
+    def _recover_after_reboot(self) -> None:
+        """T11 hardware gate: the Blackpill reference target is powered
+        by the debug probe's own USB connection, so a replug after
+        TARGET_LOST (or any other target-only reset - see
+        _drain_once()'s TraceRebootedError route) is a REAL power
+        cycle, not just a reconnect - firmware reboots, wr_seq/
+        generation reset near 0, and the watch table goes back to
+        empty. Unlike M6's stateless register polling, this page/
+        reader carry SESSION state (TraceReader.last_seq in the
+        hundreds of thousands by the time this matters in practice,
+        self.reader._expected_gen, the occupied watch table, this
+        page's own TraceStore) that all silently describes a target
+        that no longer exists the instant this happens, and must be
+        rebuilt, not merely reconnected to:
+
+          1. Re-discover at the SAME address (self.reader.desc_addr,
+             set by the ORIGINAL discover() and never touched again
+             once READY) - _discover_at() already does everything a
+             cold reboot needs on its own success path: rebuilds
+             self.reader's session state from the freshly read (post-
+             reboot) descriptor, clears every channel slot, and swaps
+             in a BRAND NEW TraceStore - the seq->t time axis
+             restarting from ~0 is the honest outcome of a real reboot
+             (a spliced axis, pretending the old and new sessions are
+             one continuous timeline, would lie about what the ring
+             actually contains now).
+          2. Re-submit the SAME addresses that were occupied, in the
+             SAME order, as one set_watch() call - watch index == table
+             row == record slot must keep holding (module docstring's
+             "Channel slots" paragraph) exactly as if nothing had
+             happened from the operator's point of view, even though
+             the firmware underneath has no memory of ever having been
+             told to watch them.
+          3. Re-populate self._slots/the channel table from that same
+             list, so channel_slots() shows the identical rows it did
+             before the reboot - only the underlying data restarts, not
+             what the operator was watching.
+
+        A failure at either step (re-discovery, or the re-submit)
+        renders inline via the same paths those primitives already use
+        (_discover_at()/set_watch()'s own error text) and leaves the
+        page in whatever state that failure produces - there is no
+        retry loop here beyond the next TARGET_LOST/RUNNING cycle (or
+        TraceRebootedError) that might happen later.
+
+        Runs on the Qt thread only (this method is only ever called
+        from _drain_once(), a QTimer slot) - the bools it reads
+        (self._was_lost/_poller_running/_target_lost) are written only
+        by the poller thread, one-directional and lock-free for the
+        same reason those attributes' own __init__ comments give."""
+        addr = self.reader.desc_addr
+        if addr is None:
+            # Never discovered (or a previous attempt already failed
+            # and cleared it) - nothing to resync back to.
+            return
+        occupied = [(s["addr"], s["label"], s["type"]) for s in self._slots
+                   if s is not None]
+
+        if not self._discover_at(addr):
+            return  # _discover_at() already rendered the failure inline
+
+        if occupied:
+            try:
+                self.reader.set_watch([a for a, _label, _type in occupied])
+            except (TraceError, EngineError) as e:
+                self.error_label.setText(str(e))
+                return
+            for row, (chan_addr, label, type_name) in enumerate(occupied):
+                self._slots[row] = self._make_slot_entry(
+                    row, chan_addr, label, type_name)
+            self._render_slot_rows()
+            self.error_label.setText("")
+
+        self.on_info("target rebooted - trace channels resubmitted")
 
     def _update_status_health(self) -> None:
         """Per spec 3.4: a nonzero desc.status observed

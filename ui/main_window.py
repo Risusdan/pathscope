@@ -381,6 +381,14 @@ class MainWindow(QMainWindow):
         flags, spec point 1)."""
         from .panels.scope_page import ScopePage
         self.scope_page = ScopePage(self.engine)
+        # T11 hardware gate: lets ScopePage's own target-reboot
+        # recovery (_recover_after_reboot) post one info line to the
+        # SAME event log every other info/anomaly row goes through,
+        # without ScopePage needing to own (or import) EventLog
+        # itself - the same "push a callback down, not a reference up"
+        # shape event_log.py's own on_focus/on_event_time already use
+        # in the other direction.
+        self.scope_page.on_info = self.event_log.add_info
         placeholder = self._scope_placeholder
         self.tabs.removeWidget(placeholder)
         placeholder.deleteLater()

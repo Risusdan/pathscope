@@ -26,7 +26,14 @@ class PyOCDAdapter(TargetAdapter):
             if self._session is None:
                 raise TargetLostError("no debug probe found")
             self._session.open()
-            idcode = self._session.target.read32(DBGMCU_IDCODE)
+            # DBGMCU_IDCODE is an STM32-specific debug register; a
+            # non-STM32 target faults or transfer-errors reading it.
+            # idcode is display-only (cli.py, ui/app.py), so a failed
+            # read must not fail connect() - fall back to 0.
+            try:
+                idcode = self._session.target.read32(DBGMCU_IDCODE)
+            except Exception:
+                idcode = 0
             return TargetInfo(name=self.target_name, idcode=idcode)
         except TargetLostError:
             raise

@@ -42,10 +42,23 @@ def test_kind_columns_plausible():
 
 
 def test_deterministic_across_runs():
-    topo = _f411()
-    blocks = list(topo.blocks.values())
-    pos1 = auto_layout(blocks, topo.edges)
-    pos2 = auto_layout(blocks, topo.edges)
+    # Two independent loads give two independent sets of Block/Edge
+    # objects (fresh dicts, fresh list order from re-parsing the
+    # yaml) - this is the case that would actually catch a
+    # mutation-based or object-identity-based ordering leak, unlike
+    # calling auto_layout twice on the very same objects below.
+    topo_a = _f411()
+    topo_b = _f411()
+    pos_a = auto_layout(list(topo_a.blocks.values()), topo_a.edges)
+    pos_b = auto_layout(list(topo_b.blocks.values()), topo_b.edges)
+    assert pos_a == pos_b
+
+    # Cheap same-objects sanity check too: calling auto_layout twice
+    # on one already-loaded topology must not itself introduce drift
+    # (e.g. via accidental mutation of the inputs between calls).
+    blocks = list(topo_a.blocks.values())
+    pos1 = auto_layout(blocks, topo_a.edges)
+    pos2 = auto_layout(blocks, topo_a.edges)
     assert pos1 == pos2
 
 

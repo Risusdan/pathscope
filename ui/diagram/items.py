@@ -320,13 +320,13 @@ def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
 
 
 # ---------------------------------------------------------------------------
-# M8 task 5 fix round 2: live auto-route recompute. Duplicates
-# scene.py's _side_point/_ranges_overlap/_facing_sides/_straight_route
-# routing math rather than importing it - scene.py already imports
-# BlockItem/WireItem FROM this module, so the reverse import would
-# cycle. Keep this in sync with scene.py's copy if the routing
-# algorithm ever changes (same side-facing preference, same declared-
-# port lookup, same 2-point straight result).
+# M8 task 5 fix round 2: live auto-route recompute. This IS the single
+# routing implementation for a pointless edge's straight-line path -
+# scene.py's build_scene imports _straight_route_points from here for
+# an edge's initial route (scene.py already imports BlockItem/WireItem
+# from this module, so the direction was always fine); WireItem.
+# refresh_auto_route (below) calls it again later to recompute that
+# same route once the blocks have moved.
 # ---------------------------------------------------------------------------
 
 
@@ -359,13 +359,13 @@ def _facing_sides(src: Block, sw: float, sh: float, dst: Block, dw: float,
 def _straight_route_points(src_item: "BlockItem", dst_item: "BlockItem",
                            edge: Edge) -> List[QPointF]:
     """Two-point straight route between src_item/dst_item's CURRENT
-    geometry, honoring the edge's declared ports if any - identical
-    algorithm to scene.py's _straight_route (see the module comment
-    above for why it is duplicated rather than imported), just reading
-    block position/size off the two BlockItems directly instead of a
-    topology+blocks-dict pair. Used both by build_scene indirectly (a
-    pointless edge's initial path) and by WireItem.refresh_auto_route
-    (recomputing that same route later, after a block has moved)."""
+    geometry, honoring the edge's declared ports if any - reads block
+    position/size off the two BlockItems directly rather than a
+    topology+blocks-dict pair, so it needs no reference back to a
+    Topology. The single routing implementation: scene.py's
+    build_scene imports this directly for a pointless edge's initial
+    path, and WireItem.refresh_auto_route (below) calls it again to
+    recompute that same route later, after a block has moved."""
     src_b, dst_b = src_item.block, dst_item.block
     side_s, side_d = _facing_sides(src_b, src_item.w, src_item.h,
                                    dst_b, dst_item.w, dst_item.h)
@@ -489,10 +489,9 @@ class WireItem(QGraphicsItem):
 
     def refresh_auto_route(self, blocks: "Dict[str, BlockItem]") -> None:
         """Recomputes this wire's straight-line auto-route fallback
-        (_straight_route_points, above - the same side-facing +
-        declared-port routing build_scene used to seed a pointless
-        edge's initial path) from `blocks`' CURRENT geometry, and
-        refreshes self._auto_pts to match.
+        (_straight_route_points, above - the same function build_scene
+        calls to seed a pointless edge's initial path) from `blocks`'
+        CURRENT geometry, and refreshes self._auto_pts to match.
 
         If this wire is CURRENTLY auto-routed (edge.points is empty -
         no explicit path), the fresh route is also applied as the

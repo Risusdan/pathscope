@@ -26,7 +26,7 @@ auto-pick ("the single active one") vote.
 from typing import Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (QLabel, QListWidget, QListWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -35,8 +35,7 @@ from core.engine.rules import EngineUpdate
 from core.target.flows import Activity, FlowSpec
 from core.target.topology import Topology
 
-COL_ACTIVE = QColor("#1565C0")
-COL_GREY = QColor("#B0B0B0")
+from ..style import ANOM_HEX, COL_ACTIVE, COL_GREY
 
 
 def _noop(_id: Optional[str]) -> None:
@@ -153,7 +152,7 @@ class FlowPage(QWidget):
             rows.append("<br><b>anomaly rules</b>")
             for rule in fs.rules:
                 dot = "&#9679;"
-                color = "#C62828" if rule.firing else "#2E7D32"
+                color = ANOM_HEX if rule.firing else "#2E7D32"
                 rows.append(
                     "<span style='color:%s'>%s</span> <code>%s</code>"
                     "<br>&nbsp;&nbsp;&nbsp;-> %s"

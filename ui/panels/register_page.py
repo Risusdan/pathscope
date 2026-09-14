@@ -24,21 +24,16 @@ import time
 from typing import Dict, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import QMessageBox, QTreeWidget, QTreeWidgetItem
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
 
-MONO = QFont()
-MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
-MONO.setPointSize(10)
+from ..style import COL_ANOM, COL_GREY, COL_WARN, MONO
 
-COL_GREY = QColor("#B0B0B0")
-COL_ANOM = QColor("#C62828")
 COL_FLASH = QColor("#FFF59D")
 COL_TRANSPARENT = QColor("transparent")
-COL_WARN = QColor("#E65100")
 
 
 class RegisterPage(QTreeWidget):

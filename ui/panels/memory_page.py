@@ -21,16 +21,13 @@ fail (bad user input) the same way for consistency.
 from typing import Optional
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel,
                                QLineEdit, QPlainTextEdit, QPushButton,
                                QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 
-MONO = QFont()
-MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
-MONO.setPointSize(10)
+from ..style import MONO
 
 WORDS_PER_ROW = 8
 LENGTH_CHOICES = (64, 256, 1024)          # bytes

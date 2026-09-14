@@ -236,7 +236,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QColor, QDoubleValidator, QFont
+from PySide6.QtGui import QColor, QDoubleValidator
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QPushButton, QSplitter,
@@ -248,6 +248,7 @@ from core.engine.poller import PollerState
 from core.target.registers import SvdError
 from core.trace.contract import MAX_CH, STATUS_OK, status_name
 from core.trace.reader import READ_CAP_DIVISOR, TraceError, TraceReader
+from ui.style import ACTIVE_HEX, ANOM_HEX, MONO
 from ui.trace_store import TraceStore
 
 SYMBOL_LIST_TOOLTIP = (
@@ -279,10 +280,6 @@ NO_SOURCE_TEXT = "Load an ELF built with the ps_trace module to use the scope"
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
 
-MONO = QFont()
-MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
-MONO.setPointSize(10)
-
 REFRESH_MS = 200
 # Slow drain timer bounds (see _drain_interval_ms and the module
 # docstring's "Drain independent of paint state" paragraph): the
@@ -303,8 +300,8 @@ DRAIN_MS_CAP = 500
 # drain what accumulates in one interval with 20% to spare, absorbing
 # ordinary scheduling jitter (Qt timer delivery is not real-time).
 DRAIN_CAP_SLACK = 0.8
-MARKER_PEN = "#C62828"
-CURSOR_PEN = "#1565C0"
+MARKER_PEN = ANOM_HEX
+CURSOR_PEN = ACTIVE_HEX
 CROSSHAIR_PEN = "#9E9E9E"
 MARKER_FLASH_PEN = "#FFB300"
 MARKER_FLASH_MS = 400
@@ -676,7 +673,7 @@ class ScopePage(QWidget):
         # _drain_once() failures (spec points 3/5), all via the same
         # single inline surface.
         self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #C62828;")
+        self.error_label.setStyleSheet("color: %s;" % ANOM_HEX)
         top_row.addWidget(self.error_label, 1)
         # Firmware sample rate (spec point: "Rate header") - a
         # property of the trace buffer's own period_us, set once

@@ -23,16 +23,12 @@ import time
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import QListWidget, QListWidgetItem
 
 from core.engine.rules import AnomalyEvent
 
-MONO = QFont()
-MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
-MONO.setPointSize(10)
-
-COL_ANOM = QColor("#C62828")
+from ..style import COL_ANOM, MONO
 
 
 def _noop(_arg) -> None:

@@ -20,13 +20,11 @@ from PySide6.QtWidgets import QGraphicsItem
 
 from core.target.topology import Block, Edge
 
+from ..style import COL_ACTIVE, COL_ANOM, COL_GREY, COL_WARN, MONO
+
 # ---------------------------------------------------------------------------
 # Visual constants - copied verbatim from prototype/ui_proto.py
 # ---------------------------------------------------------------------------
-
-MONO = QFont()
-MONO.setFamilies(["Menlo", "Consolas", "Courier New"])
-MONO.setPointSize(10)
 
 KIND_TINT = {
     "peripheral": "#E9F3E7",
@@ -38,10 +36,7 @@ KIND_TINT = {
     "pin": "#FFFFFF",
 }
 
-COL_ACTIVE = QColor("#1565C0")
-COL_SELECT = QColor("#E65100")
-COL_ANOM = QColor("#C62828")
-COL_GREY = QColor("#B0B0B0")
+COL_SELECT = COL_WARN
 
 FONT_TITLE = QFont("Helvetica", 11, QFont.Bold)
 FONT_PORT = QFont("Helvetica", 8)

@@ -46,11 +46,22 @@
 static volatile uint16_t adc_buf[BUF_LEN];
 
 /** @brief Ranges ps_trace_sample() may read: SRAM, DMA2, ADC1
- *         registers - covers adc_buf and the peripherals it drives. */
+ *         registers - covers adc_buf and the peripherals it drives.
+ *         The ADC1 block is split around ADC1_DR (0x4001204C, one
+ *         word) instead of whitelisting the whole peripheral: DR is a
+ *         readAction register (reading it pops the conversion FIFO),
+ *         which the host-side safety chain's layer 3 guard already
+ *         refuses to poll - but this firmware-side whitelist is layer
+ *         2 of that same chain (see the M7 spec's safety-chain
+ *         section), and layer 2 must not itself be willing to sample
+ *         a read-side-effect register at 1 kHz for any host that
+ *         asks. Real integrations should exclude every read-sensitive
+ *         register from their whitelist ranges the same way. */
 const ps_trace_range_t ps_trace_whitelist[] = {
     { 0x20000000u, 0x20020000u },  /* SRAM */
     { 0x40026400u, 0x40026500u },  /* DMA2 */
-    { 0x40012000u, 0x40012100u },  /* ADC1 */
+    { 0x40012000u, 0x4001204Cu },  /* ADC1, below DR */
+    { 0x40012050u, 0x40012100u },  /* ADC1, above DR */
 };
 const uint32_t ps_trace_whitelist_len =
     sizeof(ps_trace_whitelist) / sizeof(ps_trace_whitelist[0]);

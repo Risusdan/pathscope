@@ -116,6 +116,24 @@ def test_pending_command_answered_on_stop():
     assert ok is False
 
 
+def test_command_dying_mid_drain_reports_target_lost_not_none():
+    """A command that raises AdapterError while it is actually running
+    (as opposed to the periodic sweep) must answer with a named reason,
+    not (False, None) - see core/engine/core.py's EngineError formatting,
+    which would otherwise render the unhelpful "command failed: None"."""
+    a = MockAdapter({})
+    snaps, states = [], []
+    p = make_poller(a, snaps, states)
+    p.start()
+    assert wait_for(lambda: len(snaps) >= 1)
+    a.fail_next(1)
+    ok, result = p.submit(lambda ad: ad.read_block32(0x0, 1)).get(timeout=2.0)
+    p.stop()
+    assert ok is False
+    assert result is not None
+    assert "target lost" in result
+
+
 def test_snapshot_callback_exception_does_not_kill_poller():
     a = MockAdapter({0x40000000: 1})
     states = []

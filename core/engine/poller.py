@@ -82,8 +82,8 @@ class Poller(threading.Thread):
                 return
             try:
                 result.put((True, fn(self.adapter)))
-            except AdapterError:
-                result.put((False, None))
+            except AdapterError as e:
+                result.put((False, "target lost: %s" % e))
                 raise
             except Exception as e:  # command bug: report, keep polling
                 result.put((False, e))

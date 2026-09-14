@@ -281,7 +281,7 @@ class Engine:
         except queue.Empty:
             raise EngineError("command timed out")
         if not ok:
-            raise EngineError("command failed: %r" % (result,))
+            raise EngineError("command failed: %s" % (result,))
         return result
 
     def _handle_snapshot(self, snap: Snapshot) -> None:

@@ -645,6 +645,128 @@ def test_target_reboot_resyncs_trace_session(qtbot):
         engine.stop()
 
 
+def test_recovery_retries_after_transient_failure_and_restores_channels(
+        qtbot, monkeypatch):
+    """T11 hardware gate re-review: reading self.reader.desc_addr/
+    self._slots directly during recovery meant a single TRANSIENT
+    re-discovery failure (plausible right after a real reconnect)
+    permanently disabled every later attempt (desc_addr stays None
+    forever) - and even a discover-ok/set_watch-fails sequence would
+    have left self._slots already cleared for whatever retry came
+    next, restoring zero channels instead of the originals.
+    self._trace_home (a durable copy, untouched by a failed attempt)
+    fixes both: monkeypatches TraceReader.discover to fail exactly
+    once, drives two _drain_once() ticks (the second is THIS page's own
+    re-arm retry - self._was_lost set again inside
+    _recover_after_reboot() on failure - not a fresh TARGET_LOST/
+    RUNNING cycle), and asserts the ORIGINAL channel (name, address)
+    comes back exactly on the second attempt, with exactly one
+    "recovery failed" info line logged (not one per tick) followed by
+    exactly one success line."""
+    engine = _make_demo_like_engine(period_us=1000)
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+
+        infos = []
+        page.on_info = infos.append
+
+        slot_a = page.add_address_slot(0x20000000, "chan_a", "u32")
+        assert slot_a == 0
+        home_addr = page.reader.desc_addr
+        assert page._trace_home == (home_addr, [(0x20000000, "chan_a", "u32")])
+
+        real_discover = TraceReader.discover
+        calls = {"n": 0}
+
+        def flaky_discover(self, addr):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TraceError("transient failure")
+            return real_discover(self, addr)
+
+        monkeypatch.setattr(TraceReader, "discover", flaky_discover)
+
+        # Stand in for "a lost-running cycle just happened" without
+        # driving a real poller thread - _recover_after_reboot() itself
+        # is what's under test here, not _on_engine_state's wiring
+        # (already covered by the previous test).
+        page._was_lost = True
+        page._target_lost = False
+        page._poller_running = True
+
+        page._drain_once()          # attempt 1: re-discovery fails
+        assert page.reader.desc_addr is None       # _discover_at's own
+                                                     # failure path - the
+                                                     # LIVE value, not home
+        assert page._trace_home == (home_addr, [(0x20000000, "chan_a", "u32")])
+        assert page._was_lost is True               # re-armed for a retry
+
+        page._drain_once()          # attempt 2: succeeds
+        assert not page._was_lost
+        slots = page.channel_slots()
+        assert slots[0] is not None
+        assert slots[0]["label"] == "chan_a"
+        assert slots[0]["addr"] == 0x20000000
+        assert slots[1] is None
+
+        failure_lines = [m for m in infos if "recovery failed" in m]
+        assert len(failure_lines) == 1
+        assert infos[-1] == "target rebooted - trace channels resubmitted"
+    finally:
+        engine.stop()
+
+
+def test_reboot_detected_via_exception_route_without_target_lost(qtbot):
+    """T11 hardware gate re-review: the TraceRebootedError route must
+    work independently of the _was_lost latch - a target-only reset
+    that never drops the probe's own USB connection (so the poller
+    never reports TARGET_LOST at all) must still be recovered from, the
+    moment reader.refresh() itself notices wr_seq regressed - never
+    routed through, or dependent on, the TARGET_LOST-driven latch."""
+    engine = _make_demo_like_engine(period_us=1000)
+    engine.start()
+    try:
+        page = ScopePage(engine)
+        qtbot.addWidget(page)
+        assert page.desc is not None
+        fw = engine._demo_trace_fw
+
+        slot_a = page.add_address_slot(0x20000000, "chan_a", "u32")
+        assert slot_a == 0
+
+        fw.step(10)
+        page._drain_once()
+        assert page.channel_sample_count(0) > 0
+        assert page._was_lost is False    # confirms no TARGET_LOST path
+                                           # was ever taken up to here
+
+        fw.reboot()                       # target-only reset - no
+                                           # TARGET_LOST is ever reported
+        assert page._was_lost is False
+
+        page._drain_once()                # reader.refresh() raises
+                                           # TraceRebootedError here
+
+        assert page._was_lost is False    # still never set - proves
+                                           # this recovery ran via the
+                                           # exception route, not the latch
+        assert page.error_label.text() == ""
+        slots = page.channel_slots()
+        assert slots[0] is not None
+        assert slots[0]["label"] == "chan_a"
+        assert slots[0]["addr"] == 0x20000000
+        assert page.channel_sample_count(0) == 0    # store restarted
+
+        fw.step(5)
+        page._drain_once()
+        assert page.channel_sample_count(0) > 0
+    finally:
+        engine.stop()
+
+
 def test_slow_drain_interval_derived_from_real_firmware_ring_span(qtbot):
     """Hardware finding (Task 10 E2E suite): a fixed 500ms slow-drain
     interval is only safe for firmware slow enough that 500ms sits

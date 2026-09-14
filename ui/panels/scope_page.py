@@ -174,6 +174,22 @@ plain callback (default a no-op) MainWindow wires to the real
 `EventLog` after constructing this page - see `_recover_after_reboot`'s
 own comment.
 
+Recovery reads ONLY `self._trace_home` (re-review fix round 2) - a
+DURABLE `(desc_addr, [(addr, label, type_name), ...])` snapshot kept
+entirely separate from `self.reader.desc_addr`/`self._slots`, both of
+which a FAILED recovery attempt can leave transiently cleared (a failed
+re-discovery nulls `reader.desc_addr`; a succeeded re-discovery
+followed by a failed re-submit leaves `self._slots` already wiped by
+that re-discovery's own channel reset). `_capture_trace_home()`
+refreshes it at every point discovery+table state successfully settles
+- a normal `_discover_at()` success, `add_address_slot()`/
+`remove_channel()`, or a FULLY successful recovery - and a failed
+recovery attempt leaves it completely untouched, re-arming
+`self._was_lost` so the very next tick retries against the same,
+still-valid home instead of a permanently `None` one. `self._recovery_
+attempts` gates `on_info()` to once per failure streak, not once per
+retry tick.
+
 X axis: ROLL MODE, standard-scope style, unchanged since M6.
 Every sample plots at sample_t - now, where now = time.monotonic() is
 captured once per refresh_plot() call and cached as `self._last_now`
@@ -687,6 +703,39 @@ class ScopePage(QWidget):
         # construction - see _recover_after_reboot's own comment for
         # why this page cannot just reach into a log dock directly.
         self.on_info: Callable[[str], None] = _noop
+        # T11 hardware gate (re-review, fix round 2): a DURABLE copy of
+        # "what a successful discovery+table state last looked like" -
+        # (desc_addr, [(addr, label, type_name), ...] in slot order) -
+        # kept entirely separate from self.reader.desc_addr and
+        # self._slots because recovery itself transiently clears BOTH
+        # of those (a failed re-discovery nulls reader.desc_addr; a
+        # SUCCEEDED re-discovery followed by a FAILED re-submit leaves
+        # self._slots already wiped by that re-discovery's own
+        # _reset_channels()) - reading either live value from inside a
+        # recovery attempt risks a single transient failure silently
+        # disabling every later recovery attempt for the rest of the
+        # page's life, or restoring zero channels instead of the
+        # originals. Captured (see _capture_trace_home) at every point
+        # this page's discovery+table state successfully settles - a
+        # normal _discover_at() success, a successful add_address_slot/
+        # remove_channel, or a recovery that succeeded ALL the way
+        # through - and left COMPLETELY UNTOUCHED by a recovery attempt
+        # that fails at either step, so the next retry always has the
+        # same original target to aim for. None until the first
+        # successful discovery.
+        self._trace_home: Optional[Tuple[int, List[Tuple[int, str, str]]]] \
+            = None
+        # T11 hardware gate (re-review, fix round 2): counts consecutive
+        # FAILED recovery attempts since the last success (or since the
+        # first attempt of a fresh failure streak) - see
+        # _recover_after_reboot(). Exists purely to gate on_info() calls:
+        # _drain_once() re-arms the latch on every failure so the NEXT
+        # tick retries immediately, which would otherwise log a new
+        # "recovery failed" line every tick for as long as the
+        # underlying problem persists. Logged only when this is 1 (the
+        # first failure of a streak); reset to 0 on a successful
+        # recovery.
+        self._recovery_attempts = 0
         # Subscribes directly to Engine.on_state() rather than routing
         # through EngineBridge/Qt signals - accepted (not an oversight)
         # because the callback contract here is narrow and fully safe
@@ -1028,7 +1077,28 @@ class ScopePage(QWidget):
 
     # -- trace discovery & page state (spec point 1) -------------------------
 
-    def _discover_at(self, addr: int) -> bool:
+    def _capture_trace_home(self) -> None:
+        """T11 hardware gate (re-review, fix round 2): refresh
+        self._trace_home from the CURRENT reader.desc_addr and
+        self._slots - see that attribute's own __init__ comment for why
+        it exists as a separate, durable copy. Called after every
+        successful _discover_at() (default behavior - see its
+        update_home parameter) and after every successful
+        add_address_slot()/remove_channel(), and once, explicitly, at
+        the very end of a FULLY successful _recover_after_reboot() (which
+        calls _discover_at() with update_home=False specifically so this
+        does NOT fire on its own interim re-discovery step, before the
+        re-submit is known to have succeeded too). A no-op if
+        reader.desc_addr is None (nothing discovered - should not
+        normally be reachable, since every call site above only runs
+        after establishing it, but defensive regardless)."""
+        if self.reader.desc_addr is None:
+            return
+        occupied = [(s["addr"], s["label"], s["type"]) for s in self._slots
+                   if s is not None]
+        self._trace_home = (self.reader.desc_addr, occupied)
+
+    def _discover_at(self, addr: int, update_home: bool = True) -> bool:
         """Attempt trace discovery at addr and update this page's
         state: READY (self.desc set, rate_label shows the firmware's
         own period, error_label cleared, self.store (re)created and
@@ -1057,7 +1127,17 @@ class ScopePage(QWidget):
         say there is none - this keeps "page.desc is None" and "no
         channel can be added" in lockstep. Returns whether discovery
         succeeded, for callers (load_elf(), __init__) that branch on
-        it."""
+        it.
+
+        update_home (T11 hardware gate, re-review fix round 2): when
+        True (the default, used by every normal caller), a successful
+        discovery also refreshes self._trace_home (_capture_trace_home)
+        - the durable recovery anchor. _recover_after_reboot() passes
+        False for its OWN interim re-discovery step specifically so
+        that step alone does NOT commit a new home (to an empty channel
+        list, since _reset_channels() below always clears self._slots)
+        before it is known whether the re-submit that follows will
+        succeed too - see that method's own comment."""
         try:
             self.desc = self.reader.discover(addr)
         except (TraceError, EngineError) as e:
@@ -1084,6 +1164,8 @@ class ScopePage(QWidget):
             _drain_interval_ms(self.desc.ring_count, self.desc.period_us))
         if not self._drain_timer.isActive():
             self._drain_timer.start()
+        if update_home:
+            self._capture_trace_home()
         return True
 
     def rate_label_text(self) -> str:
@@ -1244,6 +1326,7 @@ class ScopePage(QWidget):
 
         self.error_label.setText("")
         self._render_slot_rows()
+        self._capture_trace_home()
         return row
 
     def remove_channel(self, slot: int) -> None:
@@ -1285,6 +1368,7 @@ class ScopePage(QWidget):
             self.reader.set_watch(
                 [s["addr"] for s in self._slots if s is not None])
             self.error_label.setText("")
+            self._capture_trace_home()
         except (TraceError, EngineError) as e:
             self.error_label.setText(str(e))
 
@@ -1808,57 +1892,94 @@ class ScopePage(QWidget):
         that no longer exists the instant this happens, and must be
         rebuilt, not merely reconnected to:
 
-          1. Re-discover at the SAME address (self.reader.desc_addr,
-             set by the ORIGINAL discover() and never touched again
-             once READY) - _discover_at() already does everything a
-             cold reboot needs on its own success path: rebuilds
-             self.reader's session state from the freshly read (post-
-             reboot) descriptor, clears every channel slot, and swaps
-             in a BRAND NEW TraceStore - the seq->t time axis
-             restarting from ~0 is the honest outcome of a real reboot
-             (a spliced axis, pretending the old and new sessions are
-             one continuous timeline, would lie about what the ring
-             actually contains now).
-          2. Re-submit the SAME addresses that were occupied, in the
-             SAME order, as one set_watch() call - watch index == table
-             row == record slot must keep holding (module docstring's
-             "Channel slots" paragraph) exactly as if nothing had
-             happened from the operator's point of view, even though
-             the firmware underneath has no memory of ever having been
-             told to watch them.
+          1. Re-discover at the SAME address self._trace_home recorded
+             (update_home=False - see _discover_at's own comment: this
+             step alone must NOT commit a new home yet) -
+             _discover_at() already does everything a cold reboot needs
+             on its own success path: rebuilds self.reader's session
+             state from the freshly read (post-reboot) descriptor,
+             clears every channel slot, and swaps in a BRAND NEW
+             TraceStore - the seq->t time axis restarting from ~0 is
+             the honest outcome of a real reboot (a spliced axis,
+             pretending the old and new sessions are one continuous
+             timeline, would lie about what the ring actually contains
+             now).
+          2. Re-submit the SAME addresses self._trace_home recorded, in
+             the SAME order, as one set_watch() call - watch index ==
+             table row == record slot must keep holding (module
+             docstring's "Channel slots" paragraph) exactly as if
+             nothing had happened from the operator's point of view,
+             even though the firmware underneath has no memory of ever
+             having been told to watch them.
           3. Re-populate self._slots/the channel table from that same
              list, so channel_slots() shows the identical rows it did
              before the reboot - only the underlying data restarts, not
              what the operator was watching.
+          4. Only once BOTH steps have fully succeeded, refresh
+             self._trace_home (_capture_trace_home) from the
+             now-restored state.
 
-        A failure at either step (re-discovery, or the re-submit)
-        renders inline via the same paths those primitives already use
-        (_discover_at()/set_watch()'s own error text) and leaves the
-        page in whatever state that failure produces - there is no
-        retry loop here beyond the next TARGET_LOST/RUNNING cycle (or
-        TraceRebootedError) that might happen later.
+        Reads ONLY self._trace_home for the address and channel list -
+        deliberately never self.reader.desc_addr (which a FAILED
+        re-discovery attempt nulls - see _discover_at's own comment on
+        why) or the live self._slots (which a SUCCEEDED re-discovery
+        followed by a FAILED re-submit leaves already wiped by that
+        re-discovery's own _reset_channels()). Re-review fix round 2:
+        an earlier version read those live values directly, so a single
+        transient re-discovery failure (plausible right after a real
+        reconnect) permanently disabled every later recovery attempt
+        for the page's life, and a discover-ok/set_watch-fails sequence
+        would have made any FUTURE retry restore zero channels instead
+        of the originals - both now impossible, since self._trace_home
+        is left completely untouched by a failed attempt.
+
+        A failure at either step renders inline via the same paths
+        those primitives already use (_discover_at()/set_watch()'s own
+        error text), leaves self._trace_home exactly as it was, and
+        RE-ARMS self._was_lost so the very next _drain_once() tick
+        retries against that same, still-valid home - not just the next
+        TARGET_LOST/RUNNING cycle or TraceRebootedError. One info line
+        is logged per FAILURE STREAK (self._recovery_attempts, reset to
+        0 on success), not per retry tick, so a persistent problem does
+        not spam the log once per drain interval.
 
         Runs on the Qt thread only (this method is only ever called
         from _drain_once(), a QTimer slot) - the bools it reads
         (self._was_lost/_poller_running/_target_lost) are written only
         by the poller thread, one-directional and lock-free for the
         same reason those attributes' own __init__ comments give."""
-        addr = self.reader.desc_addr
-        if addr is None:
-            # Never discovered (or a previous attempt already failed
-            # and cleared it) - nothing to resync back to.
+        if self._trace_home is None:
+            # Never successfully discovered anything yet - nothing to
+            # resync back to. (Should be rare: _was_lost/
+            # TraceRebootedError both imply some prior successful
+            # session, but a page that never got past NO_SOURCE could
+            # still observe an engine-wide TARGET_LOST.)
             return
-        occupied = [(s["addr"], s["label"], s["type"]) for s in self._slots
-                   if s is not None]
+        addr, occupied = self._trace_home
+        self._recovery_attempts += 1
 
-        if not self._discover_at(addr):
-            return  # _discover_at() already rendered the failure inline
+        if not self._discover_at(addr, update_home=False):
+            # _discover_at() already rendered the failure inline (and
+            # nulled self.reader.desc/desc_addr - but self._trace_home
+            # is untouched, since update_home=False). Re-arm so the
+            # NEXT tick retries against the same home.
+            self._was_lost = True
+            if self._recovery_attempts == 1:
+                self.on_info(
+                    "target reboot recovery failed (rediscovery), will "
+                    "retry: %s" % self.error_label.text())
+            return
 
         if occupied:
             try:
                 self.reader.set_watch([a for a, _label, _type in occupied])
             except (TraceError, EngineError) as e:
                 self.error_label.setText(str(e))
+                self._was_lost = True
+                if self._recovery_attempts == 1:
+                    self.on_info(
+                        "target reboot recovery failed (resubmit), will "
+                        "retry: %s" % str(e))
                 return
             for row, (chan_addr, label, type_name) in enumerate(occupied):
                 self._slots[row] = self._make_slot_entry(
@@ -1866,6 +1987,8 @@ class ScopePage(QWidget):
             self._render_slot_rows()
             self.error_label.setText("")
 
+        self._capture_trace_home()
+        self._recovery_attempts = 0
         self.on_info("target rebooted - trace channels resubmitted")
 
     def _update_status_health(self) -> None:

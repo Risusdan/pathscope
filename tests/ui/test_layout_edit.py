@@ -6,7 +6,9 @@ directly rather than going through Qt's event loop (offscreen
 platform, no real mouse)."""
 import dataclasses
 
+import pytest
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QImage, QPainter
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -71,6 +73,22 @@ def _make_wire(points=None, label="L"):
         pts = [QPointF(0, 0), QPointF(100, 0)]
     wire = WireItem(edge, pts, state)
     return wire, state, edge
+
+
+def _paint_wire(wire):
+    """Actually renders the wire (not just exercises its data-model
+    methods) by handing it a real QPainter on an offscreen QImage.
+    This is the only way to reproduce the crash class a fix-round
+    review found: WireItem.paint()'s arrowhead code indexes
+    self.pts[-2]/self.pts[-1], which raises IndexError for a
+    transient invalid (sub-2-point) state that a data-only assertion
+    between deletes would never exercise."""
+    img = QImage(200, 200, QImage.Format_ARGB32)
+    painter = QPainter(img)
+    try:
+        wire.paint(painter, None)
+    finally:
+        painter.end()
 
 
 # -- snap() -------------------------------------------------------------
@@ -544,21 +562,50 @@ def test_double_click_outside_edit_mode_does_nothing():
 # -- M8 task 4: Delete on a selected handle removes its point ------------
 
 
-def test_delete_removes_selected_point():
-    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+def test_delete_removes_selected_interior_point():
+    # 2 interior points ((30,10) and (50,10)) between the (10,10)/
+    # (90,10) anchors - deleting one interior point still leaves the
+    # path explicit (3 points remain, more than just the 2 anchors),
+    # so no auto-route reversion happens here (see the dedicated
+    # revert-to-auto-route test below for that boundary case).
+    wire, state, edge = _make_wire(
+        points=[(10, 10), (30, 10), (50, 10), (90, 10)])
     wire.set_editable(True)
     calls = []
     state.on_geometry_changed = lambda: calls.append(list(edge.points))
 
-    handle = wire._handles[1]
+    handle = wire._handles[1]   # the first interior point, (30, 10)
     handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
 
-    assert edge.points == [(10, 10), (90, 10)]
-    assert calls == [[(10, 10), (90, 10)]]
-    assert len(wire._handles) == 2
+    assert edge.points == [(10, 10), (50, 10), (90, 10)]
+    assert calls == [[(10, 10), (50, 10), (90, 10)]]
+    assert len(wire._handles) == 3
 
 
-def test_deleting_last_point_empties_list_and_reverts_to_auto_route():
+def test_delete_on_endpoint_handle_is_a_noop():
+    # Endpoints (index 0 and -1) are anchors, not waypoints, under the
+    # full-polyline schema - Delete must never be able to detach the
+    # wire from its block (fix-round ruling, Important 1).
+    wire, state, edge = _make_wire(points=[(0, 0), (50, 0), (100, 0)])
+    wire.set_editable(True)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+
+    wire._handles[0].keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))    # src
+    wire._handles[-1].keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))   # dst
+
+    assert edge.points == [(0, 0), (50, 0), (100, 0)]
+    assert calls == []
+    assert len(wire._handles) == 3
+
+
+def test_deleting_the_only_interior_point_reverts_to_auto_route():
+    # Freezing a pointless edge via double-click always yields 2
+    # anchors + >= 1 interior point; deleting that last interior point
+    # down to just the 2 anchors IS "deleting the last waypoint" under
+    # the corrected schema - it reverts to points == [] (auto-
+    # routing), which also makes the invalid 1-point state (see
+    # apply_points) unreachable by construction.
     wire, state, edge = _make_wire(points=None)
     auto_a, auto_b = wire.pts[0], wire.pts[1]
     wire.set_editable(True)
@@ -566,13 +613,32 @@ def test_deleting_last_point_empties_list_and_reverts_to_auto_route():
     wire.mouseDoubleClickEvent(_FakeEvent(pos=QPointF(53, 4)))
     assert len(edge.points) == 3
 
-    wire.remove_point(0)
-    wire.remove_point(0)
-    wire.remove_point(0)
+    interior_handle = wire._handles[1]
+    interior_handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
 
     assert edge.points == []
     assert wire.pts == [auto_a, auto_b]
     assert wire._handles == []
+
+
+def test_chained_interior_deletes_stay_paintable():
+    # Direct repro of the fix-round Critical finding: the reviewer
+    # reproduced an IndexError in paint() mid-chain that a purely
+    # data-level assertion between deletes (no actual paint() call)
+    # never caught. Every step here renders the wire for real via a
+    # QPainter on an offscreen QImage.
+    wire, state, edge = _make_wire(
+        points=[(0, 0), (20, 0), (40, 0), (60, 0), (100, 0)])
+    wire.set_editable(True)
+    _paint_wire(wire)   # sanity: paints fine before any delete
+
+    while len(wire.edge.points) > 2:
+        interior_handle = wire._handles[1]   # always the first interior
+        interior_handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
+        _paint_wire(wire)   # must not raise at any point in the chain
+
+    assert edge.points == []
+    _paint_wire(wire)   # auto-routed fallback paints fine too
 
 
 # -- M8 task 4: apply_points (undo restore path) --------------------------
@@ -603,10 +669,22 @@ def test_apply_points_with_empty_list_reverts_to_auto_route():
     calls = []
     state.on_geometry_changed = lambda: calls.append(1)
 
-    wire.apply_points([(37, 53)])
-    assert edge.points == [(37, 53)]
+    wire.apply_points([(37, 53), (80, 53)])   # 2 anchors, valid
+    assert edge.points == [(37, 53), (80, 53)]
 
     wire.apply_points([])
     assert edge.points == []
     assert wire.pts == auto
     assert calls == []
+
+
+def test_apply_points_rejects_single_point_list():
+    # A single point is neither a valid explicit path (needs >= 2
+    # anchors) nor the empty auto-route sentinel - fix-round ruling
+    # (Critical): this is the invalid state remove_point can no
+    # longer produce, so apply_points must refuse it too rather than
+    # silently accepting an undo snapshot that would crash paint().
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+
+    with pytest.raises(ValueError):
+        wire.apply_points([(5, 5)])

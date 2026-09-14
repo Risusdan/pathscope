@@ -320,6 +320,15 @@ def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
 
 
 class WireItem(QGraphicsItem):
+    """Renders one Edge as a polyline: the explicit full path from
+    edge.points when non-empty (index 0 and -1 are the source/dest
+    anchors, everything between is an interior waypoint), an
+    auto-routed straight line to the connected blocks' ports
+    otherwise. Limitation: once an edge has an explicit path its
+    anchors do not re-track a moved block (this has always been true
+    of hand-authored edges too) - drag the endpoint's WaypointHandle
+    to manually re-anchor it after moving a block."""
+
     def __init__(self, edge: Edge, pts, state):
         super().__init__()
         self.edge = edge
@@ -381,7 +390,23 @@ class WireItem(QGraphicsItem):
         match, and repaints. Must NEVER call snap() on the restored
         coordinates and must NEVER fire on_geometry_changed: the undo
         stack is popping an already-applied snapshot, not a new user
-        gesture."""
+        gesture.
+
+        Raises ValueError for a length-1 list: under the full-polyline
+        schema (index 0/-1 are the source/dest anchors, everything
+        between is an interior waypoint) a single point is neither a
+        valid explicit path - which needs at least its 2 endpoint
+        anchors - nor the empty auto-route sentinel. This module never
+        produces that state itself (remove_point collapses straight to
+        [] once only the 2 anchors remain, and mouseDoubleClickEvent
+        only ever grows a path), so undo snapshots should never
+        contain it either; a length-1 list here means a caller bug."""
+        if len(points) == 1:
+            raise ValueError(
+                "WireItem.apply_points: a single-point path is "
+                "invalid - edge.points must be empty (auto-route) or "
+                "have >= 2 points (source/dest anchors plus optional "
+                "interior waypoints)")
         self.prepareGeometryChange()
         self.edge.points = list(points)
         if self.edge.points:
@@ -393,20 +418,35 @@ class WireItem(QGraphicsItem):
         self.update()
 
     def remove_point(self, index: int) -> None:
-        """Delete key on a selected WaypointHandle: removes
-        edge.points[index] and fires on_geometry_changed once - no
-        implicit collinear merging is ever applied (spec section 3).
-        Edge case (controller resolution): deleting the LAST
-        remaining point leaves edge.points == [] and the wire reverts
-        to its auto-routed fallback path - that is correct and
-        intended, matching "edges without a points: list show only
-        their endpoints" (design spec section 3): a fully-emptied
-        explicit path is indistinguishable from one that was never
-        made explicit, so the edge simply reverts to auto-routing."""
+        """Delete key on a selected WaypointHandle: removes an
+        INTERIOR waypoint (any index other than 0 or -1) and fires
+        on_geometry_changed once - no implicit collinear merging is
+        ever applied (spec section 3). The two endpoints (index 0 and
+        len(edge.points)-1) are anchors, not waypoints, under the
+        full-polyline schema - WaypointHandle.keyPressEvent already
+        refuses to call this for an endpoint index, so `index` here is
+        normally always interior; this method still no-ops
+        defensively for an endpoint/out-of-range index rather than
+        ever producing an invalid path.
+
+        Edge case (controller ruling): once an interior delete leaves
+        only the 2 endpoints, edge.points reverts to [] (auto-
+        routing) instead of staying a 2-element explicit path - a
+        frozen path down to just its 2 endpoints is indistinguishable
+        from an edge that was never made explicit (spec section 3:
+        "edges without a points: list show only their endpoints").
+        This is also what makes the invalid length-1 state (see
+        apply_points) unreachable by construction: an interior delete
+        can only ever land on >= 3 points (still explicit) or exactly
+        0 (auto-route) - never 1."""
+        n = len(self.edge.points)
+        if n < 3 or index <= 0 or index >= n - 1:
+            return   # endpoint, or nothing interior to remove - no-op
         self.prepareGeometryChange()
         del self.edge.points[index]
         del self.pts[index]
-        if not self.edge.points:
+        if len(self.edge.points) <= 2:
+            self.edge.points = []
             self.pts = list(self._auto_pts)
         if self._editable:
             self._rebuild_handles()
@@ -617,7 +657,21 @@ class WaypointHandle(QGraphicsItem):
 
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            self.parentItem().remove_point(self.index)
+            wire = self.parentItem()
+            n = len(wire.edge.points)
+            if self.index == 0 or self.index == n - 1:
+                # Endpoints are anchors, not waypoints (full-polyline
+                # schema: edge.points[0]/[-1] are where the wire
+                # connects to its blocks) - Delete on an endpoint
+                # handle is a documented no-op so a stray keypress can
+                # never detach the wire from a block. The endpoint
+                # stays draggable (see mouseMoveEvent/
+                # mouseReleaseEvent above) for manual re-anchoring;
+                # only interior points are deletable, via
+                # WireItem.remove_point.
+                ev.accept()
+                return
+            wire.remove_point(self.index)
             ev.accept()
         else:
             ev.accept()

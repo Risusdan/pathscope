@@ -56,7 +56,9 @@ With a Blackpill (STM32F411CE) + ST-Link:
 The scope view needs a firmware-side trace buffer: link
 `firmware/ps_trace` into the firmware and call `ps_trace_sample()`
 from one periodic timer ISR (1 kHz on the Blackpill demo). The
-Blackpill demo firmware already integrates it - flash
+Blackpill demo firmware already integrates it - build it first
+(`make` in `firmware/blackpill_adc_dma`, needs `arm-none-eabi-gcc`;
+`fw.elf` is not checked in), flash the resulting
 `firmware/blackpill_adc_dma/fw.elf`, then in the app open the scope
 tab, Load ELF, and add channels.
 

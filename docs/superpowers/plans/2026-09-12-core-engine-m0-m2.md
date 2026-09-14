@@ -1,5 +1,10 @@
 # Data Path Explorer Core Engine (M0-M2) Implementation Plan
 
+> **Precedence note:** specs under `docs/superpowers/specs/` are living
+> and binding; plans under `docs/superpowers/plans/` (this file
+> included) are point-in-time execution documents and are not updated
+> after the fact - where a plan and a spec disagree, the spec wins.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the headless polling/rule engine, the pyOCD SWD adapter, the

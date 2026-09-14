@@ -4,6 +4,37 @@ Date: 2026-09-12
 Status: Draft for review
 Scope: MVP feasibility phase (target: STM32F411 "Blackpill" board)
 
+## As-built deltas (2026-09-14)
+
+This spec is preserved as the original design record; the points below
+are where the as-built code (post-M7) has since diverged. Treat these as
+authoritative over the historical text in sections 4, 4.1, 5, and 8.
+
+- **Adapter ABC (4.1).** The real `TargetAdapter` (core/adapter/base.py)
+  exposes `read_block32(addr, count) -> List[int]` and
+  `write32(addr, value) -> None` only. There is no `read_mem`/`write_mem`
+  byte-oriented pair; this is the actual seam a new transport adapter
+  implements.
+- **SVD module name (4).** The register-model loader is
+  `core/target/registers.py`, not `svd_loader.py`. It is a
+  self-contained CMSIS-SVD subset parser built on
+  `xml.etree.ElementTree` - it does not wrap pyOCD's parser. pyOCD stays
+  confined to `core/adapter/pyocd_swd.py`.
+- **Target file layout (5).** Each target is a directory,
+  `targets/<name>/`, holding its three description files (e.g.
+  `targets/f411/STM32F411.svd`, `f411.topology.yaml`, `f411.flows.yaml`),
+  not flat files named `targets/f411.svd`. `Engine.load` (core/engine/
+  core.py) glob-discovers exactly one file of each kind inside the
+  directory and fails fast if that count is not exactly one.
+- **Word-oriented access, not a byte API (4.1, 6.2).** The engine
+  surfaces `Engine.read_words`/`write_word` (core/engine/core.py), built
+  on the adapter's `read_block32`/`write32`; there is no byte-buffer
+  `read_mem`/`write_mem` path anywhere above the adapter.
+- **UI testing (8).** The UI layer has a substantial offscreen pytest
+  suite (100+ tests under `tests/ui/`, exercising page states, refusal
+  ordering, and timer-driven behavior with no display) in addition to
+  manual testing; it is not manual-only.
+
 ## 1. Purpose
 
 A desktop debug tool that visualizes an MCU/SoC's internal data paths as a

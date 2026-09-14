@@ -1,26 +1,25 @@
 """DiagramState and the scene builder that turns a Topology into
 BlockItem/WireItem QGraphicsItems.
 
-Nothing here imports the engine (core.engine.*) - only the topology
-dataclasses. DiagramState is the mutable holder the items read at paint
-time; the main window (a later task) owns one instance, fills it in
-from EngineUpdate, and calls .update() on the affected items."""
-from dataclasses import dataclass
+Nothing here imports engine machinery (core.engine.poller/evaluator/
+etc.) - only plain dataclasses (topology, and BadgeState below). This
+is a Qt-free-of-engine boundary, not a no-import-from-core-engine-at-all
+one: BadgeState is imported from core.engine.rules to avoid a second,
+drifting copy (see its own definition there) rather than redefined
+here, since it carries no polling/threading coupling. DiagramState is
+the mutable holder the items read at paint time; the main window (a
+later task) owns one instance, fills it in from EngineUpdate, and calls
+.update() on the affected items."""
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import QGraphicsScene
 
+from core.engine.rules import BadgeState
 from core.target.topology import Block, Edge, Topology
 
 from .items import BlockItem, WireItem
-
-
-@dataclass
-class BadgeState:
-    count: int = 0
-    active: bool = False
 
 
 def _noop(_id: str) -> None:

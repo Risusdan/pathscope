@@ -45,8 +45,11 @@ class Edge:
 
 @dataclass
 class Topology:
+    """blocks/edges plus the optional layout.legend position (M8:
+    the GUI's draggable legend marker - UI geometry, not a block)."""
     blocks: Dict[str, Block]
     edges: List[Edge]
+    legend: Optional[Tuple[int, int]] = None
 
 
 def load_topology(path: str, model: RegisterModel) -> Topology:
@@ -91,7 +94,13 @@ def load_topology(path: str, model: RegisterModel) -> Topology:
             label=raw.get("label"), when_select=raw.get("when_select"),
             src_port=raw.get("from_port"), dst_port=raw.get("to_port"),
             points=points))
-    for bid, pos in (doc.get("layout") or {}).items():
+    layout = doc.get("layout") or {}
+    legend_pos = layout.get("legend")
+    legend = ((int(legend_pos["x"]), int(legend_pos["y"]))
+             if legend_pos is not None else None)
+    for bid, pos in layout.items():
+        if bid == "legend":
+            continue
         if bid not in blocks:
             raise TopologyError("layout: unknown block %r" % bid)
         b = blocks[bid]
@@ -100,4 +109,4 @@ def load_topology(path: str, model: RegisterModel) -> Topology:
             b.w = int(pos["w"])
         if "h" in pos:
             b.h = int(pos["h"])
-    return Topology(blocks=blocks, edges=edges)
+    return Topology(blocks=blocks, edges=edges, legend=legend)

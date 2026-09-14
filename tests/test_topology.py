@@ -93,6 +93,19 @@ def test_layout_unknown_id_rejected(tmp_path, model):
         _load(tmp_path, model, GOOD + "\nlayout:\n  ghost: {x: 1, y: 2}\n")
 
 
+def test_layout_legend_absent_is_none(tmp_path, model):
+    t = _load(tmp_path, model, LAYOUT)
+    assert t.legend is None
+
+
+def test_layout_legend_parsed(tmp_path, model):
+    text = LAYOUT + "  legend: {x: 700, y: 400}\n"
+    t = _load(tmp_path, model, text)
+    assert t.legend == (700, 400)
+    # legend is not itself a block:
+    assert "legend" not in t.blocks
+
+
 def test_edge_points_parsed(tmp_path, model):
     text = GOOD.replace(
         "  - {from: adc1, to: mux0, when_select: 0}",

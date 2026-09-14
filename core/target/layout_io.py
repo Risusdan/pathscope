@@ -27,8 +27,18 @@ _TO_RE = re.compile(r'\bto:\s*([^\s,}]+)')
 _LABEL_RE = re.compile(r'\blabel:\s*"?([^",}]*)"?')
 
 
+def _detect_newline(text: str) -> str:
+    # Regenerated lines must match the file's own line-ending style -
+    # otherwise a CRLF-authored file would come back with bare \n on
+    # every line this module writes, silently mixing endings. Decide
+    # by majority so a handful of stray endings don't flip the style.
+    crlf = text.count("\r\n")
+    lf_only = text.count("\n") - crlf
+    return "\r\n" if crlf > lf_only else "\n"
+
+
 def _is_top_level_line(line: str) -> bool:
-    stripped = line.rstrip("\n")
+    stripped = line.rstrip("\r\n")
     return bool(stripped) and not stripped[0].isspace()
 
 
@@ -146,7 +156,7 @@ def _format_field(name: str, value: int, width: int) -> str:
     return "%s: %d," % (name, value) + " " * pad
 
 
-def _format_layout_lines(blocks) -> List[str]:
+def _format_layout_lines(blocks, nl: str) -> List[str]:
     if not blocks:
         return []
     id_width = max(len(bid) for bid in blocks) + 2
@@ -160,7 +170,7 @@ def _format_layout_lines(blocks) -> List[str]:
                 + _format_field("y", y, y_width)
                 + _format_field("w", w, w_width)
                 + "h: %d" % h)
-        out.append("  %s{%s}\n" % (id_field, body))
+        out.append("  %s{%s}%s" % (id_field, body, nl))
     return out
 
 
@@ -168,6 +178,7 @@ def patch_layout_text(original: str,
                       blocks: "OrderedDict[str, Tuple[int, int, int, int]]",
                       edge_points: "Dict[Tuple[str, str, str], Optional[List[Tuple[int, int]]]]",
                       legend: "Optional[Tuple[int, int]]") -> str:
+    nl = _detect_newline(original)
     lines = original.splitlines(keepends=True)
     layout_idx = _find_layout_line(lines)
 
@@ -184,19 +195,19 @@ def patch_layout_text(original: str,
                 carried_legend = line
                 break
 
-    section = ["layout:\n"] + _format_layout_lines(blocks)
+    section = ["layout:" + nl] + _format_layout_lines(blocks, nl)
     if legend is not None:
         lx, ly = legend
-        section.append("  legend: {x: %d, y: %d}\n" % (lx, ly))
+        section.append("  legend: {x: %d, y: %d}%s" % (lx, ly, nl))
     elif carried_legend is not None:
         section.append(carried_legend)
 
     if layout_idx is None:
         prefix = list(lines)
-        if prefix and not prefix[-1].endswith("\n"):
-            prefix[-1] = prefix[-1] + "\n"
+        if prefix and not prefix[-1].endswith(("\r\n", "\n")):
+            prefix[-1] = prefix[-1] + nl
         if prefix and prefix[-1].strip() != "":
-            prefix.append("\n")
+            prefix.append(nl)
         new_lines = prefix + section
     else:
         new_lines = lines[:layout_idx] + section + lines[end_idx:]
@@ -207,7 +218,10 @@ def patch_layout_text(original: str,
 def save_layout(path: str, blocks, edge_points, legend,
                 validate: "Callable[[str], None]") -> None:
     try:
-        with open(path, "r") as f:
+        # newline="" disables universal-newline translation on both
+        # ends: a CRLF-authored file must come back out CRLF, and the
+        # default text mode would silently flatten it to LF.
+        with open(path, "r", newline="") as f:
             original = f.read()
         patched = patch_layout_text(original, blocks, edge_points, legend)
     except Exception as e:
@@ -217,7 +231,7 @@ def save_layout(path: str, blocks, edge_points, legend,
     fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".layout.",
                                     suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", newline="") as f:
             f.write(patched)
         validate(tmp_path)
         os.replace(tmp_path, path)

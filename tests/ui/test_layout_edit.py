@@ -621,12 +621,20 @@ def test_deleting_the_only_interior_point_reverts_to_auto_route():
     assert wire._handles == []
 
 
-def test_chained_interior_deletes_stay_paintable():
+def test_chained_interior_deletes_stay_paintable(qtbot):
     # Direct repro of the fix-round Critical finding: the reviewer
     # reproduced an IndexError in paint() mid-chain that a purely
     # data-level assertion between deletes (no actual paint() call)
     # never caught. Every step here renders the wire for real via a
-    # QPainter on an offscreen QImage.
+    # QPainter on an offscreen QImage. The qtbot fixture is required
+    # here (fix round 2): _paint_wire touches fontMetrics/
+    # QFontDatabase, which needs a live QGuiApplication - without
+    # qtbot this test only passed by accident, riding on a
+    # QApplication left alive by earlier tests in the same file (and
+    # hard-aborted with "QFontDatabase: Must construct a
+    # QGuiApplication" when run standalone) - the exact execution-
+    # order masking this test exists to eliminate, reintroduced
+    # inside itself.
     wire, state, edge = _make_wire(
         points=[(0, 0), (20, 0), (40, 0), (60, 0), (100, 0)])
     wire.set_editable(True)

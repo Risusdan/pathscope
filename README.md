@@ -85,6 +85,13 @@ code.
        poll:
          guarded: ["ADC1.DR"]   # has a read side effect; never auto-polled
 
+Coordinates need not be hand-written. In the app, the Data Path page's
+Edit layout button enters a drag mode; Auto-layout provides a first draft
+for a target with no positions. Drag blocks and line waypoints to taste
+(grid-snapped, Shift for fine placement). Save layout writes coordinates
+back to topology.yaml as a surgical patch, leaving comments and hand
+formatting untouched, so the git diff shows only real changes.
+
 Point `--target-dir` at the new folder and run.
 
 ## Hardware validation

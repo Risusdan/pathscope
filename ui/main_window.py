@@ -414,10 +414,20 @@ class MainWindow(QMainWindow):
         set_editable (gates whether a drag/resize/waypoint-drag
         actually commits) are two independent switches upstream - see
         the task handover note - and MUST always be flipped together
-        here so the two can never drift apart. Toggling off leaves
-        whatever is already dirty/undo-able untouched (spec: "unsaved
-        edits stay in the items/topology objects") - only editability,
-        the dashed viewport cue and the strip's visibility change."""
+        here so the two can never drift apart.
+
+        Toggling off clears the undo stack (spec: "Stack clears on
+        save and on mode exit") - a stale pre-session snapshot must
+        never be poppable after a later re-entry into edit mode, since
+        the user would have no way to tell it apart from one made this
+        session. This is also the path _on_tab_changed's Scope-switch
+        exit uses (it flips this same button via setChecked), so both
+        exits are covered by clearing here. The DIRTY flag (and
+        layout_dirty_label) is untouched - spec: "unsaved edits stay in
+        the items/topology objects", so the label must keep showing
+        after a toggle-off/tab-switch exit until an explicit Save or
+        Revert. Only editability, the dashed viewport cue and the
+        strip's visibility otherwise change."""
         self.diagram_state.edit_mode = on
         for item in self.blocks.values():
             item.set_editable(on)
@@ -426,6 +436,9 @@ class MainWindow(QMainWindow):
         self.legend.set_editable(on)
         self.view.setStyleSheet(_EDIT_VIEW_STYLE if on else "")
         self.layout_edit_strip.setVisible(on)
+        if not on:
+            self._undo_stack = []
+            self._layout_world = self._capture_layout_world()
 
     def _capture_layout_world(self) -> Dict[str, Any]:
         return {

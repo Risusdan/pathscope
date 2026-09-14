@@ -784,21 +784,50 @@ def test_undo_restores_previous_geometry(qtbot):
     assert (item.block.x, item.block.y) == original[:2]
 
 
-def test_undo_is_a_noop_outside_edit_mode_and_when_stack_is_empty(qtbot):
+def test_undo_stack_clears_on_mode_exit_and_reentry_undo_is_noop(qtbot):
+    # Spec: "Stack clears on save and on mode exit." A gesture made
+    # this session must not be undo-able after the user leaves edit
+    # mode and comes back later - Ctrl/Cmd+Z on re-entry has nothing to
+    # pop, so the geometry from the earlier session stays exactly as
+    # committed.
     engine, win = _build_window(qtbot)
     win.edit_layout_btn.setChecked(True)
     item = win.blocks["adc1"]
     _drag_block(item, 400, 500)
     moved = item.geometry()
+    assert win._undo_stack   # the gesture pushed a snapshot
 
-    win.edit_layout_btn.setChecked(False)   # leaves the undo stack populated
-    win._on_layout_undo()                   # must not apply outside edit mode
-    assert item.geometry() == moved
+    win.edit_layout_btn.setChecked(False)   # exit mode: stack clears
+    assert win._undo_stack == []
+    assert win._layout_dirty is True        # dirty persists (untouched)
+    assert win.layout_dirty_label.isVisible() is True
 
+    win.edit_layout_btn.setChecked(True)    # re-enter later
+    win._on_layout_undo()                   # empty stack: no-op, no raise
+
+    assert item.geometry() == moved         # nothing reverted
+    assert win._layout_dirty is True        # still dirty - no Save/Revert yet
+
+
+def test_undo_guard_ignores_a_populated_stack_when_edit_mode_flag_is_off(
+        qtbot):
+    # Belt-and-suspenders on _on_layout_undo's own edit_mode guard: the
+    # toggle handler is what clears the stack on a normal exit (see the
+    # test above), but if diagram_state.edit_mode is ever false while
+    # the stack still holds something - by some other path than the
+    # toggle button - undo must still refuse to pop.
+    engine, win = _build_window(qtbot)
     win.edit_layout_btn.setChecked(True)
-    win._on_layout_undo()                   # now it applies
-    assert item.geometry() != moved
-    win._on_layout_undo()                   # stack now empty: no-op, no raise
+    item = win.blocks["adc1"]
+    _drag_block(item, 400, 500)
+    moved = item.geometry()
+    assert win._undo_stack
+
+    win.diagram_state.edit_mode = False   # bypass the toggle handler
+    win._on_layout_undo()
+
+    assert item.geometry() == moved
+    assert win._undo_stack   # untouched - the guard returned before popping
 
 
 def test_save_writes_yaml_and_reload_reproduces_positions(qtbot, tmp_path):
@@ -905,6 +934,7 @@ def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):
         _drag_block(win.blocks["adc1"], 400, 500)
         assert win._layout_dirty is True
         assert win.layout_dirty_label.isVisible() is True
+        assert win._undo_stack
 
         win.tabs.setCurrentIndex(1)   # switch to Scope
 
@@ -914,5 +944,6 @@ def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):
         assert win.layout_edit_strip.isVisible() is False
         assert win.layout_dirty_label.isVisible() is True    # persists
         assert win._layout_dirty is True                     # untouched
+        assert win._undo_stack == []   # spec: stack clears on mode exit too
     finally:
         engine.stop()

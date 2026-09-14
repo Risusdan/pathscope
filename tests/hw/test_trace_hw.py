@@ -312,7 +312,23 @@ def test_unplug_recovery(qtbot):
 
     Prints its own instructions and waits (up to 60s each way) for the
     poller's own state callback to report the transition - no fixed
-    sleep, since a human's reaction time varies."""
+    sleep, since a human's reaction time varies.
+
+    T11 hardware gate: this is a real power cycle, not just a
+    reconnect - the Blackpill reference target is powered by the debug
+    probe's own USB connection, so replugging reboots the firmware too
+    (wr_seq/generation/watch_count all reset - see core/trace/
+    reader.py's "Target reboot detection" paragraph and
+    ui/panels/scope_page.py's _recover_after_reboot). The streaming-
+    resumes window below is 15s, not the original 5s: recovery is a
+    full re-discover + re-submit cycle (a drain tick at up to 500ms,
+    then discover() and set_watch() each their own round trips, THEN
+    the first post-recovery records), not a bare reconnect, so it
+    needs real room to complete. Also asserts the channel is still
+    occupied by the SAME name post-recovery, not merely that some
+    sample count somewhere is moving - a recovery that resubmitted the
+    wrong table (or none at all) could otherwise slip past a sample-
+    count-only check if anything at all happened to increment it."""
     engine, adapter = _live_engine()
     states: List[str] = []
     engine.on_state(states.append)
@@ -337,11 +353,19 @@ def test_unplug_recovery(qtbot):
             timeout=60000)
 
         # Recovery is real, not just a state-flag flip: streaming
-        # actually resumes.
+        # actually resumes - 15s of room for the full re-discover +
+        # re-submit cycle (see the docstring above), not a bare
+        # reconnect's ~5s.
         count_before = page.channel_sample_count(slot)
         qtbot.waitUntil(
             lambda: page.channel_sample_count(slot) > count_before,
-            timeout=5000)
+            timeout=15000)
+
+        # The channel itself survived the resync, under its own name -
+        # not just "something is incrementing somewhere".
+        slots = page.channel_slots()
+        assert slots[slot] is not None
+        assert slots[slot]["label"] == "adc_buf"
     finally:
         if win is not None:
             _shot(win, "test_unplug_recovery.png")

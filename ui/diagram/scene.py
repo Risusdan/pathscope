@@ -26,6 +26,10 @@ def _noop(_id: str) -> None:
     pass
 
 
+def _noop_geometry() -> None:
+    pass
+
+
 class DiagramState:
     """Mutable paint-time state read by BlockItem/WireItem/LegendItem."""
 
@@ -41,6 +45,16 @@ class DiagramState:
         self.on_block_clicked: Callable[[str], None] = _noop
         self.on_badge_clicked: Callable[[str], None] = _noop
         self.on_edge_clicked: Callable[[str], None] = _noop
+        # M8 layout edit mode (task 3): edit_mode gates click routing
+        # (inspector/flow-select clicks are suppressed while editing);
+        # on_geometry_changed fires once per completed drag/resize
+        # gesture (mouse release), after the geometry has already been
+        # applied - MainWindow (task 5) hooks this for undo snapshots
+        # and the unsaved marker. legend_pos is the position build_scene
+        # read from Topology.legend (None -> LegendItem's own fallback).
+        self.edit_mode: bool = False
+        self.on_geometry_changed: Callable[[], None] = _noop_geometry
+        self.legend_pos: Optional[Tuple[int, int]] = None
 
 
 def _side_point(block: Block, w: float, h: float, side: str,
@@ -95,6 +109,7 @@ def build_scene(topology: Topology, state: DiagramState
                           Dict[str, WireItem]]:
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QBrush(Qt.white))
+    state.legend_pos = topology.legend
 
     blocks: Dict[str, BlockItem] = {}
     for index, (bid, block) in enumerate(topology.blocks.items()):

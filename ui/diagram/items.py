@@ -13,10 +13,12 @@ changes are per task-8's porting instructions:
     the prototype's stub dicts (`spec["x"]` -> `block.x`, etc).
   - badge lookups go through the sparse `state.badges` dict via .get().
 """
+from typing import Tuple
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
                            QPainterPathStroker, QPen, QPolygonF)
-from PySide6.QtWidgets import QGraphicsItem
+from PySide6.QtWidgets import QApplication, QGraphicsItem
 
 from core.target.topology import Block, Edge
 
@@ -58,6 +60,29 @@ def default_wh(kind: str):
     return _DEFAULT_WH.get(kind, _DEFAULT_WH_FALLBACK)
 
 
+# ---------------------------------------------------------------------------
+# M8 layout edit mode (task 3): drag/resize snapping shared by BlockItem
+# and LegendItem.
+# ---------------------------------------------------------------------------
+
+_GRID_STEP = 10
+_FINE_STEP = 1
+_HANDLE_SIZE = 8
+_MIN_BLOCK_W = 30
+_MIN_BLOCK_H = 24
+
+
+def snap(value: float, fine: bool) -> int:
+    """Grid-snap `value`: 10-unit steps normally, 1-unit when `fine`
+    (Shift held). Pure so tests can hit it directly."""
+    step = _FINE_STEP if fine else _GRID_STEP
+    return int(round(value / step)) * step
+
+
+def _fine_snap() -> bool:
+    return bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+
+
 class BlockItem(QGraphicsItem):
     def __init__(self, block: Block, state):
         super().__init__()
@@ -67,6 +92,39 @@ class BlockItem(QGraphicsItem):
         self.w = block.w if block.w is not None else dw
         self.h = block.h if block.h is not None else dh
         self.setPos(block.x, block.y)
+        self._editable = False
+        self.handle = _ResizeHandle(self)
+        self.handle.setVisible(False)
+        self._position_handle()
+
+    def _position_handle(self) -> None:
+        self.handle.setPos(self.w - _HANDLE_SIZE, self.h - _HANDLE_SIZE)
+
+    def set_editable(self, on: bool) -> None:
+        self._editable = bool(on)
+        self.setFlag(QGraphicsItem.ItemIsMovable, on)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
+        self.handle.setVisible(on)
+
+    def geometry(self) -> Tuple[int, int, int, int]:
+        pos = self.pos()
+        return (int(pos.x()), int(pos.y()), int(self.w), int(self.h))
+
+    def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
+        """Undo restore path: moves the item AND updates self.block."""
+        self.prepareGeometryChange()
+        self.w, self.h = w, h
+        self.block.w, self.block.h = w, h
+        self.setPos(x, y)
+        self.block.x, self.block.y = x, y
+        self._position_handle()
+        self.update()
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange and self._editable:
+            return QPointF(snap(value.x(), _fine_snap()),
+                           snap(value.y(), _fine_snap()))
+        return super().itemChange(change, value)
 
     def boundingRect(self):
         return QRectF(-12, -12, self.w + 24, self.h + 24)
@@ -142,11 +200,79 @@ class BlockItem(QGraphicsItem):
             p.drawText(r, Qt.AlignCenter, str(badge.count))
 
     def mousePressEvent(self, ev):
+        if self.state.edit_mode:
+            ev.accept()
+            return
         badge = self.state.badges.get(self.block.id)
         if badge and badge.count > 0 and self.badge_rect().contains(ev.pos()):
             self.state.on_badge_clicked(self.block.id)
         else:
             self.state.on_block_clicked(self.block.id)
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        if self._editable:
+            pos = self.pos()
+            self.block.x, self.block.y = int(pos.x()), int(pos.y())
+            self.state.on_geometry_changed()
+        ev.accept()
+
+
+class _ResizeHandle(QGraphicsItem):
+    """8x8 bottom-right corner handle, child of a BlockItem, visible
+    only while its parent is editable. Dragging it live-resizes the
+    parent (prepareGeometryChange + repaint, min-clamped so the block
+    never paints below 30x24); release clamps+snaps once more and
+    writes block.w/h, firing state.on_geometry_changed() once."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setZValue(10)
+        self._drag_from = None
+        self._start_w = 0.0
+        self._start_h = 0.0
+
+    def boundingRect(self):
+        return QRectF(0, 0, _HANDLE_SIZE, _HANDLE_SIZE)
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QBrush(Qt.white))
+        p.setPen(QPen(Qt.black, 1))
+        p.drawRect(self.boundingRect())
+
+    def mousePressEvent(self, ev):
+        block_item = self.parentItem()
+        self._drag_from = ev.scenePos()
+        self._start_w, self._start_h = block_item.w, block_item.h
+        ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        block_item = self.parentItem()
+        if self._drag_from is None:
+            ev.accept()
+            return
+        dx = ev.scenePos().x() - self._drag_from.x()
+        dy = ev.scenePos().y() - self._drag_from.y()
+        block_item.prepareGeometryChange()
+        block_item.w = max(_MIN_BLOCK_W, self._start_w + dx)
+        block_item.h = max(_MIN_BLOCK_H, self._start_h + dy)
+        block_item._position_handle()
+        block_item.update()
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        block_item = self.parentItem()
+        fine = _fine_snap()
+        w = max(_MIN_BLOCK_W, snap(block_item.w, fine))
+        h = max(_MIN_BLOCK_H, snap(block_item.h, fine))
+        block_item.prepareGeometryChange()
+        block_item.w, block_item.h = w, h
+        block_item.block.w, block_item.block.h = w, h
+        block_item._position_handle()
+        block_item.update()
+        self._drag_from = None
+        block_item.state.on_geometry_changed()
         ev.accept()
 
 
@@ -246,6 +372,9 @@ class WireItem(QGraphicsItem):
             p.drawText(QPointF(mx - tw / 2, (a.y() + b.y()) / 2 + 16), text)
 
     def mousePressEvent(self, ev):
+        if self.state.edit_mode:
+            ev.accept()
+            return
         self.state.on_edge_clicked(self.edge.id)
         ev.accept()
 
@@ -261,8 +390,35 @@ class LegendItem(QGraphicsItem):
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self.setPos(700, 402)
+        self._editable = False
+        x, y = state.legend_pos or (700, 402)
+        self.setPos(x, y)
         self.setZValue(5)
+
+    def set_editable(self, on: bool) -> None:
+        self._editable = bool(on)
+        self.setFlag(QGraphicsItem.ItemIsMovable, on)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
+
+    def geometry(self) -> Tuple[int, int, int, int]:
+        pos = self.pos()
+        return (int(pos.x()), int(pos.y()), 0, 0)
+
+    def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
+        """Undo restore path; the legend has no w/h so those are
+        ignored, matching geometry()'s (x, y, 0, 0)."""
+        self.setPos(x, y)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange and self._editable:
+            return QPointF(snap(value.x(), _fine_snap()),
+                           snap(value.y(), _fine_snap()))
+        return super().itemChange(change, value)
+
+    def mouseReleaseEvent(self, ev):
+        if self._editable:
+            self.state.on_geometry_changed()
+        ev.accept()
 
     def boundingRect(self):
         return QRectF(0, 0, 272, 142)

@@ -1,15 +1,17 @@
-"""M8 task 3: edit-mode input routing on diagram items - drag, snap,
-resize. Built on the same construction pattern as test_scene.py
-(Engine.load -> build_scene), driving BlockItem/WireItem/LegendItem's
-own event handlers directly rather than going through Qt's event loop
-(offscreen platform, no real mouse)."""
+"""M8 task 3/4: edit-mode input routing on diagram items - drag, snap,
+resize, waypoint editing on wires. Built on the same construction
+pattern as test_scene.py (Engine.load -> build_scene), driving
+BlockItem/WireItem/WaypointHandle/LegendItem's own event handlers
+directly rather than going through Qt's event loop (offscreen
+platform, no real mouse)."""
 import dataclasses
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, Qt
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from ui.diagram.items import LegendItem, snap
+from core.target.topology import Edge
+from ui.diagram.items import LegendItem, WireItem, snap
 from ui.diagram.scene import DiagramState, build_scene
 
 
@@ -32,11 +34,43 @@ class _FakeEvent:
         self.accepted = True
 
 
+class _FakeKeyEvent:
+    """Minimal stand-in for QKeyEvent: WaypointHandle.keyPressEvent
+    only ever calls .key()/.accept()."""
+
+    def __init__(self, key):
+        self._key = key
+        self.accepted = False
+
+    def key(self):
+        return self._key
+
+    def accept(self):
+        self.accepted = True
+
+
 def _build(qtbot):
     engine = Engine.load("targets/f411", MockAdapter({}))
     state = DiagramState()
     scene, blocks, wires = build_scene(engine.topology, state)
     return engine, state, scene, blocks, wires
+
+
+def _make_wire(points=None, label="L"):
+    """A standalone WireItem/Edge/DiagramState triple, not routed
+    through build_scene - gives waypoint tests direct control over
+    the initial path. `points=None` stands in for a pointless
+    (auto-routed) edge: self.pts starts as a plain 2-point line, the
+    same shape build_scene's _straight_route would hand WireItem."""
+    state = DiagramState()
+    pts_list = list(points) if points else []
+    edge = Edge(id="e", src="a", dst="b", label=label, points=pts_list)
+    if points:
+        pts = [QPointF(x, y) for x, y in points]
+    else:
+        pts = [QPointF(0, 0), QPointF(100, 0)]
+    wire = WireItem(edge, pts, state)
+    return wire, state, edge
 
 
 # -- snap() -------------------------------------------------------------
@@ -372,3 +406,207 @@ def test_build_scene_reads_legend_pos_from_topology_when_present(qtbot):
     build_scene(topology_with_legend, state2)
     assert state2.legend_pos == (123, 456)
     assert LegendItem(state2).geometry()[:2] == (123, 456)
+
+
+# -- M8 task 4: WireItem.edge_key() ---------------------------------------
+
+
+def test_edge_key_matches_layout_io_identity_with_label(qtbot):
+    # ("adc1", "mux0", "DR") is exactly the identity layout_io's
+    # _edge_identity() reads off the yaml's `from:`/`to:`/`label:`
+    # fields for this f411 edge - see tests/test_layout_io.py's
+    # `key = ("adc1", "mux0", "DR")` for the same fixture edge.
+    _, state, scene, blocks, wires = _build(qtbot)
+    wire = next(w for w in wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    assert wire.edge_key() == ("adc1", "mux0", "DR")
+
+
+def test_edge_key_labelless_edge_uses_empty_string():
+    wire, state, edge = _make_wire(points=None, label=None)
+    assert wire.edge_key() == ("a", "b", "")
+
+
+# -- M8 task 4: set_editable creates/destroys WaypointHandle children ----
+
+
+def test_set_editable_creates_handles_matching_points_and_destroys_on_disable(
+        qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    wire = next(w for w in wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    assert wire._handles == []
+
+    wire.set_editable(True)
+    assert len(wire._handles) == len(wire.edge.points) == 4
+    for handle, (px, py) in zip(wire._handles, wire.edge.points):
+        assert (int(handle.pos().x()), int(handle.pos().y())) == (px, py)
+        assert handle.scene() is scene
+
+    wire.set_editable(False)
+    assert wire._handles == []
+
+
+def test_set_editable_on_pointless_edge_creates_no_handles(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    wire = next(w for w in wires.values() if not w.edge.points)
+    wire.set_editable(True)
+    assert wire._handles == []
+
+
+# -- M8 task 4: handle drag moves/snaps a point, writes edge.points ------
+
+
+def test_handle_drag_updates_edge_points_and_snaps():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(list(edge.points))
+    wire.set_editable(True)
+
+    handle = wire._handles[1]
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(50, 10)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(53, 18)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert edge.points == [(10, 10), (50, 20), (90, 10)]
+    assert calls == [[(10, 10), (50, 20), (90, 10)]]   # fired once
+
+
+def test_handle_click_only_press_release_fires_nothing():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    wire.set_editable(True)
+
+    handle = wire._handles[0]
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(10, 10)))
+    handle.mouseReleaseEvent(_FakeEvent())   # no move in between
+
+    assert edge.points == [(10, 10), (50, 10), (90, 10)]
+    assert calls == []
+
+
+# -- M8 task 4: double-click insertion ------------------------------------
+#
+# NOTE on the pointless-edge case: a first insert deliberately captures
+# the edge's CURRENT rendered endpoints (self.pts) into edge.points
+# alongside the clicked point, rather than writing a single-element
+# list. WireItem's existing architecture (Task 1/2, see the f411
+# fixture's hand-authored points: lists) treats edge.points, once
+# non-empty, as the ENTIRE literal path - paint()'s arrowhead alone
+# indexes self.pts[-2]/self.pts[-1], so a genuinely single-point path
+# is unrenderable (IndexError) and would silently disconnect the wire
+# from its blocks on the next repaint. Freezing the current endpoints
+# on first insert keeps the invariant "edge.points, if non-empty, is a
+# complete renderable path" intact and matches how every hand-authored
+# edge in targets/f411/f411.topology.yaml is already shaped.
+
+
+def test_double_click_pointless_edge_creates_explicit_path_and_fires_once():
+    wire, state, edge = _make_wire(points=None)
+    state.edit_mode = True
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(list(edge.points))
+
+    wire.mouseDoubleClickEvent(_FakeEvent(pos=QPointF(53, 4)))
+
+    assert edge.points == [(0, 0), (50, 0), (100, 0)]
+    assert calls == [[(0, 0), (50, 0), (100, 0)]]   # fired once
+
+
+def test_double_click_pointed_edge_inserts_into_right_segment():
+    # Two segments: (0,0)-(100,0) then (100,0)-(100,100) - "the second
+    # segment" is the vertical one. Click on it, near its midpoint.
+    wire, state, edge = _make_wire(points=[(0, 0), (100, 0), (100, 100)])
+    state.edit_mode = True
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+
+    wire.mouseDoubleClickEvent(_FakeEvent(pos=QPointF(100, 50)))
+
+    assert len(edge.points) == 4
+    assert edge.points[2] == (100, 50)   # inserted into the 2nd segment
+    assert edge.points == [(0, 0), (100, 0), (100, 50), (100, 100)]
+    assert calls == [1]
+
+
+def test_double_click_outside_edit_mode_does_nothing():
+    wire, state, edge = _make_wire(points=None)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+
+    wire.mouseDoubleClickEvent(_FakeEvent(pos=QPointF(53, 4)))
+
+    assert edge.points == []
+    assert calls == []
+
+
+# -- M8 task 4: Delete on a selected handle removes its point ------------
+
+
+def test_delete_removes_selected_point():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(list(edge.points))
+
+    handle = wire._handles[1]
+    handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
+
+    assert edge.points == [(10, 10), (90, 10)]
+    assert calls == [[(10, 10), (90, 10)]]
+    assert len(wire._handles) == 2
+
+
+def test_deleting_last_point_empties_list_and_reverts_to_auto_route():
+    wire, state, edge = _make_wire(points=None)
+    auto_a, auto_b = wire.pts[0], wire.pts[1]
+    wire.set_editable(True)
+    state.edit_mode = True
+    wire.mouseDoubleClickEvent(_FakeEvent(pos=QPointF(53, 4)))
+    assert len(edge.points) == 3
+
+    wire.remove_point(0)
+    wire.remove_point(0)
+    wire.remove_point(0)
+
+    assert edge.points == []
+    assert wire.pts == [auto_a, auto_b]
+    assert wire._handles == []
+
+
+# -- M8 task 4: apply_points (undo restore path) --------------------------
+
+
+def test_apply_points_restores_exact_unsnapped_values_without_firing():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+
+    wire.apply_points([(13, 27), (58, 44)])   # not grid-aligned on purpose
+
+    assert edge.points == [(13, 27), (58, 44)]
+    assert [(int(p.x()), int(p.y())) for p in wire.pts] == [(13, 27),
+                                                             (58, 44)]
+    assert calls == []
+    assert len(wire._handles) == 2
+    assert (int(wire._handles[0].pos().x()),
+           int(wire._handles[0].pos().y())) == (13, 27)
+    assert (int(wire._handles[1].pos().x()),
+           int(wire._handles[1].pos().y())) == (58, 44)
+
+
+def test_apply_points_with_empty_list_reverts_to_auto_route():
+    wire, state, edge = _make_wire(points=None)
+    auto = list(wire.pts)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+
+    wire.apply_points([(37, 53)])
+    assert edge.points == [(37, 53)]
+
+    wire.apply_points([])
+    assert edge.points == []
+    assert wire.pts == auto
+    assert calls == []

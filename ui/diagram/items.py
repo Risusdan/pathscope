@@ -13,7 +13,7 @@ changes are per task-8's porting instructions:
     the prototype's stub dicts (`spec["x"]` -> `block.x`, etc).
   - badge lookups go through the sparse `state.badges` dict via .get().
 """
-from typing import Tuple
+from typing import List, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
@@ -303,6 +303,22 @@ class _ResizeHandle(QGraphicsItem):
         ev.accept()
 
 
+def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
+    """Squared distance from `p` to the segment a-b (clamped
+    projection onto the segment) - used to find which rendered
+    segment a double-click landed nearest to, so an inserted waypoint
+    lands in the right spot in the path."""
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    length2 = dx * dx + dy * dy
+    if length2 <= 1e-9:
+        t = 0.0
+    else:
+        t = ((p.x() - a.x()) * dx + (p.y() - a.y()) * dy) / length2
+        t = max(0.0, min(1.0, t))
+    cx, cy = a.x() + t * dx, a.y() + t * dy
+    return (p.x() - cx) ** 2 + (p.y() - cy) ** 2
+
+
 class WireItem(QGraphicsItem):
     def __init__(self, edge: Edge, pts, state):
         super().__init__()
@@ -310,6 +326,125 @@ class WireItem(QGraphicsItem):
         self.state = state
         self.pts = pts
         self.setZValue(-1)
+        # M8 task 4 (waypoint editing): _editable gates whether
+        # WaypointHandle children exist at all - they are created
+        # lazily by set_editable(True) and torn down by
+        # set_editable(False), never merely hidden. _auto_pts is the
+        # path this WireItem was FIRST constructed with, cached
+        # unconditionally: for an edge that started pointless (no
+        # edge.points) this is exactly the auto-routed 2-point line
+        # from build_scene's _straight_route, so it is the correct
+        # fallback when the user deletes every explicit waypoint back
+        # to edge.points == [] (see remove_point). WireItem has no
+        # reference to the src/dst BlockItems (only DiagramState,
+        # which carries no block geometry), so it cannot recompute a
+        # fresh auto-route on demand if the blocks have since moved -
+        # this cached snapshot is the best available fallback without
+        # widening this task's touched files.
+        self._editable = False
+        self._handles: List["WaypointHandle"] = []
+        self._auto_pts = list(pts)
+
+    def set_editable(self, on: bool) -> None:
+        self._editable = bool(on)
+        if self._editable:
+            self._rebuild_handles()
+        else:
+            self._clear_handles()
+
+    def edge_key(self) -> Tuple[str, str, str]:
+        """Identity tuple matching core/target/layout_io.py's
+        _edge_identity(): (src, dst, label-or-empty-string) - Task 5
+        uses this to key layout_io.patch_layout_text's edge_points
+        dict."""
+        return (self.edge.src, self.edge.dst, self.edge.label or "")
+
+    def _clear_handles(self) -> None:
+        for h in self._handles:
+            h.setParentItem(None)
+            sc = h.scene()
+            if sc is not None:
+                sc.removeItem(h)
+        self._handles = []
+
+    def _rebuild_handles(self) -> None:
+        self._clear_handles()
+        for i in range(len(self.edge.points)):
+            self._handles.append(WaypointHandle(self, i))
+
+    def apply_points(self, points: List[Tuple[int, int]]) -> None:
+        """Undo restore path (mirrors BlockItem.apply_geometry /
+        LegendItem.apply_geometry's _applying discipline): replaces
+        edge.points with an exact, UNSNAPPED copy of `points` - an
+        empty list reverts to this wire's auto-routed fallback - then
+        rebuilds self.pts and (if editable) the waypoint handles to
+        match, and repaints. Must NEVER call snap() on the restored
+        coordinates and must NEVER fire on_geometry_changed: the undo
+        stack is popping an already-applied snapshot, not a new user
+        gesture."""
+        self.prepareGeometryChange()
+        self.edge.points = list(points)
+        if self.edge.points:
+            self.pts = [QPointF(x, y) for x, y in self.edge.points]
+        else:
+            self.pts = list(self._auto_pts)
+        if self._editable:
+            self._rebuild_handles()
+        self.update()
+
+    def remove_point(self, index: int) -> None:
+        """Delete key on a selected WaypointHandle: removes
+        edge.points[index] and fires on_geometry_changed once - no
+        implicit collinear merging is ever applied (spec section 3).
+        Edge case (controller resolution): deleting the LAST
+        remaining point leaves edge.points == [] and the wire reverts
+        to its auto-routed fallback path - that is correct and
+        intended, matching "edges without a points: list show only
+        their endpoints" (design spec section 3): a fully-emptied
+        explicit path is indistinguishable from one that was never
+        made explicit, so the edge simply reverts to auto-routing."""
+        self.prepareGeometryChange()
+        del self.edge.points[index]
+        del self.pts[index]
+        if not self.edge.points:
+            self.pts = list(self._auto_pts)
+        if self._editable:
+            self._rebuild_handles()
+        self.update()
+        self.state.on_geometry_changed()
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        """Edit-mode double-click on the wire: inserts a waypoint at
+        the clicked position (snapped) into the segment of the
+        CURRENTLY RENDERED path (self.pts) closest to the click -
+        this is the same operation whether the edge was pointless
+        (self.pts is the 2-point auto route) or already pointed
+        (self.pts == edge.points): the resulting full path, endpoints
+        included, is written back to edge.points, converting a
+        pointless edge to an explicit path on first insert. Fires
+        on_geometry_changed once."""
+        if not self.state.edit_mode:
+            ev.accept()
+            return
+        pos = ev.pos()
+        seg = 0
+        best_d = None
+        for i in range(len(self.pts) - 1):
+            d = _point_segment_dist2(pos, self.pts[i], self.pts[i + 1])
+            if best_d is None or d < best_d:
+                best_d, seg = d, i
+        fine = _fine_snap()
+        new_pt = QPointF(snap(pos.x(), fine), snap(pos.y(), fine))
+        new_pts = list(self.pts)
+        new_pts.insert(seg + 1, new_pt)
+        self.prepareGeometryChange()
+        self.pts = new_pts
+        self.edge.points = [(int(p.x()), int(p.y())) for p in new_pts]
+        if self._editable:
+            self._rebuild_handles()
+        self.update()
+        self.state.on_geometry_changed()
+        ev.accept()
 
     def path(self):
         pp = QPainterPath(self.pts[0])
@@ -404,6 +539,88 @@ class WireItem(QGraphicsItem):
             return
         self.state.on_edge_clicked(self.edge.id)
         ev.accept()
+
+
+class WaypointHandle(QGraphicsItem):
+    """8x8 square handle, child of a WireItem, one per edge.points
+    entry - shown only while the wire is editable (WireItem.
+    set_editable(True) creates one per point; set_editable(False)
+    destroys them). Dragging live-moves its point (prepareGeometry-
+    Change + repaint, snap 10 / Shift 1 on release); release writes
+    edge.points[index] and fires state.on_geometry_changed() exactly
+    once IF the point actually moved - a click-only press/release
+    fires nothing, mirroring BlockItem/_ResizeHandle's gesture-start-
+    baseline discipline. Clicking a handle selects it; Delete then
+    removes its point via the parent WireItem.remove_point (no
+    implicit collinear merging)."""
+
+    def __init__(self, wire: "WireItem", index: int):
+        super().__init__(wire)
+        self.setZValue(10)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemIsFocusable, True)
+        self.index = index
+        self._drag_from = None
+        self._start_point = (0.0, 0.0)
+        pt = wire.pts[index]
+        self.setPos(pt)
+        self._geom_at_press = (int(pt.x()), int(pt.y()))
+
+    def boundingRect(self):
+        half = _HANDLE_SIZE / 2
+        return QRectF(-half, -half, _HANDLE_SIZE, _HANDLE_SIZE)
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QBrush(COL_SELECT if self.isSelected() else Qt.white))
+        p.setPen(QPen(Qt.black, 1))
+        p.drawRect(self.boundingRect())
+
+    def mousePressEvent(self, ev):
+        self.setSelected(True)
+        self.setFocus(Qt.MouseFocusReason)
+        pos = self.pos()
+        self._geom_at_press = (int(pos.x()), int(pos.y()))
+        self._drag_from = ev.scenePos()
+        self._start_point = (pos.x(), pos.y())
+        ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_from is None:
+            ev.accept()
+            return
+        wire = self.parentItem()
+        dx = ev.scenePos().x() - self._drag_from.x()
+        dy = ev.scenePos().y() - self._drag_from.y()
+        nx, ny = self._start_point[0] + dx, self._start_point[1] + dy
+        wire.prepareGeometryChange()
+        self.setPos(nx, ny)
+        wire.pts[self.index] = QPointF(nx, ny)
+        wire.update()
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        wire = self.parentItem()
+        fine = _fine_snap()
+        pos = self.pos()
+        new_xy = (snap(pos.x(), fine), snap(pos.y(), fine))
+        wire.prepareGeometryChange()
+        self.setPos(new_xy[0], new_xy[1])
+        wire.pts[self.index] = QPointF(new_xy[0], new_xy[1])
+        wire.update()
+        if new_xy != self._geom_at_press:
+            wire.edge.points[self.index] = new_xy
+            wire.state.on_geometry_changed()
+        self._geom_at_press = new_xy
+        self._drag_from = None
+        ev.accept()
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.parentItem().remove_point(self.index)
+            ev.accept()
+        else:
+            ev.accept()
 
 
 class LegendItem(QGraphicsItem):

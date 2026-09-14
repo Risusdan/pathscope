@@ -99,6 +99,10 @@ painful part.
 - Multi-select group drag.
 - Draggable port anchors.
 - Redo.
+- Explicit-path endpoint auto-tracking on block move (v1: endpoints
+  are draggable anchors, never deletable; re-anchor by hand after
+  moving a block - a documented limitation of the full-polyline
+  points schema).
 
 ## 8. Validation
 

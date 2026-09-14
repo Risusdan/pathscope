@@ -105,6 +105,32 @@ interval only against the ring's own span, not against this per-call
 read cap, which still let a >1kHz-at-256-cap Stop hold reopen
 self.lost growth once held long enough).
 
+Target reboot detection: wr_seq only ever increases while firmware
+runs continuously (every _sample() tick increments it, nothing ever
+decrements it) - a freshly read wr_seq at or behind self.last_seq (the
+highest seq this reader has already accounted for, delivered or
+counted lost) is therefore only possible if the target reset. This
+matters beyond correctness bookkeeping: the Blackpill reference target
+is powered by the debug probe's own USB connection, so a probe replug
+after a dropped connection IS a power cycle, not just a reconnect -
+firmware reboots, wr_seq/generation reset near 0, and the watch table
+goes back to empty. Unlike M6's stateless register polling, this
+reader carries SESSION state (last_seq in the hundreds of thousands by
+the time this matters in practice, self._expected_gen, self._cached_desc)
+that all silently describes a target that no longer exists the instant
+this happens - without detecting it, refresh() keeps computing a read
+window against the OLD (now nonsensical) last_seq forever, comparing a
+now-tiny live wr_seq against a start point far in what looks like its
+own future, so `start >= wr_seq` is permanently true and refresh()
+silently returns [] forever, exactly as if nothing were flowing,
+regardless of how much the reset firmware is actually producing.
+refresh() below raises TraceRebootedError the moment it observes this;
+recovery (re-discover, re-submit the watch table, restart the data
+store) is a caller-level decision - see ui/panels/scope_page.py's
+_recover_after_reboot - since only the caller knows what "restart" even
+means for its own session state (this reader's own state is trivially
+rebuilt by calling discover() again, which the caller must do).
+
 set_watch() mirrors the watch-table gate protocol firmware implements:
 writing count=0 closes the gate, then the pending addresses are
 written one word each, then the new count is written to request the
@@ -184,6 +210,17 @@ READ_CAP_DIVISOR = 4
 
 
 class TraceError(Exception):
+    pass
+
+
+class TraceRebootedError(TraceError):
+    """Raised by refresh() the moment it observes a freshly read
+    wr_seq strictly behind self.last_seq - impossible without a target
+    reset (see the module docstring's "Target reboot detection"
+    paragraph). A distinct subclass, not a plain TraceError, so a
+    caller (ui/panels/scope_page.py's _drain_once) can route this one
+    specific condition into automatic resync instead of just rendering
+    it inline and retrying next tick like any other TraceError."""
     pass
 
 
@@ -285,6 +322,7 @@ class TraceReader:
         if start >= wr_seq:
             if desc is self._cached_desc:
                 desc = self._read_desc()
+                self._check_not_rebooted(desc)
                 self._cached_desc = desc
                 start, wr_seq = self._clamp_start(desc)
             if start >= wr_seq:
@@ -319,6 +357,7 @@ class TraceReader:
         # that already finds new data waiting) costs exactly 2 Engine
         # commands: this one and the one _read_records just made.
         post_desc = self._read_desc()
+        self._check_not_rebooted(post_desc)
         self.desc = post_desc
         self._cached_desc = post_desc
         kept, dropped = _filter_stable(raw_records, start, post_desc.wr_seq,
@@ -334,6 +373,18 @@ class TraceReader:
 
         self.last_seq = read_to - 1
         return kept
+
+    def _check_not_rebooted(self, desc: TraceDesc) -> None:
+        """See the module docstring's "Target reboot detection"
+        paragraph: wr_seq is monotonic while firmware runs
+        continuously, so a freshly read value strictly behind
+        self.last_seq (the highest seq this reader has already
+        accounted for) is only possible if the target reset. Call this
+        on every genuinely FRESH descriptor read inside refresh() -
+        never on self._cached_desc itself, which was already checked
+        (or was the initial, pre-anything state) when it was fetched."""
+        if desc.wr_seq < self.last_seq:
+            raise TraceRebootedError("target rebooted")
 
     def _clamp_start(self, desc: TraceDesc) -> Tuple[int, int]:
         """The pre-read clamp (module docstring): the ring only ever

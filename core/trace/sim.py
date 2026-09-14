@@ -146,6 +146,34 @@ class FakeTraceFirmware:
             self._wr_seq += 1
         self._resync()
 
+    def reboot(self) -> None:
+        """Model a real power cycle, not just a reconnect - the
+        Blackpill reference target is powered by the debug probe's own
+        USB connection, so a probe replug after a dropped connection
+        IS this (see core/trace/reader.py's "Target reboot detection"
+        paragraph and ui/panels/scope_page.py's _recover_after_reboot,
+        which this exists to let tests exercise without real
+        hardware). Resets every piece of state ps_trace_init() resets
+        on real firmware on a cold boot: wr_seq, generation and
+        watch_count/watch_addrs all back to 0 (a freshly booted target
+        has never been told to watch anything - the watch table is
+        gone, not merely closed), status back to OK, and the ring's
+        bytes zeroed (matching ps_trace_init()'s own zero-fill loop) so
+        a reader racing this can never read pre-reboot record content
+        back out from under a seq/gen that no longer means what it
+        used to."""
+        self._status = STATUS_OK
+        self._watch_addrs = [0] * MAX_CH
+        self._watch_count = 0
+        self._generation = 0
+        self._wr_seq = 0
+        words_per_record = RECORD_SIZE // 4
+        for seq in range(RING_COUNT):
+            addr = record_word_addr(self._current_desc(), seq)
+            for i in range(words_per_record):
+                self._adapter.set_word(addr + 4 * i, 0)
+        self._resync()
+
     def _patched_write32(self, addr: int, value: int) -> None:
         if self.desc_addr <= addr < self.desc_addr + DESC_SIZE:
             self._handle_desc_write(addr, value)

@@ -5,9 +5,11 @@ import numpy as np
 import pytest
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
-from core.trace.contract import (RING_COUNT, WATCH_ADDRS_OFFSET,
-                                 WATCH_COUNT_OFFSET, TraceRecord)
-from core.trace.reader import TraceError, TraceReader, _filter_stable
+from core.trace.contract import (MAX_CH, RECORD_SIZE, RING_COUNT,
+                                 WATCH_ADDRS_OFFSET, WATCH_COUNT_OFFSET,
+                                 TraceRecord)
+from core.trace.reader import (TraceError, TraceRebootedError, TraceReader,
+                               _filter_stable)
 from tests.trace_sim import FakeTraceFirmware
 
 
@@ -31,6 +33,72 @@ def test_discover_and_drain_records():
         assert len(recs) >= 5
         assert recs[-1].slots[0] == 111 and recs[-1].slots[1] == 222
         assert r.refresh() == []          # nothing new, no re-delivery
+    finally:
+        engine.stop()
+
+
+def test_fake_firmware_reboot_resets_state_and_wipes_ring():
+    # T11 hardware gate: FakeTraceFirmware.reboot() models the real
+    # power cycle a Blackpill replug causes (it is powered by the
+    # debug probe's own USB connection) - ps_trace_init()'s own reset
+    # on real firmware, reproduced here so tests can exercise recovery
+    # without hardware. wr_seq/generation/watch_count/watch_addrs/
+    # status must all read back exactly as a cold boot would leave
+    # them, and the ring's bytes must be genuinely zeroed (not just
+    # "wr_seq says nothing new"), matching ps_trace_init()'s own
+    # zero-fill loop.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000, 0x20000004])
+        fw.step(10)
+        desc_before = r.status()
+        assert desc_before.wr_seq >= 10
+        assert desc_before.generation >= 1
+        assert desc_before.watch_count == 2
+
+        fw.reboot()
+
+        desc_after = r.status()
+        assert desc_after.wr_seq == 0
+        assert desc_after.generation == 0
+        assert desc_after.watch_count == 0
+        assert desc_after.status == 0
+        assert tuple(desc_after.watch_addrs) == (0,) * MAX_CH
+
+        # The ring itself was wiped, not just the descriptor - a raw
+        # read at its very first record position reads back all-zero
+        # bytes, not whatever the pre-reboot session last wrote there.
+        words = engine.read_words(fw._ring_addr, RECORD_SIZE // 4)
+        assert all(w == 0 for w in words)
+    finally:
+        engine.stop()
+
+
+def test_refresh_raises_typed_error_on_target_reboot():
+    # T11 hardware gate: the reference target is powered by the debug
+    # probe's own USB connection, so a probe replug after a dropped
+    # connection is a REAL power cycle - firmware reboots, wr_seq
+    # resets near 0. wr_seq is monotonic while firmware runs
+    # continuously, so a freshly read value strictly behind
+    # self.last_seq is otherwise impossible and must be raised as a
+    # DISTINCT, typed signal (not just another TraceError) so a caller
+    # can route it into automatic resync (ui/panels/scope_page.py's
+    # _recover_after_reboot) instead of rendering it inline and
+    # retrying next tick like an ordinary failure.
+    adapter, fw, engine = _rig()
+    try:
+        r = TraceReader(engine)
+        r.discover(fw.desc_addr)
+        r.set_watch([0x20000000])
+        fw.step(50)
+        r.refresh()
+        assert r.last_seq >= 49
+
+        fw.reboot()
+        with pytest.raises(TraceRebootedError):
+            r.refresh()
     finally:
         engine.stop()
 

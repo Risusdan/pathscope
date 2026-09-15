@@ -13,7 +13,12 @@ description files - no changes to the core engine or UI.
 
 ![Register inspector: live DMA2 field values](docs/img/pathscope-inspector.png)
 
-![Scope view: live DMA2.S0NDTR plot with gap-honest line breaks](docs/img/pathscope-scope.png)
+![Scope view: 1 kHz firmware trace of adc_buf and DMA2.S0NDTR](docs/img/pathscope-scope.png)
+
+![Layout edit mode: draggable blocks, wire endpoints and waypoints](docs/img/pathscope-edit.png)
+
+All four screenshots come from a live session against an STM32F411
+Blackpill over a clone ST-Link.
 
 ## Features
 
@@ -33,7 +38,16 @@ description files - no changes to the core engine or UI.
   addresses, or ELF symbols in one timer-ISR call, so every record in a
   sample is coherent by construction; the tool drains the ring over the
   debug probe, decodes it, and plots it with event markers and
-  gap-honest line breaks where sampling actually stalled.
+  gap-honest line breaks where sampling actually stalled. Ten fixed
+  channel slots with per-channel type decode (u8/i16/f32/...), scale
+  and offset, an Auto-lane stacking mode, and a hover cursor readout.
+- Layout edit mode: drag blocks, wire endpoints and waypoints directly
+  on the diagram instead of hand-editing coordinates - grid snap,
+  arrow-key nudge, alignment guides, endpoints that snap back onto
+  their block, wires that follow a moving block live, undo, and a
+  Seed layout button for a first draft when a target has no positions
+  yet. Saving patches topology.yaml surgically (see "Adding your own
+  target" below).
 - Demo mode (`--demo`) runs the full UI against a scripted engine, no
   probe or target required.
 
@@ -86,11 +100,13 @@ code.
          guarded: ["ADC1.DR"]   # has a read side effect; never auto-polled
 
 Coordinates need not be hand-written. In the app, the Data Path page's
-Edit layout button enters a drag mode; Auto-layout provides a first draft
-for a target with no positions. Drag blocks and line waypoints to taste
-(grid-snapped, Shift for fine placement). Save layout writes coordinates
-back to topology.yaml as a surgical patch, leaving comments and hand
-formatting untouched, so the git diff shows only real changes.
+Edit Layout button enters a drag mode; Seed layout generates a first
+draft for a target with no positions (destructive to hand tuning, one
+undo restores). Drag blocks, wire endpoints, and waypoints to taste -
+grid-snapped, Shift for fine placement, double-click a wire to add a
+bend. Save layout writes coordinates back to topology.yaml as a
+surgical patch, leaving comments and hand formatting untouched, so the
+git diff shows only real changes.
 
 Point `--target-dir` at the new folder and run.
 

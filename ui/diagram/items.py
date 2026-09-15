@@ -452,15 +452,17 @@ class BlockItem(QGraphicsItem):
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
             self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
-        # M8 wave B fix round 1 (finding 3): NOT gated on self._editable
-        # (unlike the block above) - a mode-exit mid-drag flips
-        # _editable to False before this release ever fires (real
-        # gesture-visual cleanup now happens synchronously at toggle-
-        # off time, via MainWindow._cancel_gesture_visuals), so a
-        # release that arrives afterward must still be able to clear
-        # a readout, not silently skip it because the gate above no
-        # longer holds.
-        self.state.on_live_status("")
+            # M8 wave B fix round 2 (regression): gated back on
+            # self._editable - a mode-exit mid-drag is already covered
+            # synchronously by MainWindow._cancel_gesture_visuals
+            # (toggle-off calls it BEFORE the set_editable(False) loop
+            # below runs, per its own docstring), so this is only
+            # end-of-real-gesture cleanup while still editing. Ungated,
+            # this fired on every NORMAL-mode click too (this item
+            # accepts presses in both modes, for inspector clicks) and
+            # clobbered MainWindow.on_state's persistent
+            # "poller: ..." status line on ordinary clicks.
+            self.state.on_live_status("")
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
@@ -1410,11 +1412,10 @@ class LegendItem(QGraphicsItem):
             if new_xy != self._geom_at_press:
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
-        # M8 wave B fix round 1 (finding 3, applied here too for the
-        # same reason - not itself named in the review, but the
-        # identical bug): NOT gated on self._editable - see
-        # BlockItem.mouseReleaseEvent's matching comment.
-        self.state.on_live_status("")
+            # M8 wave B fix round 2 (regression, applied here too for
+            # the same reason): gated back on self._editable - see
+            # BlockItem.mouseReleaseEvent's matching comment.
+            self.state.on_live_status("")
         ev.accept()
 
     def boundingRect(self):

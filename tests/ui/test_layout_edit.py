@@ -2126,3 +2126,38 @@ def test_legend_selection_indicator_condition_false_outside_edit_mode():
 
     assert legend.isSelected() is False
     assert state.edit_mode is False
+
+
+# -- M8 wave B fix round 2 (regression): normal-mode click must not --------
+# clear the persistent status line
+#
+# BlockItem/LegendItem.mouseReleaseEvent's on_live_status("") backstop was
+# ungated (finding 3, above) so it fired on every release - including an
+# ordinary NORMAL-mode click, since both items accept presses outside edit
+# mode too (they drive inspector clicks). That clobbered
+# MainWindow.on_state's persistent "poller: ..." connection line on every
+# block/legend click. The mode-exit-mid-drag scenario the ungated clear
+# was guarding against is already covered synchronously by
+# MainWindow._cancel_gesture_visuals (toggle-off calls it BEFORE the
+# set_editable(False) loop runs), so gating the clear back onto
+# self._editable loses nothing.
+
+
+def test_normal_mode_click_leaves_persistent_status_message_alone(qtbot):
+    engine, win = _build_window(qtbot)
+    win.statusBar().showMessage("poller: running")
+    item = win.blocks["adc1"]
+
+    # NORMAL mode: edit_layout_btn never toggled, item never made
+    # editable - an ordinary inspector click, not a drag.
+    item.mousePressEvent(_FakeEvent())
+    item.mouseReleaseEvent(_FakeEvent())
+
+    assert win.statusBar().currentMessage() == "poller: running"
+
+    # The gated form still does its job: a real edit-mode drag release
+    # clears the live-coordinate readout.
+    win.edit_layout_btn.setChecked(True)
+    _drag_block(item, item.pos().x() + 10, item.pos().y())
+
+    assert win.statusBar().currentMessage() == ""

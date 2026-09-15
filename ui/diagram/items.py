@@ -245,11 +245,26 @@ class BlockItem(QGraphicsItem):
         pos = self.pos()
         return (int(pos.x()), int(pos.y()), int(self.w), int(self.h))
 
-    def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
+    def apply_geometry(self, x: int, y: int, w: int, h: int,
+                       sync_press: bool = True) -> None:
         """Undo restore path: moves the item AND updates self.block.
         setPos is wrapped in _applying so itemChange's live grid-snap
-        does not intercept this programmatic move - the restored
-        position must land exactly, snap-aligned or not."""
+        (and B4's alignment snap) does not intercept this programmatic
+        move - the restored position must land exactly, snap-aligned
+        or not. Always clears _active_guides - a programmatic move is
+        never itself an alignment-snap decision, so a guide line left
+        over from an earlier real drag would otherwise render stale.
+
+        sync_press=False (M8 wave B fix: nudge glue) skips resyncing
+        _geom_at_press to the new position - used ONLY by
+        keyPressEvent's arrow-key nudge, which needs _geom_at_press to
+        keep reading the PRE-nudge position for one more call
+        (DiagramState.on_block_live_moved, fired right after this) so
+        MainWindow's live-move delta computation - gesture_origin() as
+        the first-call baseline, since no mouse drag is ever
+        concurrently in progress - resolves to the nudge's own exact
+        delta instead of zero; see keyPressEvent for the full
+        sequence and why."""
         self.prepareGeometryChange()
         self.w, self.h = w, h
         self.block.w, self.block.h = w, h
@@ -259,7 +274,9 @@ class BlockItem(QGraphicsItem):
         finally:
             self._applying = False
         self.block.x, self.block.y = int(x), int(y)
-        self._geom_at_press = (int(x), int(y))
+        if sync_press:
+            self._geom_at_press = (int(x), int(y))
+        self._active_guides = (None, None)
         self._position_handle()
         self.update()
 
@@ -434,19 +451,44 @@ class BlockItem(QGraphicsItem):
         one unit with Shift, on the currently-focused/selected block.
         A completed gesture like a drag commit: moves via
         apply_geometry (snap-bypassing - the step is already exact, it
-        must land exactly, not get re-snapped against a possibly
-        off-grid starting position) and fires on_geometry_changed once
-        so undo/dirty ride the same path a mouse drag commit uses.
-        Inert outside edit mode (mirrors WaypointHandle's Delete
-        handling - this item would not hold focus outside edit mode in
-        the real app, but a test may call this directly)."""
+        must land exactly, not get re-snapped/aligned against a
+        possibly off-grid starting position), glues any attached
+        explicit-path wire endpoint by that SAME delta, and fires
+        on_geometry_changed once so undo/dirty ride the same path a
+        mouse drag commit uses. Inert outside edit mode (mirrors
+        WaypointHandle's Delete handling - this item would not hold
+        focus outside edit mode in the real app, but a test may call
+        this directly).
+
+        Endpoint glue fix (M8 wave B, post-review): a nudge IS a move,
+        and Visio-style connector glue is input-agnostic - it used to
+        desync an explicit endpoint from the block by the nudge delta
+        while an auto-routed wire still correctly re-routed, exactly
+        the mouse-vs-keyboard inconsistency the glue wave had already
+        eliminated for drags. Fixed by reusing
+        DiagramState.on_block_live_moved - the SAME callback a live
+        mouse drag fires per step - rather than duplicating its
+        delta/translate/refresh logic: apply_geometry(sync_press=False)
+        moves the item without yet resyncing _geom_at_press, so when
+        on_block_live_moved runs immediately after, MainWindow's delta
+        computation (gesture_origin() as the first-call baseline,
+        always correct here since no mouse drag is ever concurrently
+        in progress) resolves to exactly this nudge's delta - one
+        delta, one translate, one commit. _geom_at_press is then
+        resynced by hand before the commit call, matching what
+        apply_geometry itself would have done with the default
+        sync_press=True."""
         if not self._editable or ev.key() not in _ARROW_DELTAS:
             ev.accept()
             return
         ddx, ddy = _ARROW_DELTAS[ev.key()]
         step = _nudge_step(ev)
         x, y, w, h = self.geometry()
-        self.apply_geometry(x + ddx * step, y + ddy * step, w, h)
+        self.apply_geometry(x + ddx * step, y + ddy * step, w, h,
+                            sync_press=False)
+        self.state.on_block_live_moved(self.block.id)
+        pos = self.pos()
+        self._geom_at_press = (int(pos.x()), int(pos.y()))
         self.state.on_geometry_changed()
         ev.accept()
 

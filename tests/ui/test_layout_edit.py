@@ -1541,6 +1541,60 @@ def test_nudge_block_inert_outside_edit_mode(qtbot):
     assert calls == []
 
 
+def test_nudge_block_glues_explicit_wire_endpoints_like_a_drag(qtbot):
+    # M8 wave B post-review fix: a nudge is a move, and Visio-style
+    # connector glue is input-agnostic - nudging mux0 (dst of two
+    # explicit-path edges, src of one pointless edge) must glue the
+    # explicit endpoints by the exact nudge delta, leave interior
+    # points untouched, mark both wires dirty, and let one undo
+    # restore both the block and both wires.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire_adc = next(w for w in win.wires.values()
+                   if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire_tim = next(w for w in win.wires.values()
+                   if w.edge.src == "tim1" and w.edge.dst == "mux0")
+    orig_adc = list(wire_adc.edge.points)
+    orig_tim = list(wire_tim.edge.points)
+    item = win.blocks["mux0"]
+    orig_geom = item.geometry()
+
+    item.keyPressEvent(_FakeKeyEvent(Qt.Key_Right))
+
+    assert item.geometry()[:2] == (orig_geom[0] + 10, orig_geom[1])
+    assert wire_adc.edge.points[-1] == (orig_adc[-1][0] + 10,
+                                        orig_adc[-1][1])
+    assert wire_tim.edge.points[-1] == (orig_tim[-1][0] + 10,
+                                        orig_tim[-1][1])
+    assert wire_adc.edge.points[:-1] == orig_adc[:-1]   # src anchor + interior
+    assert wire_tim.edge.points[:-1] == orig_tim[:-1]
+    assert win._layout_dirty is True
+    assert wire_adc.edge_key() in win._dirty_wire_keys
+    assert wire_tim.edge_key() in win._dirty_wire_keys
+
+    win._on_layout_undo()
+
+    assert item.geometry() == orig_geom
+    assert wire_adc.edge.points == orig_adc
+    assert wire_tim.edge.points == orig_tim
+
+
+def test_shift_nudge_block_glues_explicit_wire_endpoints_by_one_unit(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire_adc = next(w for w in win.wires.values()
+                   if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    orig_adc = list(wire_adc.edge.points)
+    item = win.blocks["mux0"]
+    orig_geom = item.geometry()
+
+    item.keyPressEvent(_FakeKeyEvent(Qt.Key_Down, modifiers=Qt.ShiftModifier))
+
+    assert item.geometry()[:2] == (orig_geom[0], orig_geom[1] + 1)
+    assert wire_adc.edge.points[-1] == (orig_adc[-1][0], orig_adc[-1][1] + 1)
+    assert wire_adc.edge.points[:-1] == orig_adc[:-1]
+
+
 def test_nudge_waypoint_handle_moves_by_grid_step_and_fires_once():
     wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
     wire.set_editable(True)

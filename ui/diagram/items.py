@@ -141,7 +141,20 @@ def _compute_alignment_snap(x: float, y: float, w: float, h: float,
     axis with no match. Pure (plain floats, no Qt/item dependency), so
     it is unit-testable directly and reusable by BOTH the live snap
     decision (BlockItem.itemChange) and, if a caller wants to
-    recompute after the fact, guide rendering."""
+    recompute after the fact, guide rendering.
+
+    M8 wave B fix round 3 (structural bound, user-acceptance finding
+    1): the return value is clamped to within `threshold` of the
+    INPUT (x, y) on each axis BY CONSTRUCTION (max/min below), not
+    merely as a consequence of the best_x/best_y search only ever
+    accepting candidates with abs(d) <= threshold. The search's own
+    gating already enforced this in practice, but the caller (an
+    itemChange handler that only ever calls this once per proposed
+    position) has no independent way to verify the bound holds - a
+    future edit to the search loop that widened or dropped that gate
+    would silently regress this function back into an unbounded
+    teleport. Clamping the OUTPUT here, unconditionally, makes the
+    bound hold no matter what the search above does."""
     cx_lines = (x, x + w / 2.0, x + w)
     cy_lines = (y, y + h / 2.0, y + h)
     best_x: Optional[Tuple[float, float, float]] = None   # (|d|, d, line)
@@ -159,8 +172,10 @@ def _compute_alignment_snap(x: float, y: float, w: float, h: float,
             if abs(d) <= threshold and (best_y is None
                                         or abs(d) < best_y[0]):
                 best_y = (abs(d), d, o)
-    snapped_x = x + best_x[1] if best_x is not None else x
-    snapped_y = y + best_y[1] if best_y is not None else y
+    raw_snapped_x = x + best_x[1] if best_x is not None else x
+    raw_snapped_y = y + best_y[1] if best_y is not None else y
+    snapped_x = max(x - threshold, min(x + threshold, raw_snapped_x))
+    snapped_y = max(y - threshold, min(y + threshold, raw_snapped_y))
     guide_x = best_x[2] if best_x is not None else None
     guide_y = best_y[2] if best_y is not None else None
     return snapped_x, snapped_y, guide_x, guide_y

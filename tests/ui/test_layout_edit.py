@@ -18,7 +18,9 @@ from core.target.layout_io import LayoutPatchError
 from core.target.topology import Edge, load_topology
 from ui.bridge import EngineBridge
 from ui.demo import make_demo_engine
-from ui.diagram.items import LegendItem, WireItem, _straight_route_points, snap
+from ui.diagram.items import (LegendItem, WireItem, _ALIGN_THRESHOLD,
+                              _compute_alignment_snap,
+                              _straight_route_points, snap)
 from ui.diagram.scene import DiagramState, build_scene
 from ui.main_window import MainWindow
 
@@ -2161,3 +2163,97 @@ def test_normal_mode_click_leaves_persistent_status_message_alone(qtbot):
     _drag_block(item, item.pos().x() + 10, item.pos().y())
 
     assert win.statusBar().currentMessage() == ""
+
+
+# -- M8 wave B fix round 3: user-acceptance finding 1 - "ADC1 flies -------
+# far away on a slight drag"
+#
+# Controller hypothesis (a broken/inverted threshold, or the wrong pair
+# of alignment lines, in _compute_alignment_snap) did NOT reproduce
+# empirically: both a 200k-sample fuzz of _compute_alignment_snap
+# against the real f411 block set and a full Qt-event-driven drag
+# simulation stayed within the threshold on every call - the search
+# loop already only ever accepts a candidate with abs(d) <= threshold.
+# The two tests below codify that bound as a permanent guarantee
+# anyway (round 3 also makes it hold BY CONSTRUCTION - max/min-clamped
+# in _compute_alignment_snap - rather than only as a consequence of
+# the search loop's own gating, so a future change to the search can
+# never silently regress it).
+#
+# The ACTUAL root cause: _DiagramView._apply_zoom rescaled the view's
+# transform unconditionally, including while a drag was in flight
+# (scroll-wheel or trackpad-pinch zoom firing mid-drag - very
+# plausible, since it is the same input device the drag itself came
+# from, and this app's own startup fit_view() call demonstrates the
+# same failure mode from a completely different trigger). Qt's default
+# ItemIsMovable drag tracking remaps each step's proposed position
+# through the item's CURRENT local coordinate frame while still
+# subtracting the button-down offset captured under the OLD transform
+# - a mismatch unrelated to any real mouse movement, which
+# BlockItem.itemChange's snap then only ever bounds relative to
+# (i.e. the now-corrupted "raw" position it was handed), not relative
+# to the gesture's true trajectory. See test_zoom_is_ignored_while_a_
+# gesture_is_in_flight for that fix's regression test.
+
+
+def test_alignment_snap_stays_within_threshold_for_a_distant_shared_edge(
+        qtbot):
+    # The controller's prescribed repro: two blocks far apart in y but
+    # sharing dma2's left edge exactly (mirrors ADC1/CM4's real,
+    # coincidental shared left edge at x=70) - dragging dma2 a few px
+    # along the OTHER axis (y) must never let that distant shared edge
+    # pull either axis more than _ALIGN_THRESHOLD from the raw drag
+    # target.
+    _, state, scene, blocks, wires = _build(qtbot)
+    dma2 = blocks["dma2"]
+    far = blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    far.apply_geometry(500, 9000, 45, 90)   # shares dma2's left edge, far in y
+    dma2.set_editable(True)
+
+    dma2.setPos(500, 520)   # a "few px" drag, y only
+
+    x, y = dma2.pos().x(), dma2.pos().y()
+    assert abs(x - 500) <= _ALIGN_THRESHOLD
+    assert abs(y - 520) <= _ALIGN_THRESHOLD
+
+
+def test_alignment_snap_bound_holds_across_the_f411_scene(qtbot):
+    # Property-style sweep: every block in the real f411 scene, as the
+    # dragged candidate, against every OTHER real block's geometry as
+    # alignment candidates, for a spread of raw drag offsets covering
+    # near-misses, exact edge matches, threshold-boundary values, and
+    # far-away positions - the structural bound must hold everywhere.
+    _, state, scene, blocks, wires = _build(qtbot)
+    geoms = {bid: item.geometry() for bid, item in blocks.items()}
+
+    offsets = [-2000, -500, -100, -6.5, -3, 0, 3, 6.5, 100, 500, 2000]
+    for bid, (bx, by, bw, bh) in geoms.items():
+        others = [g for oid, g in geoms.items() if oid != bid]
+        for dx in offsets:
+            for dy in offsets:
+                x, y = bx + dx, by + dy
+                sx, sy, _, _ = _compute_alignment_snap(x, y, bw, bh, others)
+                assert abs(sx - x) <= _ALIGN_THRESHOLD + 1e-9
+                assert abs(sy - y) <= _ALIGN_THRESHOLD + 1e-9
+
+
+def test_zoom_is_ignored_while_a_gesture_is_in_flight(qtbot):
+    # Root cause fix: _apply_zoom (the one choke point both wheelEvent
+    # and the trackpad-pinch event() handler funnel through) must
+    # no-op while the scene has an active mouseGrabberItem - grabbing
+    # the mouse is exactly what Qt's own event dispatch does at the
+    # start of any block/legend/waypoint drag, resize, or
+    # waypoint-handle gesture.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+    before = win.view._zoom
+
+    item.grabMouse()
+    win.view._apply_zoom(0.85)
+    assert win.view._zoom == before   # ignored: a gesture is in flight
+
+    item.ungrabMouse()
+    win.view._apply_zoom(0.85)
+    assert win.view._zoom != before   # works again once the grab ends

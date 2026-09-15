@@ -114,13 +114,41 @@ class _DiagramView(QGraphicsView):
     QEvent.NativeGesture, NativeGestureType.ZoomNativeGesture subtype
     - which never reaches wheelEvent at all; handled here via an
     event() override. Both paths share one cumulative-scale clamp
-    (_clamped_zoom_factor, module-level, pure, unit-tested directly)."""
+    (_clamped_zoom_factor, module-level, pure, unit-tested directly).
+
+    M8 wave B fix round 3 (user-acceptance finding 1 root cause): both
+    paths also share this method as the one choke point for a second
+    guard - self.scale() rescales the view's transform in place, and
+    if a block/legend/waypoint drag is in flight (the scene has a
+    mouseGrabberItem) when that happens, Qt's own default
+    ItemIsMovable drag tracking - which recomputes each step's
+    proposed position by remapping the CURRENT mouse position through
+    the item's local coordinate frame and subtracting the button-down
+    local position captured at press time - remaps through the NEW
+    transform on the very next move while still subtracting an offset
+    captured under the OLD one. That mismatch is entirely independent
+    of any real mouse movement and can be tens of scene-pixels on a
+    single step; BlockItem.itemChange's grid/alignment snap then only
+    ever bounds its correction relative to THAT ALREADY-CORRUPTED
+    proposed position (see _compute_alignment_snap's own clamp), not
+    relative to the gesture's true trajectory, so the dragged item can
+    "teleport" across the canvas - and land on top of an unrelated
+    block if one happens to be near the corrupted landing spot. A
+    trackpad pinch or scroll firing mid-drag (very plausible - it is
+    the same input device the drag itself came from) is a real trigger
+    for this, not just this window's one-shot startup fit_view() call.
+    Ignoring a zoom request outright while a gesture is in flight is
+    strictly safer than trying to compensate for the transform change
+    after the fact."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._zoom = 1.0
 
     def _apply_zoom(self, factor: float) -> None:
+        scene = self.scene()
+        if scene is not None and scene.mouseGrabberItem() is not None:
+            return   # a drag/resize/waypoint gesture is in flight - ignore
         factor = _clamped_zoom_factor(self._zoom, factor)
         if factor == 1.0:
             return   # already at (or would overshoot) a clamp boundary

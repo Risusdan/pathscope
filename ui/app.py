@@ -37,6 +37,20 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="manual check only, requires --shot: switch to "
                         "the Scope tab, add the demo trace channel, and "
                         "let it ramp before saving the frame")
+    p.add_argument("--shot-elf", default=None, metavar="ELF",
+                   help="manual check only, requires --shot-scope: load "
+                        "this firmware ELF and add the real trace "
+                        "channels (adc_buf + DMA2.S0NDTR) instead of "
+                        "the demo address slot")
+    p.add_argument("--shot-edit", action="store_true",
+                   help="manual check only, requires --shot: enter "
+                        "layout edit mode (handles, edit strip) before "
+                        "saving the frame")
+    p.add_argument("--shot-wait", type=float, default=0.0, metavar="SEC",
+                   help="manual check only, requires --shot: keep "
+                        "pumping events this many extra seconds before "
+                        "the capture (lets the event log and progress "
+                        "values accumulate)")
     return p
 
 
@@ -84,24 +98,60 @@ def main(argv: Optional[List[str]] = None) -> int:
                 select_deadline = time.monotonic() + 1.0
                 while time.monotonic() < select_deadline:
                     app.processEvents()
+            if args.shot_wait > 0:
+                wait_deadline = time.monotonic() + args.shot_wait
+                while time.monotonic() < wait_deadline:
+                    app.processEvents()
+            if args.shot_edit:
+                win.edit_layout_btn.setChecked(True)
+                app.processEvents()
             if args.shot_scope:
                 # Switch to the Scope tab (lazily constructs the real
-                # ScopePage) and watch the demo trace target's own
-                # lively ADC-sample slot (ui/demo.py's ADC_SAMPLE,
-                # 0x20000000 - a u16-range sine the animate thread
-                # keeps moving) so the screenshot shows a real curve,
-                # not an empty plot. add_address_slot() is the
-                # primitive add_symbol_channel()/add_register_channel()
-                # both wrap - used directly here since the demo target
-                # has no register model to resolve a reg_key against.
+                # ScopePage). With --shot-elf, load the firmware ELF
+                # and add the real hardware channels (the same pair
+                # tests/hw/test_trace_hw.py streams); otherwise watch
+                # the demo trace target's own lively ADC-sample slot
+                # (ui/demo.py's ADC_SAMPLE, 0x20000000 - a u16-range
+                # sine the animate thread keeps moving) so the
+                # screenshot shows a real curve, not an empty plot.
+                # add_address_slot() is the primitive
+                # add_symbol_channel()/add_register_channel() both
+                # wrap - used directly for the demo target, which has
+                # no register model to resolve a reg_key against.
                 win.tabs.setCurrentIndex(1)
                 app.processEvents()
-                win.scope_page.add_address_slot(
-                    0x20000000, "adc_sample", type_name="u16.lo")
+                if args.shot_elf is not None:
+                    win.scope_page.load_elf(args.shot_elf)
+                    app.processEvents()
+                    slot = win.scope_page.add_symbol_channel("adc_buf")
+                    win.scope_page.add_register_channel("DMA2.S0NDTR")
+                    if slot is not None:
+                        # adc_buf is a u16 sample array; the size-based
+                        # default (u32) would fuse two samples per
+                        # point. Driving the combo (not _on_type_changed
+                        # directly) keeps the visible cell in sync.
+                        win.scope_page.channel_slots()[slot][
+                            "type_combo"].setCurrentText("u16.lo")
+                    # commit/close any cell editor the adds left open
+                    # so the Name column renders its text in the shot
+                    win.scope_page.channel_table.setCurrentItem(None)
+                    win.scope_page.channel_table.clearSelection()
+                    win.scope_page.channel_table.clearFocus()
+                else:
+                    win.scope_page.add_address_slot(
+                        0x20000000, "adc_sample", type_name="u16.lo")
                 ramp_deadline = time.monotonic() + 2.5
                 while time.monotonic() < ramp_deadline:
                     app.processEvents()
                 win.scope_page.refresh_plot()
+            app.processEvents()
+            # processEvents() never delivers DeferredDelete (only a
+            # real exec() loop does), so any cell widget replaced
+            # during setup - e.g. the scope table re-rendering a row -
+            # lingers undeleted at the viewport origin and paints over
+            # row 0 in the grab. Flush them explicitly.
+            from PySide6.QtCore import QCoreApplication, QEvent
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
             app.processEvents()
             win.grab().save(args.shot)
             print("saved", args.shot)

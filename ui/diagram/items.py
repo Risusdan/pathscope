@@ -1282,7 +1282,19 @@ class WireItem(QGraphicsItem):
         return best[0], best[1], vert
 
     def boundingRect(self):
-        return self.path().boundingRect().adjusted(-14, -20, 14, 20)
+        # Ghost-trail fix (acceptance round 7): paint() draws the edge
+        # label and the progress/value string up to a full text width
+        # beyond the polyline's own bounds (a vertical segment's label
+        # hangs entirely to its right at x+5, the progress text spans
+        # half its width past either side of the segment midpoint) -
+        # and Qt never invalidates pixels painted outside
+        # boundingRect, so dragging left text ghosts behind. The
+        # margins are deliberately CONSTANT and generous rather than
+        # font-metric-derived: the progress text changes every poll
+        # tick, and a boundingRect that varied with it would need a
+        # prepareGeometryChange per tick to stay honest - the same
+        # bug class this fixes.
+        return self.path().boundingRect().adjusted(-150, -30, 150, 30)
 
     def shape(self):
         # finding 2a: wider click/double-click hit area while editing

@@ -9,7 +9,7 @@ import shutil
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QFont, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QToolBar
 
@@ -19,8 +19,8 @@ from core.target.layout_io import LayoutPatchError
 from core.target.topology import Edge, load_topology
 from ui.bridge import EngineBridge
 from ui.demo import make_demo_engine
-from ui.diagram.items import (LegendItem, WireItem, _ALIGN_THRESHOLD,
-                              _compute_alignment_snap,
+from ui.diagram.items import (MONO, LegendItem, WireItem,
+                              _ALIGN_THRESHOLD, _compute_alignment_snap,
                               _straight_route_points, snap)
 from ui.diagram.scene import DiagramState, build_scene
 from ui.main_window import MainWindow
@@ -2771,3 +2771,26 @@ def test_delete_on_auto_wire_endpoint_handle_is_a_noop(qtbot):
 
     assert wire.edge.points == []
     assert len(wire._handles) == 2
+
+
+def test_wire_bounding_rect_covers_label_and_progress_text(qtbot):
+    # Acceptance round 7 ghost-trail fix: text painted outside
+    # boundingRect is never invalidated, so a drag left label/value
+    # ghosts behind. A vertical wire is the worst case - its label
+    # hangs entirely to the right of the line, the progress string
+    # half a width past either side.
+    from PySide6.QtGui import QFontMetrics
+    from ui.diagram.items import FONT_LABEL
+    wire, state, edge = _make_wire(points=[(100, 0), (100, 200)],
+                                   label="DR")
+    state.progress_text[edge.id] = "S0NDTR 0x0251"
+
+    br = wire.boundingRect()
+    label_w = QFontMetrics(FONT_LABEL).horizontalAdvance("DR")
+    f = QFont(MONO)
+    f.setPointSize(8)
+    prog_w = QFontMetrics(f).horizontalAdvance("S0NDTR 0x0251")
+
+    assert br.right() >= 100 + 5 + label_w
+    assert br.right() >= 100 + prog_w / 2
+    assert br.left() <= 100 - prog_w / 2

@@ -235,38 +235,12 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.datapath_page_btn)
         tb.addWidget(self.scope_page_btn)
 
-        # M8 layout edit mode (task 5): the one toggle - checked drives
-        # DiagramState.edit_mode + every item's set_editable together
-        # (see _on_edit_layout_toggled's docstring for why those two
-        # must never be set independently), shows the Data Path page's
-        # Save/Revert/Auto-layout strip, and applies the dashed
-        # viewport border cue. layout_dirty_label sits right next to
-        # this button - in the toolbar, not the strip - so "unsaved
-        # layout changes" stays visible even after the button is
-        # toggled back off.
-        self.edit_layout_btn = QToolButton()
-        self.edit_layout_btn.setText("Edit Layout")
-        self.edit_layout_btn.setCheckable(True)
-        self.edit_layout_btn.toggled.connect(self._on_edit_layout_toggled)
-        tb.addWidget(self.edit_layout_btn)
-
-        # A QToolBar wraps a widget passed to addWidget() in its own
-        # QWidgetAction and keeps that ACTION's visible flag authoritative
-        # - toggling the widget's own setVisible() straight off a
-        # toolbar gets silently overridden the next layout pass
-        # (reproduced directly against a bare QToolBar/QLabel). Wrapping
-        # the label in a plain (always-visible) container widget sidesteps
-        # that: the container is what the toolbar manages, and the
-        # label's own setVisible() - now an ordinary child-widget
-        # visibility toggle - behaves normally again.
-        dirty_holder = QWidget()
-        dirty_layout = QHBoxLayout(dirty_holder)
-        dirty_layout.setContentsMargins(0, 0, 0, 0)
-        self.layout_dirty_label = QLabel("unsaved layout changes")
-        self.layout_dirty_label.setStyleSheet("color: #B71C1C;")
-        self.layout_dirty_label.setVisible(False)
-        dirty_layout.addWidget(self.layout_dirty_label)
-        tb.addWidget(dirty_holder)
+        # M8 layout edit mode: edit_layout_btn and layout_dirty_label
+        # used to live here (toolbar), but a manual-gate finding (1)
+        # was that they read as a third page switcher next to Data
+        # Path/Scope - both moved into the Data Path page's own header
+        # row instead (_build_central_tabs, right after Halt MCU); see
+        # that method for their construction.
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -323,14 +297,20 @@ class MainWindow(QMainWindow):
 
         The Data Path page wraps the diagram view under a header row
         carrying the page's own controls: Halt MCU (target control
-        lives with the machine picture) on the left and this page's
+        lives with the machine picture) on the left, this page's
         Run/Stop on the right - the SAME top-right position as the
         Scope page's own big button, deliberately (user requirement:
-        Run/Stop sits in one consistent place on both pages).
+        Run/Stop sits in one consistent place on both pages) - and,
+        in between, M8's edit_layout_btn/layout_dirty_label (manual-
+        gate finding 1: these used to sit on the toolbar next to the
+        Data Path/Scope page switch and read as a third page there;
+        moved here, right after Halt MCU, with the dirty label right
+        beside the button so it stays visible whether or not edit mode
+        is on).
 
         Below that header, M8 (task 5) adds a second row -
         layout_edit_strip - carrying the Save layout/Revert/Auto-layout
-        buttons; it is hidden until the toolbar's Edit Layout button
+        buttons; it is hidden until edit_layout_btn
         (_on_edit_layout_toggled) turns edit mode on.
 
         The Scope page starts as a plain placeholder label; the real
@@ -352,6 +332,24 @@ class MainWindow(QMainWindow):
         self.halt_btn.setMinimumWidth(110)
         self.halt_btn.clicked.connect(self._toggle_halt)
         header.addWidget(self.halt_btn)
+
+        # M8 layout edit mode (task 5, manual-gate finding 1): moved
+        # off the toolbar into this header row, right after Halt MCU.
+        # Toggle behavior (drives DiagramState.edit_mode + every item's
+        # set_editable together - see _on_edit_layout_toggled's
+        # docstring for why those two must never be set independently)
+        # is unchanged; only the widgets' PARENT changed.
+        self.edit_layout_btn = QToolButton()
+        self.edit_layout_btn.setText("Edit Layout")
+        self.edit_layout_btn.setCheckable(True)
+        self.edit_layout_btn.toggled.connect(self._on_edit_layout_toggled)
+        header.addWidget(self.edit_layout_btn)
+
+        self.layout_dirty_label = QLabel("unsaved layout changes")
+        self.layout_dirty_label.setStyleSheet("color: #B71C1C;")
+        self.layout_dirty_label.setVisible(False)
+        header.addWidget(self.layout_dirty_label)
+
         header.addStretch(1)
         self.dp_run_stop_btn = QPushButton("Stop")
         self.dp_run_stop_btn.setCheckable(True)

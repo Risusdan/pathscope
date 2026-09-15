@@ -10,6 +10,7 @@ import shutil
 import pytest
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QImage, QPainter
+from PySide6.QtWidgets import QToolBar
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -732,6 +733,29 @@ def _drag_block(item, x, y):
     item.mouseReleaseEvent(_FakeEvent())
 
 
+def test_edit_layout_button_and_dirty_label_live_in_datapath_header(qtbot):
+    # M8 manual-gate finding 1: edit_layout_btn/layout_dirty_label were
+    # relocated off the toolbar (where they read as a third page
+    # switcher next to Data Path/Scope) into the Data Path page's own
+    # header row, right alongside Halt MCU - same parent widget as
+    # halt_btn, and NOT a descendant of any QToolBar.
+    engine, win = _build_window(qtbot)
+    assert win.edit_layout_btn.parentWidget() is win.halt_btn.parentWidget()
+    assert (win.layout_dirty_label.parentWidget()
+           is win.halt_btn.parentWidget())
+
+    def _in_a_toolbar(widget) -> bool:
+        w = widget
+        while w is not None:
+            if isinstance(w, QToolBar):
+                return True
+            w = w.parentWidget()
+        return False
+
+    assert not _in_a_toolbar(win.edit_layout_btn)
+    assert not _in_a_toolbar(win.layout_dirty_label)
+
+
 def test_edit_toggle_sets_state_and_every_item_editable_both_ways(qtbot):
     # The CRITICAL combination (task handover note): edit_mode and
     # every item's own set_editable must always flip together, never
@@ -1069,7 +1093,17 @@ def test_auto_layout_save_leaves_never_pointed_edge_lines_byte_identical(
     assert trgo_edge.points == []
 
 
-def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):
+def test_tab_switch_to_scope_exits_edit_mode_dirty_flag_persists(qtbot):
+    # M8 manual-gate finding 1: edit_layout_btn/layout_dirty_label now
+    # live in the Data Path page's own header row (moved off the
+    # toolbar, which used to make the button read as a third page
+    # switcher) - a consequence of that move is that layout_dirty_label
+    # is itself hidden whenever the Data Path page is (a QStackedWidget
+    # page switch hides the whole page and everything under it, this
+    # label included), so it is NOT visible while on the Scope tab.
+    # The underlying dirty STATE (self._layout_dirty) is what actually
+    # matters and stays true regardless - the label simply reappears,
+    # already showing, the moment the user switches back.
     engine = make_demo_engine("targets/f411")
     bridge = EngineBridge(engine)
     win = MainWindow(engine, bridge)
@@ -1093,8 +1127,12 @@ def test_tab_switch_to_scope_exits_edit_mode_dirty_label_persists(qtbot):
         assert win.diagram_state.edit_mode is False
         assert all(not item._editable for item in win.blocks.values())
         assert win.layout_edit_strip.isVisible() is False
-        assert win.layout_dirty_label.isVisible() is True    # persists
-        assert win._layout_dirty is True                     # untouched
+        assert win._layout_dirty is True   # untouched - flag persists
         assert win._undo_stack == []   # spec: stack clears on mode exit too
+
+        win.tabs.setCurrentIndex(0)   # back to Data Path
+
+        assert win.layout_dirty_label.isVisible() is True   # reappears
+        assert win._layout_dirty is True
     finally:
         engine.stop()

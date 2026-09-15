@@ -1517,6 +1517,16 @@ def test_repeated_wheel_zoom_clamps_at_min_and_max(qtbot):
     assert view._zoom == pytest.approx(_ZOOM_MIN)
 
 
+def test_zoom_anchors_under_the_mouse_cursor(qtbot):
+    # Acceptance round 6: Qt's default AnchorViewCenter made every
+    # zoom-in drift away from what the user pointed at.
+    from PySide6.QtWidgets import QGraphicsView
+    from ui.main_window import _DiagramView
+    view = _DiagramView()
+    qtbot.addWidget(view)
+    assert view.transformationAnchor() == QGraphicsView.AnchorUnderMouse
+
+
 # -- M8 wave B1: arrow-key nudge -------------------------------------------
 
 

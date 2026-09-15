@@ -144,6 +144,15 @@ class _DiagramView(QGraphicsView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._zoom = 1.0
+        # Acceptance round 6: zoom anchors under the mouse cursor
+        # (Qt's default AnchorViewCenter kept re-centering the view,
+        # so zooming in always drifted away from what the user was
+        # pointing at). Applies to both wheel and trackpad pinch -
+        # scale() honors this anchor whenever the cursor is over the
+        # viewport, falling back to center otherwise. Safe w.r.t. the
+        # fly-away guards: _apply_zoom already refuses to rescale
+        # while any drag gesture is in flight.
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
     def _apply_zoom(self, factor: float) -> None:
         scene = self.scene()

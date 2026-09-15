@@ -83,16 +83,17 @@ _WAYPOINT_HANDLE_SIZE = 12
 _WIRE_HIT_WIDTH = 12
 _WIRE_HIT_WIDTH_EDIT = 20
 _HANDLE_HOVER_FILL = QColor("#FFE0B2")
-# Endpoint re-anchor magnet (finding 2d): releasing an ENDPOINT
-# waypoint handle within this many scene units of its own block's
-# boundary snaps it onto that boundary (then grid-snaps). A block
-# MOVE now glues an explicit path's endpoints to it automatically
+# Endpoint re-anchor (finding 2d, made unconditional in acceptance
+# round 8): releasing - or arrow-nudging - an ENDPOINT waypoint handle
+# ALWAYS projects it onto its own block's nearest boundary point (then
+# grid-snaps). A dangling endpoint has no meaning in this tool (the
+# edge's structure lives in the yaml; an endpoint can never re-bind to
+# a different block), so endpoint dragging means exactly one thing:
+# choosing the attachment point on the block's edge. A block MOVE
+# glues an explicit path's endpoints to it automatically
 # (BlockItem.itemChange -> DiagramState.on_block_live_moved ->
-# WireItem.translate_endpoint, M8 wave 2) - the magnet's remaining job
-# is the cases glue does not cover: a block RESIZE (only a position
-# change fires the glue callback) and any manual fine-tune drag of the
-# endpoint itself.
-_ENDPOINT_MAGNET_PX = 20
+# WireItem.translate_endpoint, M8 wave 2) - re-anchor covers what glue
+# does not: a block RESIZE and any manual drag of the endpoint itself.
 
 # M8 wave B1: arrow-key nudge. Shared by BlockItem/WaypointHandle/
 # LegendItem's keyPressEvent - one grid step per press, one unit with
@@ -1399,6 +1400,12 @@ class WaypointHandle(QGraphicsItem):
         self._start_point = (0.0, 0.0)
         self._gesture_moved = False
         self._hovered = False
+        # Acceptance round 8: same shape as BlockItem._active_guides -
+        # (guide_x, guide_y), an axis' aligned coordinate while this
+        # handle's live drag is axis-aligned to a neighboring polyline
+        # vertex, None otherwise. MainWindow._update_alignment_guides
+        # reads it via state.on_handle_live_moved.
+        self._active_guides = (None, None)
         # M8 wave B2: the BlockItem currently showing the "drop here to
         # connect" magnet-highlight cue because of THIS handle's live
         # drag, or None - see _update_magnet_highlight.
@@ -1464,26 +1471,51 @@ class WaypointHandle(QGraphicsItem):
         return None
 
     def _update_magnet_highlight(self, wire, px: float, py: float) -> None:
-        """M8 wave B2: toggles the candidate block's "drop here to
-        connect" cue (BlockItem.set_magnet_highlight) as this handle's
-        LIVE drag position enters/leaves the endpoint magnet's range -
-        reuses _nearest_rect_boundary_point, the same projected-point
-        math mouseReleaseEvent's actual snap uses below, so the cue and
-        the eventual snap always agree on what "in range" means."""
+        """M8 wave B2, unconditional since acceptance round 8: the
+        candidate block shows the "will attach here" cue for the WHOLE
+        endpoint drag - release always re-anchors (mouseReleaseEvent's
+        projection), so there is no in/out-of-range distinction left
+        for the cue to track. Interior handles still have no candidate
+        and never highlight anything."""
         candidate = self._magnet_candidate(wire)
-        target = None
-        if candidate is not None:
-            bx, by, bw, bh = candidate.geometry()
-            nx, ny = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
-            dist = ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
-            if dist <= _ENDPOINT_MAGNET_PX:
-                target = candidate
+        target = candidate
         if target is not self._magnet_target:
             if self._magnet_target is not None:
                 self._magnet_target.set_magnet_highlight(False)
             if target is not None:
                 target.set_magnet_highlight(True)
             self._magnet_target = target
+
+    def _neighbor_alignment(self, wire, nx: float, ny: float):
+        """Acceptance round 8: axis-align a dragged handle to its
+        ADJACENT polyline vertex/vertices when within
+        _ALIGN_THRESHOLD - a slightly-crooked segment reads as sloppy,
+        and a near-horizontal/vertical drag now closes exactly.
+        Returns (x, y, guide_x, guide_y); guide_* is the aligned
+        axis' coordinate (feeding the same guide-line UI block drags
+        use) or None."""
+        pts = wire.pts
+        neighbors = []
+        if self.index > 0:
+            neighbors.append(pts[self.index - 1])
+        if self.index < len(pts) - 1:
+            neighbors.append(pts[self.index + 1])
+        gx = gy = None
+        best_dx = best_dy = _ALIGN_THRESHOLD + 1
+        for nb in neighbors:
+            dx = abs(nx - nb.x())
+            dy = abs(ny - nb.y())
+            if dx <= _ALIGN_THRESHOLD and dx < best_dx:
+                best_dx = dx
+                gx = nb.x()
+            if dy <= _ALIGN_THRESHOLD and dy < best_dy:
+                best_dy = dy
+                gy = nb.y()
+        if gx is not None:
+            nx = gx
+        if gy is not None:
+            ny = gy
+        return nx, ny, gx, gy
 
     def mouseMoveEvent(self, ev):
         if self._drag_from is None:
@@ -1494,6 +1526,8 @@ class WaypointHandle(QGraphicsItem):
         dy = ev.scenePos().y() - self._drag_from.y()
         self._gesture_moved = True
         nx, ny = self._start_point[0] + dx, self._start_point[1] + dy
+        nx, ny, gx, gy = self._neighbor_alignment(wire, nx, ny)
+        self._active_guides = (gx, gy)
         wire.prepareGeometryChange()
         self.setPos(nx, ny)
         wire.pts[self.index] = QPointF(nx, ny)
@@ -1501,6 +1535,7 @@ class WaypointHandle(QGraphicsItem):
         self._update_magnet_highlight(wire, nx, ny)
         wire.state.on_live_status(   # M8 wave B3
             "waypoint: %d, %d" % (int(nx), int(ny)))
+        wire.state.on_handle_live_moved(self)   # acceptance round 8
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
@@ -1513,10 +1548,7 @@ class WaypointHandle(QGraphicsItem):
         magnet_item = self._magnet_candidate(wire)
         if magnet_item is not None:
             bx, by, bw, bh = magnet_item.geometry()
-            nx, ny = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
-            dist = ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
-            if dist <= _ENDPOINT_MAGNET_PX:
-                px, py = nx, ny
+            px, py = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
         # M8 wave B2: the highlight is a LIVE-drag-only cue - clears on
         # release regardless of whether the magnet actually applied.
         if self._magnet_target is not None:
@@ -1534,6 +1566,15 @@ class WaypointHandle(QGraphicsItem):
             return
         fine = _fine_snap()
         new_xy = (snap(px, fine), snap(py, fine))
+        # Acceptance round 8: the neighbor alignment must survive the
+        # grid snap (a neighbor at a non-multiple coordinate would
+        # otherwise be re-crooked by up to half a grid step) - re-run
+        # the check on the snapped value and override with the
+        # neighbor's EXACT coordinate.
+        ax, ay, _, _ = self._neighbor_alignment(wire, new_xy[0], new_xy[1])
+        new_xy = (int(round(ax)), int(round(ay)))
+        self._active_guides = (None, None)
+        wire.state.on_handle_live_moved(self)
         wire.prepareGeometryChange()
         self.setPos(new_xy[0], new_xy[1])
         wire.pts[self.index] = QPointF(new_xy[0], new_xy[1])

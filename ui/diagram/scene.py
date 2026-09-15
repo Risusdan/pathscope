@@ -30,6 +30,10 @@ def _noop_geometry() -> None:
     pass
 
 
+def _noop_handle(_handle: object) -> None:
+    pass
+
+
 def _noop_status(_msg: str) -> None:
     pass
 
@@ -76,6 +80,12 @@ class DiagramState:
         # forward it to statusBar().showMessage() - see
         # MainWindow._on_live_status.
         self.on_live_status: Callable[[str], None] = _noop_status
+        # Acceptance round 8 (endpoint neighbor alignment): fired with
+        # the dragged WaypointHandle on every live move step so
+        # MainWindow can draw the same guide lines a block drag gets -
+        # the handle carries its own _active_guides tuple, exactly
+        # like a BlockItem does for wave B4.
+        self.on_handle_live_moved: Callable[[object], None] = _noop_handle
         # M8 wave B4 (dynamic alignment guides): live id -> BlockItem
         # registry, populated by build_scene below - lets a dragged
         # BlockItem's itemChange check its edges/centers against every

@@ -256,6 +256,12 @@ class MainWindow(QMainWindow):
             self._on_layout_geometry_changed)
         self.diagram_state.on_block_live_moved = self._on_block_live_moved
         self.diagram_state.on_live_status = self._on_live_status
+        # Acceptance round 8: a dragged waypoint handle drives the
+        # same guide lines a dragged block does - the handle carries
+        # its own _active_guides, which is all
+        # _update_alignment_guides reads.
+        self.diagram_state.on_handle_live_moved = (
+            self._update_alignment_guides)
         self.flow_page.on_pick = self._highlight_flow
         self.event_log.on_focus = self._on_log_focus
         self.event_log.on_event_time = self._on_log_time_focus

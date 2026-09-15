@@ -1140,7 +1140,13 @@ def test_endpoint_magnet_snaps_onto_block_boundary_within_radius(qtbot):
     assert wire.edge.points[0] == (210, 320)   # magnetized, not (200, 320)
 
 
-def test_endpoint_magnet_does_not_apply_beyond_radius(qtbot):
+def test_endpoint_always_reanchors_onto_its_block_boundary(qtbot):
+    # Acceptance round 8 (user ruling): a dangling endpoint has no
+    # meaning - endpoint release ALWAYS projects onto its own block's
+    # boundary, however far it was dropped (this replaced the old
+    # 20px magnet radius; the same drop used to stay at 150, 320).
+    # Endpoint dragging means "choose the attachment point on the
+    # block edge", nothing else.
     engine, win = _build_window(qtbot)
     win.edit_layout_btn.setChecked(True)
     wire = next(w for w in win.wires.values()
@@ -1151,7 +1157,12 @@ def test_endpoint_magnet_does_not_apply_beyond_radius(qtbot):
     handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(150, 320)))  # 60px in
     handle.mouseReleaseEvent(_FakeEvent())
 
-    assert wire.edge.points[0] == (150, 320)   # plain grid-snap, no magnet
+    # (150, 320) sits INSIDE adc1 (70, 280, 140, 80); the nearest
+    # boundary point is straight up on the top edge. The old magnet
+    # would have left the raw grid-snap (150, 320) dangling inside.
+    assert wire.edge.points[0] == (150, 280)
+    assert _point_on_block_boundary(QPointF(150, 280),
+                                    win.blocks["adc1"].geometry())
 
 
 def test_endpoint_magnet_does_not_apply_to_interior_handles(qtbot):
@@ -1699,8 +1710,7 @@ def test_nudge_legend_inert_outside_edit_mode():
 # -- M8 wave B2: endpoint-magnet visual feedback ---------------------------
 
 
-def test_magnet_highlight_toggles_as_endpoint_handle_enters_and_leaves_range(
-        qtbot):
+def test_magnet_highlight_stays_on_for_the_whole_endpoint_drag(qtbot):
     # adc1: x=70, y=280, w=140, h=80 -> right edge at x=210.
     _, state, scene, blocks, wires = _build(qtbot)
     for wire in wires.values():
@@ -1714,13 +1724,13 @@ def test_magnet_highlight_toggles_as_endpoint_handle_enters_and_leaves_range(
     handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
     assert adc1._magnet_highlighted is False   # no move yet
 
-    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # in range
+    # Acceptance round 8: release always re-anchors, so the "will
+    # attach here" cue stays on for the WHOLE endpoint drag - any
+    # distance (it used to toggle with the old 20px magnet radius).
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))
     assert adc1._magnet_highlighted is True
 
     handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(100, 320)))  # far away
-    assert adc1._magnet_highlighted is False
-
-    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # back in
     assert adc1._magnet_highlighted is True
 
     handle.mouseReleaseEvent(_FakeEvent())
@@ -2794,3 +2804,53 @@ def test_wire_bounding_rect_covers_label_and_progress_text(qtbot):
     assert br.right() >= 100 + 5 + label_w
     assert br.right() >= 100 + prog_w / 2
     assert br.left() <= 100 - prog_w / 2
+
+
+# -- Acceptance round 8: endpoints always re-anchor + neighbor alignment --
+
+
+def test_handle_drag_aligns_to_neighbor_vertex_within_threshold(qtbot):
+    # Near-horizontal drag closes exactly: neighbor (0, 0), dragged
+    # endpoint released at y=4 (within _ALIGN_THRESHOLD=6) -> y == 0.
+    wire, state, edge = _make_wire(points=[(0, 0), (100, 0)])
+    wire.set_editable(True)
+    handle = wire._handles[1]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(100, 0)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(98, 4)))
+    assert handle._active_guides == (None, 0.0)   # guide on the y axis
+    assert wire.pts[1].y() == 0                   # aligned live
+
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert edge.points[1] == (100, 0)             # snap(98)=100, aligned y
+    assert handle._active_guides == (None, None)  # cleared on release
+
+
+def test_handle_drag_beyond_threshold_does_not_align(qtbot):
+    wire, state, edge = _make_wire(points=[(0, 0), (100, 0)])
+    wire.set_editable(True)
+    handle = wire._handles[1]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(100, 0)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(100, 20)))
+    assert handle._active_guides == (None, None)
+
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert edge.points[1] == (100, 20)
+
+
+def test_handle_alignment_survives_the_release_grid_snap(qtbot):
+    # Neighbor sits OFF-grid (y=3): a release near it must land on
+    # EXACTLY 3, not the grid snap's 0 - alignment is re-applied after
+    # the snap with the neighbor's exact coordinate.
+    wire, state, edge = _make_wire(points=[(0, 3), (100, 3), (100, 50)])
+    wire.set_editable(True)
+    handle = wire._handles[1]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(100, 3)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(120, 5)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert edge.points[1] == (120, 3)

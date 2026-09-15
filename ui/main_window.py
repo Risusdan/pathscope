@@ -448,14 +448,18 @@ class MainWindow(QMainWindow):
         # set_editable together - see _on_edit_layout_toggled's
         # docstring for why those two must never be set independently)
         # is unchanged; only the widgets' PARENT changed.
-        self.edit_layout_btn = QToolButton()
-        self.edit_layout_btn.setText("Edit Layout")
+        # User-acceptance finding 2, round 2: a QToolButton here (even
+        # with matching setMinimumHeight/Width - round 1's fix) still
+        # rendered with the toolbar-era look (smaller font, darker
+        # fill, different height/baseline) because it is a DIFFERENT
+        # WIDGET CLASS from its neighbors, with its own default style.
+        # halt_btn/dp_run_stop_btn are plain QPushButtons; matching
+        # the class (not just the size hints) is what actually gets
+        # the same flat, tall look - including its CHECKED state,
+        # which now renders as the same standard pressed-pushbutton
+        # look dp_run_stop_btn's own checked state already uses.
+        self.edit_layout_btn = QPushButton("Edit Layout")
         self.edit_layout_btn.setCheckable(True)
-        # User-acceptance finding 2: same setMinimumHeight/Width
-        # treatment as halt_btn, above - without it this button was
-        # the header row's default (short) QToolButton height, reading
-        # as smaller and vertically misaligned next to Halt MCU and
-        # dp_run_stop_btn (both explicitly 36px tall).
         self.edit_layout_btn.setMinimumHeight(36)
         self.edit_layout_btn.setMinimumWidth(110)
         self.edit_layout_btn.toggled.connect(self._on_edit_layout_toggled)

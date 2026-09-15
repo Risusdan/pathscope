@@ -797,6 +797,14 @@ def test_header_buttons_share_the_same_minimum_height(qtbot):
     assert (win.dp_run_stop_btn.minimumHeight()
            == win.halt_btn.minimumHeight())
 
+    # Round 2 (user re-tested, styling still off): matching height
+    # alone was not enough - edit_layout_btn was still a DIFFERENT
+    # WIDGET CLASS (QToolButton) than its QPushButton neighbors, which
+    # carries its own default look regardless of size hints. It must
+    # be the SAME class as its header neighbors.
+    assert type(win.edit_layout_btn) is type(win.halt_btn)
+    assert type(win.edit_layout_btn) is type(win.dp_run_stop_btn)
+
 
 def test_edit_toggle_sets_state_and_every_item_editable_both_ways(qtbot):
     # The CRITICAL combination (task handover note): edit_mode and

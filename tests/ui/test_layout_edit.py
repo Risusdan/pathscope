@@ -2477,3 +2477,118 @@ def test_alignment_snap_still_works_near_a_legit_match_after_the_fix(qtbot):
 
     assert (other.pos().x(), other.pos().y()) == (500, 900)
     assert other._active_guides == (500, None)
+
+
+# -- M8 wave B fix round 6: stale movingItemsInitialPositions ---------------
+# (user-acceptance finding, round 3 - the drag-teleport that survived
+# rounds 1 AND 2)
+#
+# The user's repro needed NO zoom and NO resize: grab a block, move it
+# slightly, and it lands tucked into the view's top-left corner (its
+# left edge on PA1's x=8 alignment line - the same landing spot as the
+# round-1 screenshot). The missing ingredient in every previous repro
+# attempt: a PRIOR COMPLETED drag in the same session. Qt's default
+# ItemIsMovable mouse-move handler computes every step as
+#
+#     item->setPos(initialPositions.value(item)
+#                  + currentParentPos - buttonDownParentPos)
+#
+# where initialPositions is QGraphicsScenePrivate::
+# movingItemsInitialPositions - populated on the FIRST move of a drag
+# ONLY IF EMPTY, and cleared in exactly ONE place in all of Qt: the
+# base QGraphicsItem::mouseReleaseEvent. BlockItem/LegendItem's
+# overridden release handlers consumed the event without ever calling
+# super(), so the very first completed drag left the map permanently
+# holding {that item: its pre-drag pos}. Every later drag of a
+# DIFFERENT item then finds the map non-empty (so the refill is
+# skipped), reads .value(item) == default-constructed QPointF(0, 0)
+# for itself, and teleports to (0, 0) + the slight drag delta - the
+# origin corner, where the alignment snap then happily parks its left
+# edge on pa1's x=8. A second drag of the SAME item instead jumps
+# back to its stale pre-first-drag position. buttonDownScenePos is
+# NOT the culprit - the scene stores that on press-accept regardless
+# of super() (verified by instrumentation: it was correct in every
+# corrupted gesture).
+#
+# Why rounds 1-2 could not catch it: their real-event repros all drove
+# ONE drag per fresh window - and the first drag of a session finds
+# the map empty, populates it correctly, and works perfectly. The
+# corruption only exists from the second gesture onward.
+#
+# Fix: BlockItem/LegendItem now route real mouse events through the
+# base-class press/release handlers (items.py _run_base_mouse_handler)
+# so Qt's own bookkeeping - movingItemsInitialPositions above all -
+# is armed and torn down exactly as QGraphicsItem requires.
+
+
+def _real_drag(view, item, dx, dy):
+    """One complete QTest-driven drag gesture - real press, one real
+    move, real release, all through the view's viewport - grabbing
+    `item` at its center and dragging by (dx, dy) viewport pixels."""
+    scene_pos = item.mapToScene(item.boundingRect().center())
+    start = view.mapFromScene(scene_pos)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QApplication.processEvents()
+    end = QPoint(start.x() + dx, start.y() + dy)
+    QTest.mouseMove(view.viewport(), end)
+    QApplication.processEvents()
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+    QApplication.processEvents()
+
+
+def test_second_drag_of_another_block_does_not_teleport_to_origin(qtbot):
+    # THE round-3 user repro: one completed drag (dma2), then a slight
+    # drag of a different block (flash). Pre-fix, flash lands at
+    # (8, 10) - a 772px teleport into the view's top-left corner.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()   # flush the deferred startup fit_view()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+
+    _real_drag(win.view, win.blocks["dma2"], 12, 12)   # completes fine
+
+    flash = win.blocks["flash"]
+    before = flash.geometry()
+    _real_drag(win.view, flash, 6, 6)
+    after = flash.geometry()
+    # bounded to a "slight drag" worth of movement, not a teleport
+    assert abs(after[0] - before[0]) <= 20
+    assert abs(after[1] - before[1]) <= 20
+
+
+def test_second_drag_of_the_same_block_does_not_jump_back(qtbot):
+    # The same stale map, other signature: the map still holds THIS
+    # block's pre-first-drag position, so a second slight drag
+    # teleports it back to where the first drag started from.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+    flash = win.blocks["flash"]
+
+    _real_drag(win.view, flash, 60, 60)   # a LARGE first drag
+
+    before = flash.geometry()
+    _real_drag(win.view, flash, 6, 6)
+    after = flash.geometry()
+    assert abs(after[0] - before[0]) <= 20
+    assert abs(after[1] - before[1]) <= 20
+
+
+def test_block_drag_after_a_legend_drag_does_not_teleport(qtbot):
+    # LegendItem is the other ItemIsMovable item riding Qt's default
+    # drag handler - a completed legend drag poisons the same map, and
+    # the next block drag (adc1, the user's second screenshot) flies.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+
+    _real_drag(win.view, win.legend, 12, 12)   # completes fine
+
+    adc1 = win.blocks["adc1"]
+    before = adc1.geometry()
+    _real_drag(win.view, adc1, 6, 6)
+    after = adc1.geometry()
+    assert abs(after[0] - before[0]) <= 20
+    assert abs(after[1] - before[1]) <= 20

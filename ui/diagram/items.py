@@ -18,7 +18,8 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
                            QPainterPathStroker, QPen, QPolygonF)
-from PySide6.QtWidgets import QApplication, QGraphicsItem
+from PySide6.QtWidgets import (QApplication, QGraphicsItem,
+                               QGraphicsSceneMouseEvent)
 
 from core.target.topology import Block, Edge
 
@@ -213,6 +214,46 @@ def _select_exclusively(item: QGraphicsItem) -> None:
     if scene is not None:
         scene.clearSelection()
     item.setSelected(True)
+
+
+def _run_base_mouse_handler(base_handler, ev) -> None:
+    """Deliver `ev` to a QGraphicsItem BASE-CLASS mouse handler (pass
+    the bound super() method), skipping non-Qt stand-in events.
+
+    M8 wave B fix round 6 (user-acceptance finding, round 3 - the
+    drag-teleport that survived rounds 1 AND 2): every edit-mode press/
+    release override below used to fully consume its event (ev.accept()
+    with no super() call). That starves Qt's own drag bookkeeping - in
+    particular QGraphicsScenePrivate::movingItemsInitialPositions, the
+    map the default ItemIsMovable mouse-move handler computes every
+    drag step from:
+
+        item->setPos(initialPositions.value(item)
+                     + currentParentPos - buttonDownParentPos)
+
+    That map is populated on the FIRST move of a drag ONLY IF EMPTY,
+    and cleared in exactly ONE place in all of Qt: the base
+    QGraphicsItem::mouseReleaseEvent. Skip that super() call and the
+    first completed drag leaves the map permanently holding {dragged
+    item: its pre-drag position}; the NEXT drag of any OTHER movable
+    item then finds the map non-empty (refill skipped), reads
+    .value(item) == default-constructed QPointF(0, 0) for itself, and
+    teleports to (0, 0) + the slight drag delta - the view's top-left
+    corner - while a second drag of the SAME item jumps back to its
+    stale pre-first-drag position instead. (buttonDownScenePos is NOT
+    part of this: the scene stores that at press-accept time whether
+    or not super() runs.)
+
+    So BlockItem/LegendItem - the two ItemIsMovable items that ride
+    Qt's default drag handler - must ALWAYS let the base press/release
+    run alongside their custom logic. The isinstance gate exists for
+    the item-level tests that drive these overrides directly with
+    plain-Python _FakeEvent stand-ins: the C++ base implementation
+    cannot accept those, and the base bookkeeping this call exists for
+    only matters on the real-event chain, which always delivers real
+    QGraphicsSceneMouseEvents."""
+    if isinstance(ev, QGraphicsSceneMouseEvent):
+        base_handler(ev)
 
 
 def _scene_view(item: QGraphicsItem):
@@ -586,6 +627,17 @@ class BlockItem(QGraphicsItem):
             # baseline - see _GestureMappingGuard's docstring.
             self._gesture_mapping.arm(self)
         if self.state.edit_mode:
+            # M8 wave B fix round 6: the base class MUST see the press
+            # too, so Qt's own drag bookkeeping is armed for this
+            # gesture - see _run_base_mouse_handler's docstring. Runs
+            # AFTER _select_exclusively above, so the base handler's
+            # own selection pass (clear-then-select on a not-yet-
+            # selected item) finds the item already selected and
+            # leaves the selection state exactly as the tests pin it.
+            # Normal mode stays super()-free: with every interaction
+            # flag off, the base press would just ignore() the event,
+            # and the inspector click routing below needs it accepted.
+            _run_base_mouse_handler(super().mousePressEvent, ev)
             ev.accept()
             return
         badge = self.state.badges.get(self.block.id)
@@ -596,6 +648,16 @@ class BlockItem(QGraphicsItem):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
+        # M8 wave B fix round 6 (THE round-3 teleport root cause):
+        # the base-class release is the ONE place in Qt that clears
+        # QGraphicsScenePrivate::movingItemsInitialPositions - skip it
+        # and the next drag of any movable item computes its steps
+        # from this gesture's stale map and teleports; see
+        # _run_base_mouse_handler's docstring. Unconditional (not
+        # gated on _editable): the release of a drag whose edit mode
+        # was toggled off mid-gesture still lands here, and must
+        # still tear the map down.
+        _run_base_mouse_handler(super().mouseReleaseEvent, ev)
         if self._editable:
             pos = self.pos()
             new_xy = (int(pos.x()), int(pos.y()))
@@ -1555,6 +1617,12 @@ class LegendItem(QGraphicsItem):
             # M8 wave B fix round 5: see _GestureMappingGuard's
             # docstring.
             self._gesture_mapping.arm(self)
+            # M8 wave B fix round 6: arm Qt's own drag bookkeeping
+            # too - see BlockItem.mousePressEvent's matching comment /
+            # _run_base_mouse_handler's docstring. Editable-only for
+            # the same reason as there: with every interaction flag
+            # off, the base press would just ignore() the event.
+            _run_base_mouse_handler(super().mousePressEvent, ev)
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
@@ -1571,6 +1639,13 @@ class LegendItem(QGraphicsItem):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
+        # M8 wave B fix round 6: see BlockItem.mouseReleaseEvent's
+        # matching comment - the base release is the one place Qt
+        # clears movingItemsInitialPositions, and a completed legend
+        # drag poisons the map for the next BLOCK drag exactly the
+        # same way. Unconditional for the same mid-gesture-mode-exit
+        # reason as there.
+        _run_base_mouse_handler(super().mouseReleaseEvent, ev)
         if self._editable:
             pos = self.pos()
             new_xy = (int(pos.x()), int(pos.y()))

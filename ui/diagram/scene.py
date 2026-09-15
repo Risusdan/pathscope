@@ -76,6 +76,15 @@ class DiagramState:
         # forward it to statusBar().showMessage() - see
         # MainWindow._on_live_status.
         self.on_live_status: Callable[[str], None] = _noop_status
+        # M8 wave B4 (dynamic alignment guides): live id -> BlockItem
+        # registry, populated by build_scene below - lets a dragged
+        # BlockItem's itemChange check its edges/centers against every
+        # OTHER block's, for alignment-snap, without its own
+        # blocks-dict plumbing (the same problem WireItem's
+        # refresh_auto_route(blocks) solves a different way - this one
+        # is read-many/write-once-at-startup, so a plain state field
+        # populated eagerly is simpler than a per-caller pass-through).
+        self.blocks: Dict[str, "BlockItem"] = {}
 
 
 def build_scene(topology: Topology, state: DiagramState
@@ -93,6 +102,7 @@ def build_scene(topology: Topology, state: DiagramState
         item = BlockItem(block, state)
         scene.addItem(item)
         blocks[bid] = item
+    state.blocks = blocks   # M8 wave B4: see DiagramState.blocks' comment
 
     wires: Dict[str, WireItem] = {}
     for edge in topology.edges:

@@ -1739,3 +1739,81 @@ def test_main_window_forwards_live_status_to_statusbar(qtbot):
 
     item.mouseReleaseEvent(_FakeEvent())
     assert win.statusBar().currentMessage() == ""
+
+
+# -- M8 wave B4a: dynamic alignment guides - detection (snap) --------------
+
+
+def test_compute_alignment_snap_matches_closest_same_type_line():
+    from ui.diagram.items import _compute_alignment_snap
+    others = [(500, 500, 160, 100)]
+
+    sx, sy, gx, gy = _compute_alignment_snap(497, 900, 45, 90, others)
+
+    assert (sx, gx) == (500, 500)   # left(497) -> left(500), within 6px
+    assert (sy, gy) == (900, None)   # no y-axis line anywhere near 900
+
+
+def test_compute_alignment_snap_no_match_outside_threshold():
+    from ui.diagram.items import _compute_alignment_snap
+    others = [(500, 500, 160, 100)]
+
+    sx, sy, gx, gy = _compute_alignment_snap(480, 900, 45, 90, others)
+
+    assert (sx, gx) == (480, None)   # 20px away - beyond the 6px threshold
+
+
+def test_compute_alignment_snap_picks_closest_among_multiple_others():
+    from ui.diagram.items import _compute_alignment_snap
+    # left lines at 505 and 498; candidate's own left is 500.
+    others = [(505, 0, 10, 10), (498, 0, 10, 10)]
+
+    sx, sy, gx, gy = _compute_alignment_snap(500, 0, 10, 10, others)
+
+    assert gx == 498   # |498-500|=2 is closer than |505-500|=5
+    assert sx == 498
+
+
+def test_block_drag_snaps_to_alignment_with_another_block(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    dma2 = blocks["dma2"]
+    other = blocks["mux0"]
+    # Controlled coordinates (apply_geometry bypasses snap) so only
+    # the ONE alignment under test can possibly match.
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+    other.set_editable(True)
+
+    other.setPos(497, 900)   # 3px short of dma2's left edge (500)
+
+    assert (other.pos().x(), other.pos().y()) == (500, 900)
+    assert other._active_guides == (500, None)
+
+
+def test_block_drag_no_alignment_when_out_of_range(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    dma2 = blocks["dma2"]
+    other = blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+    other.set_editable(True)
+
+    other.setPos(480, 900)   # 20px short - beyond the 6px threshold
+
+    assert (other.pos().x(), other.pos().y()) == (480, 900)   # grid-snap only
+    assert other._active_guides == (None, None)
+
+
+def test_block_drag_shift_bypasses_alignment_snap(qtbot, monkeypatch):
+    _, state, scene, blocks, wires = _build(qtbot)
+    dma2 = blocks["dma2"]
+    other = blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+    other.set_editable(True)
+    monkeypatch.setattr("ui.diagram.items._fine_snap", lambda: True)
+
+    other.setPos(497, 900)   # within alignment range, but Shift held
+
+    assert (other.pos().x(), other.pos().y()) == (497, 900)   # unsnapped
+    assert other._active_guides == (None, None)

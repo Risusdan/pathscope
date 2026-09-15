@@ -114,6 +114,57 @@ def _nudge_step(ev) -> int:
     return _FINE_STEP if fine else _GRID_STEP
 
 
+# M8 wave B4: dynamic alignment guides. 6px (scene units) - deliberately
+# tighter than the 20px endpoint magnet (finding 2d): a block-alignment
+# guide should only bite once the user is clearly lining edges up, not
+# every time two blocks happen to pass near each other while dragging.
+_ALIGN_THRESHOLD = 6
+
+
+def _compute_alignment_snap(x: float, y: float, w: float, h: float,
+                            others: List[Tuple[float, float, float, float]],
+                            threshold: float = _ALIGN_THRESHOLD
+                            ) -> Tuple[float, float, Optional[float],
+                                      Optional[float]]:
+    """Given a candidate top-left (x, y) and size (w, h) for a dragged
+    block, and the (x, y, w, h) of every OTHER block, finds the
+    CLOSEST same-type alignment - left-to-left, hcenter-to-hcenter, or
+    right-to-right for the x axis; top-to-top, vcenter-to-vcenter, or
+    bottom-to-bottom for y - within `threshold`, independently per
+    axis (an x match and a y match can come from two different other
+    blocks). Returns (snapped_x, snapped_y, guide_x, guide_y):
+    snapped_x/y is x/y shifted so the matched line lands EXACTLY on
+    the other block's line (unchanged from the input on an axis with
+    no match); guide_x/guide_y is the scene coordinate of the matched
+    line itself, for a caller to draw a reference line at - None on an
+    axis with no match. Pure (plain floats, no Qt/item dependency), so
+    it is unit-testable directly and reusable by BOTH the live snap
+    decision (BlockItem.itemChange) and, if a caller wants to
+    recompute after the fact, guide rendering."""
+    cx_lines = (x, x + w / 2.0, x + w)
+    cy_lines = (y, y + h / 2.0, y + h)
+    best_x: Optional[Tuple[float, float, float]] = None   # (|d|, d, line)
+    best_y: Optional[Tuple[float, float, float]] = None
+    for (ox, oy, ow, oh) in others:
+        ox_lines = (ox, ox + ow / 2.0, ox + ow)
+        oy_lines = (oy, oy + oh / 2.0, oy + oh)
+        for c, o in zip(cx_lines, ox_lines):
+            d = o - c
+            if abs(d) <= threshold and (best_x is None
+                                        or abs(d) < best_x[0]):
+                best_x = (abs(d), d, o)
+        for c, o in zip(cy_lines, oy_lines):
+            d = o - c
+            if abs(d) <= threshold and (best_y is None
+                                        or abs(d) < best_y[0]):
+                best_y = (abs(d), d, o)
+    snapped_x = x + best_x[1] if best_x is not None else x
+    snapped_y = y + best_y[1] if best_y is not None else y
+    guide_x = best_x[2] if best_x is not None else None
+    guide_y = best_y[2] if best_y is not None else None
+    return snapped_x, snapped_y, guide_x, guide_y
+
+
 def snap(value: float, fine: bool) -> int:
     """Grid-snap `value`: 10-unit steps normally, 1-unit when `fine`
     (Shift held). Pure so tests can hit it directly."""
@@ -153,6 +204,14 @@ class BlockItem(QGraphicsItem):
         # (see WaypointHandle._update_magnet_highlight) - paint() reads
         # it to brighten the outline as a "drop here to connect" cue.
         self._magnet_highlighted = False
+        # M8 wave B4 (dynamic alignment guides): (guide_x, guide_y) as
+        # of the LAST itemChange position-snap decision - None on an
+        # axis with no active alignment. MainWindow reads this after
+        # on_block_live_moved fires to draw/hide the reference lines;
+        # cleared (both None) whenever a nudge/apply_geometry/Shift
+        # drag bypasses alignment snapping entirely.
+        self._active_guides: Tuple[Optional[float], Optional[float]] = (
+            None, None)
 
     def _position_handle(self) -> None:
         self.handle.setPos(self.w - _HANDLE_SIZE, self.h - _HANDLE_SIZE)
@@ -207,8 +266,25 @@ class BlockItem(QGraphicsItem):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.ItemPositionChange and self._editable
                 and not self._applying):
-            return QPointF(snap(value.x(), _fine_snap()),
-                           snap(value.y(), _fine_snap()))
+            fine = _fine_snap()
+            if fine:
+                # M8 wave B4: Shift disables alignment snapping
+                # entirely, along with grid snapping falling back to
+                # its existing 1-unit fine step - the user is asking
+                # for unassisted, precise placement.
+                self._active_guides = (None, None)
+                return QPointF(snap(value.x(), True), snap(value.y(), True))
+            others = [item.geometry() for item in self.state.blocks.values()
+                     if item is not self]
+            sx, sy, gx, gy = _compute_alignment_snap(
+                value.x(), value.y(), self.w, self.h, others)
+            # alignment wins over grid snap on whichever axis matched;
+            # the other axis (or both, with no match anywhere) still
+            # falls back to the existing grid snap.
+            fx = sx if gx is not None else snap(sx, False)
+            fy = sy if gy is not None else snap(sy, False)
+            self._active_guides = (gx, gy)
+            return QPointF(fx, fy)
         if (change == QGraphicsItem.ItemPositionHasChanged
                 and self._editable and not self._applying):
             # M8 wave 2 (Visio-style connector glue): fires on every

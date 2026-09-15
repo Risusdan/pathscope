@@ -220,7 +220,17 @@ class BlockItem(QGraphicsItem):
             # this live-drag path). MainWindow filters to the wires
             # actually attached to this block.
             self.state.on_block_live_moved(self.block.id)
+            self._emit_live_status()   # M8 wave B3
         return super().itemChange(change, value)
+
+    def _emit_live_status(self) -> None:
+        """M8 wave B3 (live coordinate readout): "id: x, y (w x h)" -
+        the same format whether a position drag or a resize is what is
+        actually changing (see _ResizeHandle.mouseMoveEvent's matching
+        call), since both read the block's current, full geometry."""
+        x, y, w, h = self.geometry()
+        self.state.on_live_status(
+            "%s: %d, %d (%d x %d)" % (self.block.id, x, y, w, h))
 
     def gesture_origin(self) -> Tuple[int, int]:
         """The (x, y) this block's CURRENT drag/resize gesture started
@@ -340,6 +350,7 @@ class BlockItem(QGraphicsItem):
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
             self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
+            self.state.on_live_status("")   # M8 wave B3: clear on release
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
@@ -410,6 +421,7 @@ class _ResizeHandle(QGraphicsItem):
         block_item.h = max(_MIN_BLOCK_H, self._start_h + dy)
         block_item._position_handle()
         block_item.update()
+        block_item._emit_live_status()   # M8 wave B3
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
@@ -426,6 +438,7 @@ class _ResizeHandle(QGraphicsItem):
             block_item.block.w, block_item.block.h = w, h
             block_item.state.on_geometry_changed()
         self._drag_from = None
+        block_item.state.on_live_status("")   # M8 wave B3: clear on release
         ev.accept()
 
 
@@ -1073,6 +1086,8 @@ class WaypointHandle(QGraphicsItem):
         wire.pts[self.index] = QPointF(nx, ny)
         wire.update()
         self._update_magnet_highlight(wire, nx, ny)
+        wire.state.on_live_status(   # M8 wave B3
+            "waypoint: %d, %d" % (int(nx), int(ny)))
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
@@ -1106,6 +1121,7 @@ class WaypointHandle(QGraphicsItem):
         self._geom_at_press = new_xy
         self._drag_from = None
         self.setCursor(Qt.OpenHandCursor)
+        wire.state.on_live_status("")   # M8 wave B3: clear on release
         ev.accept()
 
     def keyPressEvent(self, ev):
@@ -1203,6 +1219,16 @@ class LegendItem(QGraphicsItem):
                 and not self._applying):
             return QPointF(snap(value.x(), _fine_snap()),
                            snap(value.y(), _fine_snap()))
+        if (change == QGraphicsItem.ItemPositionHasChanged
+                and self._editable and not self._applying):
+            # M8 wave B3 (live coordinate readout): mirrors BlockItem's
+            # matching branch - ItemSendsGeometryChanges is only on
+            # while editable, so this never fires outside a drag;
+            # _applying excludes apply_geometry's own programmatic
+            # setPos (undo/revert do not want a live-status flicker).
+            pos = self.pos()
+            self.state.on_live_status(
+                "legend: %d, %d" % (int(pos.x()), int(pos.y())))
         return super().itemChange(change, value)
 
     def mousePressEvent(self, ev):
@@ -1235,6 +1261,7 @@ class LegendItem(QGraphicsItem):
             if new_xy != self._geom_at_press:
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
+            self.state.on_live_status("")   # M8 wave B3: clear on release
         ev.accept()
 
     def boundingRect(self):

@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
         self.diagram_state.on_geometry_changed = (
             self._on_layout_geometry_changed)
         self.diagram_state.on_block_live_moved = self._on_block_live_moved
+        self.diagram_state.on_live_status = self._on_live_status
         self.flow_page.on_pick = self._highlight_flow
         self.event_log.on_focus = self._on_log_focus
         self.event_log.on_event_time = self._on_log_time_focus
@@ -640,6 +641,22 @@ class MainWindow(QMainWindow):
         self._live_move_tracking = (block_id, x, y)
         for wire in attached:
             wire.refresh_auto_route(self.blocks)
+
+    def _on_live_status(self, msg: str) -> None:
+        """Wired to diagram_state.on_live_status (M8 wave B3): a block
+        drag/resize (BlockItem/_ResizeHandle), a waypoint drag
+        (WaypointHandle), or a legend drag (LegendItem) all forward
+        their own formatted "id: x, y (w x h)" / "waypoint: x, y" /
+        "legend: x, y" string here on every live move step, and an
+        empty string on release. statusBar().showMessage() with no
+        timeout persists the message until the next call replaces or
+        clears it - matching a live readout, not a transient
+        notification like _toggle_halt's error message (which DOES
+        pass a timeout)."""
+        if msg:
+            self.statusBar().showMessage(msg)
+        else:
+            self.statusBar().clearMessage()
 
     def _on_layout_undo(self) -> None:
         if not self.diagram_state.edit_mode or not self._undo_stack:

@@ -30,6 +30,10 @@ def _noop_geometry() -> None:
     pass
 
 
+def _noop_status(_msg: str) -> None:
+    pass
+
+
 class DiagramState:
     """Mutable paint-time state read by BlockItem/WireItem/LegendItem."""
 
@@ -64,6 +68,14 @@ class DiagramState:
         # this can fire many times per gesture, so it carries the
         # moved block's id rather than nothing.
         self.on_block_live_moved: Callable[[str], None] = _noop
+        # M8 wave B3 (live coordinate readout): fired with a one-line
+        # status string on every live move/resize step of a block,
+        # waypoint handle, or the legend in edit mode - "" clears it
+        # (on release). Kept deliberately generic (a plain string, not
+        # a structured payload) since MainWindow's only job is to
+        # forward it to statusBar().showMessage() - see
+        # MainWindow._on_live_status.
+        self.on_live_status: Callable[[str], None] = _noop_status
 
 
 def build_scene(topology: Topology, state: DiagramState

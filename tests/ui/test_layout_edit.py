@@ -1656,3 +1656,86 @@ def test_magnet_highlight_inert_on_a_standalone_wire_without_blocks():
     handle.mouseReleaseEvent(_FakeEvent())
 
     assert handle._magnet_target is None
+
+
+# -- M8 wave B3: live coordinate readout -----------------------------------
+
+
+def test_block_drag_emits_live_status_and_clears_on_release(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+    calls = []
+    state.on_live_status = calls.append
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 10, item.pos().y())
+
+    assert calls[-1] == "adc1: %d, %d (%d x %d)" % item.geometry()
+
+    item.mouseReleaseEvent(_FakeEvent())
+    assert calls[-1] == ""
+
+
+def test_block_resize_emits_live_status_and_clears_on_release(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+    calls = []
+    state.on_live_status = calls.append
+
+    item.handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(0, 0)))
+    item.handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(23, 23)))
+
+    assert calls[-1] == "adc1: %d, %d (%d x %d)" % item.geometry()
+
+    item.handle.mouseReleaseEvent(_FakeEvent())
+    assert calls[-1] == ""
+
+
+def test_waypoint_drag_emits_live_status_and_clears_on_release():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    calls = []
+    state.on_live_status = calls.append
+    handle = wire._handles[1]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(50, 10)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(53, 18)))
+
+    assert calls[-1] == "waypoint: 53, 18"
+
+    handle.mouseReleaseEvent(_FakeEvent())
+    assert calls[-1] == ""
+
+
+def test_legend_drag_emits_live_status_and_clears_on_release():
+    state = DiagramState()
+    legend = LegendItem(state)
+    legend.set_editable(True)
+    calls = []
+    state.on_live_status = calls.append
+
+    legend.mousePressEvent(_FakeEvent())
+    legend.setPos(legend.pos().x() + 10, legend.pos().y())
+
+    assert calls[-1] == "legend: %d, %d" % (int(legend.pos().x()),
+                                            int(legend.pos().y()))
+
+    legend.mouseReleaseEvent(_FakeEvent())
+    assert calls[-1] == ""
+
+
+def test_main_window_forwards_live_status_to_statusbar(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 10, item.pos().y())
+
+    assert (win.statusBar().currentMessage()
+           == "adc1: %d, %d (%d x %d)" % item.geometry())
+
+    item.mouseReleaseEvent(_FakeEvent())
+    assert win.statusBar().currentMessage() == ""

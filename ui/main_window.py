@@ -15,12 +15,13 @@ position with the page content) and the poll rate."""
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Set
 
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsView,
-                               QHBoxLayout, QLabel, QMainWindow,
-                               QPushButton, QSizePolicy, QStackedWidget,
-                               QToolBar, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt
+from PySide6.QtGui import QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsLineItem,
+                               QGraphicsView, QHBoxLayout, QLabel,
+                               QMainWindow, QPushButton, QSizePolicy,
+                               QStackedWidget, QToolBar, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from core.engine.core import Engine, EngineError
 from core.engine.rules import EngineUpdate
@@ -35,6 +36,7 @@ from .panels.event_log import EventLog
 from .panels.flow_page import FlowPage, build_flow_edge_map
 from .panels.memory_page import MemoryPage
 from .panels.register_page import RegisterPage
+from .style import COL_GREY
 
 # M8 layout edit mode: dashed border cue applied to the diagram view's
 # viewport while editing (a plain stylesheet swap - cleared back to ""
@@ -42,6 +44,16 @@ from .panels.register_page import RegisterPage
 # editing the layout" cue independent of the toolbar button's own
 # checked state.
 _EDIT_VIEW_STYLE = "QGraphicsView { border: 2px dashed #999999; }"
+
+# Manual-gate wave B, B4 (dynamic alignment guides): light grey dashed
+# - reuses the existing palette's COL_GREY rather than adding a new
+# color, per the "no new colors beyond ui/style.py... add if needed"
+# instruction (grey already covers "light grey dashed", so nothing new
+# was needed). GUIDE_MARGIN pads the block-extents-derived span the
+# reference lines are drawn across, so a line reaches visibly past the
+# outermost block rather than stopping exactly at its edge.
+_GUIDE_PEN = QPen(COL_GREY, 1, Qt.DashLine)
+_GUIDE_MARGIN = 200
 
 # Low sweep-rate warning on the toolbar's poll label (moved here from
 # the scope page's budget label, which used to repeat the same rate):
@@ -492,6 +504,21 @@ class MainWindow(QMainWindow):
         # position that block reached some other way.
         self._live_move_tracking = None
 
+        # M8 wave B4b (dynamic alignment guides - rendering half of
+        # wave B4a's detection): one vertical + one horizontal
+        # QGraphicsLineItem, owned by MainWindow (the scene is
+        # MainWindow's own - items.py's BlockItem only computes WHICH
+        # lines are active, in _active_guides, it never touches the
+        # scene itself). Both start hidden; _update_alignment_guides
+        # repositions and shows/hides them on every live block move.
+        self._guide_v = QGraphicsLineItem()
+        self._guide_h = QGraphicsLineItem()
+        for guide in (self._guide_v, self._guide_h):
+            guide.setPen(_GUIDE_PEN)
+            guide.setZValue(20)
+            guide.setVisible(False)
+            self.scene.addItem(guide)
+
         self._undo_shortcut = QShortcut(QKeySequence.Undo, self)
         self._undo_shortcut.activated.connect(self._on_layout_undo)
 
@@ -526,6 +553,7 @@ class MainWindow(QMainWindow):
         if not on:
             self._undo_stack = []
             self._layout_world = self._capture_layout_world()
+            self._clear_alignment_guides()   # M8 wave B4b: mode exit
 
     def _capture_layout_world(self) -> Dict[str, Any]:
         return {
@@ -595,6 +623,7 @@ class MainWindow(QMainWindow):
         # is stale from here on (the NEXT drag on that block starts a
         # fresh gesture with its own baseline).
         self._live_move_tracking = None
+        self._clear_alignment_guides()   # M8 wave B4b: commit clears them
 
     def _on_block_live_moved(self, block_id: str) -> None:
         """Wired to diagram_state.on_block_live_moved - fires on EVERY
@@ -641,6 +670,50 @@ class MainWindow(QMainWindow):
         self._live_move_tracking = (block_id, x, y)
         for wire in attached:
             wire.refresh_auto_route(self.blocks)
+        self._update_alignment_guides(item)   # M8 wave B4b
+
+    def _diagram_bounds(self) -> QRectF:
+        """Bounding rect of every block's CURRENT geometry, padded by
+        _GUIDE_MARGIN - the span an alignment reference line is drawn
+        across. Deliberately computed from self.blocks (not
+        self.scene.itemsBoundingRect(), which would also include the
+        guide lines themselves once shown - a growing span each move,
+        feeding back into itself) so it stays stable regardless of how
+        long a previous guide line was."""
+        xs0 = [item.geometry()[0] for item in self.blocks.values()]
+        ys0 = [item.geometry()[1] for item in self.blocks.values()]
+        xs1 = [g[0] + g[2] for g in
+              (item.geometry() for item in self.blocks.values())]
+        ys1 = [g[1] + g[3] for g in
+              (item.geometry() for item in self.blocks.values())]
+        if not xs0:
+            return QRectF(0, 0, 0, 0)
+        return QRectF(min(xs0) - _GUIDE_MARGIN, min(ys0) - _GUIDE_MARGIN,
+                      max(xs1) - min(xs0) + 2 * _GUIDE_MARGIN,
+                      max(ys1) - min(ys0) + 2 * _GUIDE_MARGIN)
+
+    def _update_alignment_guides(self, item) -> None:
+        """M8 wave B4b: reads the dragged BlockItem's _active_guides
+        (set by its own itemChange during the snap decision - wave
+        B4a) and shows/positions the matching QGraphicsLineItem(s)
+        across the current diagram bounds, or hides whichever axis has
+        no active alignment."""
+        gx, gy = item._active_guides
+        bounds = self._diagram_bounds()
+        if gx is not None:
+            self._guide_v.setLine(gx, bounds.top(), gx, bounds.bottom())
+            self._guide_v.setVisible(True)
+        else:
+            self._guide_v.setVisible(False)
+        if gy is not None:
+            self._guide_h.setLine(bounds.left(), gy, bounds.right(), gy)
+            self._guide_h.setVisible(True)
+        else:
+            self._guide_h.setVisible(False)
+
+    def _clear_alignment_guides(self) -> None:
+        self._guide_v.setVisible(False)
+        self._guide_h.setVisible(False)
 
     def _on_live_status(self, msg: str) -> None:
         """Wired to diagram_state.on_live_status (M8 wave B3): a block

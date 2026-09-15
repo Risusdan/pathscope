@@ -1817,3 +1817,76 @@ def test_block_drag_shift_bypasses_alignment_snap(qtbot, monkeypatch):
 
     assert (other.pos().x(), other.pos().y()) == (497, 900)   # unsnapped
     assert other._active_guides == (None, None)
+
+
+# -- M8 wave B4b: dynamic alignment guides - rendering ----------------------
+
+
+def test_alignment_guide_visible_with_correct_coords_when_in_range(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+    assert win._guide_v.isVisible() is False
+
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(497, 900)   # 3px short of dma2's left edge (500)
+
+    assert win._guide_v.isVisible() is True
+    line = win._guide_v.line()
+    assert (line.x1(), line.x2()) == (500, 500)
+    bounds = win._diagram_bounds()
+    assert (line.y1(), line.y2()) == (bounds.top(), bounds.bottom())
+    assert win._guide_h.isVisible() is False   # no y-axis match here
+
+
+def test_alignment_guide_hidden_when_out_of_range(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(480, 900)   # 20px short - beyond the 6px threshold
+
+    assert win._guide_v.isVisible() is False
+    assert win._guide_h.isVisible() is False
+
+
+def test_alignment_guide_clears_on_release_and_on_commit(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(497, 900)
+    assert win._guide_v.isVisible() is True
+
+    other.mouseReleaseEvent(_FakeEvent())   # commits -> _on_layout_geometry_changed
+    assert win._guide_v.isVisible() is False
+    assert win._guide_h.isVisible() is False
+
+
+def test_alignment_guide_clears_on_mode_exit(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(497, 900)
+    assert win._guide_v.isVisible() is True
+
+    win.edit_layout_btn.setChecked(False)   # exit edit mode mid-drag
+
+    assert win._guide_v.isVisible() is False
+    assert win._guide_h.isVisible() is False

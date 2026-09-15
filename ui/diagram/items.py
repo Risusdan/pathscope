@@ -13,7 +13,7 @@ changes are per task-8's porting instructions:
     the prototype's stub dicts (`spec["x"]` -> `block.x`, etc).
   - badge lookups go through the sparse `state.badges` dict via .get().
 """
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
@@ -148,9 +148,20 @@ class BlockItem(QGraphicsItem):
         self.handle = _ResizeHandle(self)
         self.handle.setVisible(False)
         self._position_handle()
+        # M8 wave B2: set by a WaypointHandle dragging an endpoint
+        # toward THIS block, while within the endpoint magnet's range
+        # (see WaypointHandle._update_magnet_highlight) - paint() reads
+        # it to brighten the outline as a "drop here to connect" cue.
+        self._magnet_highlighted = False
 
     def _position_handle(self) -> None:
         self.handle.setPos(self.w - _HANDLE_SIZE, self.h - _HANDLE_SIZE)
+
+    def set_magnet_highlight(self, on: bool) -> None:
+        on = bool(on)
+        if on != self._magnet_highlighted:
+            self._magnet_highlighted = on
+            self.update()
 
     def set_editable(self, on: bool) -> None:
         self._editable = bool(on)
@@ -232,7 +243,14 @@ class BlockItem(QGraphicsItem):
         p.setBrush(QBrush(QColor(KIND_TINT[kind])))
         selected_ = self.block.id == self.state.selected_block
         in_flow = self.block.id in self.state.flow_blocks
-        if selected_:
+        if self._magnet_highlighted:
+            # M8 wave B2: "drop here to connect" cue while a
+            # WaypointHandle endpoint drag is within magnet range of
+            # this block - takes priority over the live-inspection
+            # selected_/in_flow pens, which are only meaningful outside
+            # edit mode anyway.
+            p.setPen(QPen(COL_ACTIVE, 3.2))
+        elif selected_:
             p.setPen(QPen(COL_ACTIVE, 2.6))
         elif in_flow:
             p.setPen(QPen(COL_SELECT, 2.2))
@@ -961,6 +979,10 @@ class WaypointHandle(QGraphicsItem):
         self._drag_from = None
         self._start_point = (0.0, 0.0)
         self._hovered = False
+        # M8 wave B2: the BlockItem currently showing the "drop here to
+        # connect" magnet-highlight cue because of THIS handle's live
+        # drag, or None - see _update_magnet_highlight.
+        self._magnet_target: Optional["BlockItem"] = None
         pt = wire.pts[index]
         self.setPos(pt)
         self._geom_at_press = (int(pt.x()), int(pt.y()))
@@ -1000,6 +1022,44 @@ class WaypointHandle(QGraphicsItem):
         self.setCursor(Qt.ClosedHandCursor)
         ev.accept()
 
+    def _magnet_candidate(self, wire) -> Optional["BlockItem"]:
+        """The block this handle's endpoint anchors to, if any - index
+        0 is the src anchor, index len(edge.points)-1 is the dst
+        anchor; an interior waypoint has no candidate at all.
+        wire._src_item/_dst_item are None until refresh_auto_route
+        (blocks) has run at least once (real MainWindow sessions
+        always do this - see that method's docstring), so the magnet
+        (and its highlight) is simply inert until then, same as a
+        standalone test-built wire with no real blocks."""
+        n = len(wire.edge.points)
+        if self.index == 0:
+            return wire._src_item
+        if self.index == n - 1:
+            return wire._dst_item
+        return None
+
+    def _update_magnet_highlight(self, wire, px: float, py: float) -> None:
+        """M8 wave B2: toggles the candidate block's "drop here to
+        connect" cue (BlockItem.set_magnet_highlight) as this handle's
+        LIVE drag position enters/leaves the endpoint magnet's range -
+        reuses _nearest_rect_boundary_point, the same projected-point
+        math mouseReleaseEvent's actual snap uses below, so the cue and
+        the eventual snap always agree on what "in range" means."""
+        candidate = self._magnet_candidate(wire)
+        target = None
+        if candidate is not None:
+            bx, by, bw, bh = candidate.geometry()
+            nx, ny = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
+            dist = ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
+            if dist <= _ENDPOINT_MAGNET_PX:
+                target = candidate
+        if target is not self._magnet_target:
+            if self._magnet_target is not None:
+                self._magnet_target.set_magnet_highlight(False)
+            if target is not None:
+                target.set_magnet_highlight(True)
+            self._magnet_target = target
+
     def mouseMoveEvent(self, ev):
         if self._drag_from is None:
             ev.accept()
@@ -1012,31 +1072,28 @@ class WaypointHandle(QGraphicsItem):
         self.setPos(nx, ny)
         wire.pts[self.index] = QPointF(nx, ny)
         wire.update()
+        self._update_magnet_highlight(wire, nx, ny)
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
         wire = self.parentItem()
         pos = self.pos()
         px, py = pos.x(), pos.y()
-        n = len(wire.edge.points)
         # finding 2d: endpoint re-anchor magnet. Only index 0 (src) and
         # index n-1 (dst) are anchors at all; an interior waypoint is
-        # never magnetized. wire._src_item/_dst_item are None until
-        # refresh_auto_route(blocks) has run at least once (real
-        # MainWindow sessions always do this - see that method's
-        # docstring) - the magnet is simply inert until then, same as
-        # a standalone test-built wire with no real blocks.
-        magnet_item = None
-        if self.index == 0:
-            magnet_item = wire._src_item
-        elif self.index == n - 1:
-            magnet_item = wire._dst_item
+        # never magnetized (_magnet_candidate returns None for it).
+        magnet_item = self._magnet_candidate(wire)
         if magnet_item is not None:
             bx, by, bw, bh = magnet_item.geometry()
             nx, ny = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
             dist = ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
             if dist <= _ENDPOINT_MAGNET_PX:
                 px, py = nx, ny
+        # M8 wave B2: the highlight is a LIVE-drag-only cue - clears on
+        # release regardless of whether the magnet actually applied.
+        if self._magnet_target is not None:
+            self._magnet_target.set_magnet_highlight(False)
+            self._magnet_target = None
         fine = _fine_snap()
         new_xy = (snap(px, fine), snap(py, fine))
         wire.prepareGeometryChange()

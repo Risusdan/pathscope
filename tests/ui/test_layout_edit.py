@@ -1592,3 +1592,67 @@ def test_nudge_legend_inert_outside_edit_mode():
 
     assert legend.geometry() == orig
     assert calls == []
+
+
+# -- M8 wave B2: endpoint-magnet visual feedback ---------------------------
+
+
+def test_magnet_highlight_toggles_as_endpoint_handle_enters_and_leaves_range(
+        qtbot):
+    # adc1: x=70, y=280, w=140, h=80 -> right edge at x=210.
+    _, state, scene, blocks, wires = _build(qtbot)
+    for wire in wires.values():
+        wire.refresh_auto_route(blocks)   # populates _src_item/_dst_item
+    wire = next(w for w in wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire.set_editable(True)
+    handle = wire._handles[0]   # src anchor -> adc1
+    adc1 = blocks["adc1"]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
+    assert adc1._magnet_highlighted is False   # no move yet
+
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # in range
+    assert adc1._magnet_highlighted is True
+
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(100, 320)))  # far away
+    assert adc1._magnet_highlighted is False
+
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # back in
+    assert adc1._magnet_highlighted is True
+
+    handle.mouseReleaseEvent(_FakeEvent())
+    assert adc1._magnet_highlighted is False   # clears on release
+
+
+def test_magnet_highlight_never_set_for_interior_handles(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    for wire in wires.values():
+        wire.refresh_auto_route(blocks)
+    wire = next(w for w in wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire.set_editable(True)
+    handle = wire._handles[1]   # interior point
+    adc1, mux0 = blocks["adc1"], blocks["mux0"]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(232, 320)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # near adc1
+
+    assert adc1._magnet_highlighted is False
+    assert mux0._magnet_highlighted is False
+    assert handle._magnet_target is None
+
+
+def test_magnet_highlight_inert_on_a_standalone_wire_without_blocks():
+    # _make_wire-built wires never had refresh_auto_route(blocks)
+    # called, so _src_item/_dst_item are None - the highlight update
+    # must degrade to a no-op rather than raise.
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    handle = wire._handles[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(10, 10)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(12, 12)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert handle._magnet_target is None

@@ -649,6 +649,16 @@ class MainWindow(QMainWindow):
                      for eid, wire in self.wires.items()},
         }
 
+    def _refresh_progress_edges(self) -> None:
+        """Re-picks which edge carries each activity's progress text
+        (_build_progress_edge_map). The pick is geometry-based and M8
+        made geometry editable at runtime, so every layout-changing
+        path calls this - otherwise a re-routed diagram could keep
+        the text on exactly the steep diagonal segment the picker
+        exists to avoid, until the next app start."""
+        self._progress_edge = self._build_progress_edge_map(
+            self.engine.flowspec, self._flow_edges, self.wires)
+
     def _apply_layout_world(self, snapshot: Dict[str, Any]) -> None:
         for bid, geom in snapshot["blocks"].items():
             item = self.blocks.get(bid)
@@ -667,6 +677,7 @@ class MainWindow(QMainWindow):
         # changes block geometry (see refresh_auto_route's docstring).
         for wire in self.wires.values():
             wire.refresh_auto_route(self.blocks)
+        self._refresh_progress_edges()
         # M8 wave 2: this bypassed the live-drag path entirely - any
         # in-progress live-move tracking baseline is now meaningless.
         self._live_move_tracking = None
@@ -707,6 +718,7 @@ class MainWindow(QMainWindow):
         # stale route.
         for wire in self.wires.values():
             wire.refresh_auto_route(self.blocks)
+        self._refresh_progress_edges()
         # M8 wave 2: this gesture (whatever kind) is now fully
         # committed - a block's live-move tracking baseline, if any,
         # is stale from here on (the NEXT drag on that block starts a
@@ -1002,6 +1014,7 @@ class MainWindow(QMainWindow):
             wire.refresh_auto_route(self.blocks)
             if had_points:
                 self._dirty_wire_keys.add(wire.edge_key())
+        self._refresh_progress_edges()
 
         self._layout_dirty = True
         self._layout_world = self._capture_layout_world()

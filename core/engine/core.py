@@ -3,7 +3,7 @@ rules -> callbacks. The only class UI or CLI code needs to touch."""
 import glob
 import os
 import queue
-from typing import Any, Callable, Dict, List, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..adapter.base import TargetAdapter
 from ..target.flows import FlowSpec, load_flows, needed_registers
@@ -40,12 +40,17 @@ class Engine:
         self.history = history
         self.excluded = excluded
         self.guarded_addrs = guarded_addrs
-        self._guarded_addrs = guarded_addrs
         self._base_polled = set(base_polled)
         self._extra: Set[str] = set()
-        self._addr_watches: Dict[str, int] = {}
-        self.addr_watch_labels: Dict[str, str] = {}
         self.polled: Set[str] = set(self._base_polled)
+        # Set by load(): the *.topology.yaml this engine loaded from,
+        # so MainWindow's Save/Revert can re-read and patch that same
+        # file. Declared here so the attribute always exists.
+        self.topology_path: Optional[str] = None
+        # Set by ui/demo.py's make_demo_engine(): the simulated trace
+        # descriptor address. None on a real-hardware engine -
+        # ScopePage tests `is not None` to detect demo mode.
+        self.trace_desc_addr: Optional[int] = None
         self._poller = poller
         self._rules = rules
         self._update_cbs: List[Callable[[EngineUpdate], None]] = []
@@ -107,35 +112,6 @@ class Engine:
     def on_state(self, cb: Callable[[str], None]) -> None:
         self._poller.on_state(cb)
 
-    @property
-    def read_ops(self) -> int:
-        """No in-tree caller since M7 (scope moved to the trace path);
-        kept deliberately as public engine API - see the M7 plan's
-        Global Constraints.
-
-        Number of block-read transactions the current sweep issues
-        - len(poller.plan), one entry per contiguous block
-        build_read_plan (readplan.py) merged the polled registers/
-        addr-watches into. A scattered address far from everything
-        else in the plan costs one whole read op by itself; addresses
-        that pack into the same struct (or otherwise sit within
-        merge_gap_words of each other) share one.
-
-        Reading a list reference's len() here is GIL-safe without a
-        lock: the poller thread only ever rebinds self._poller.plan
-        whole (_swap_plan's inner swap() does `poller.plan = plan`, a
-        single assignment - see also Poller.__init__'s `self.plan =
-        plan`) and never mutates the existing list object in place
-        (poller.py's _sweep() only iterates it with `for op in
-        self.plan`; grepping the codebase turns up no .append or
-        item-assignment against poller.plan anywhere). So a concurrent
-        _swap_plan can only ever be observed as either the old list
-        object or the new one, never a half-built one - this property
-        may be read from any thread. If that ever changes (e.g. the
-        plan becomes mutated in place instead of rebound), this
-        property would need its own lock."""
-        return len(self._poller.plan)
-
     def clear_badge(self, block_id: str) -> None:
         self._rules.clear_badge(block_id)
 
@@ -158,94 +134,18 @@ class Engine:
         self._swap_plan()
         return sorted(refused)
 
-    def add_addr_watch(self, addr: int, label: str) -> str:
-        """No in-tree caller since M7 (scope moved to the trace path);
-        kept deliberately as public engine API - see the M7 plan's
-        Global Constraints.
-
-        Register a 32-bit word watch at a fixed address, keyed by
-        the synthetic "@%08X" % addr key used everywhere else (snapshot
-        values, History). Idempotent for the same addr: calling it
-        again just re-sets the label. Refuses out-of-range, guarded,
-        or misaligned addresses.
-
-        Builds the post-add dict first and only then rebinds
-        self._addr_watches and self.polled - same build-then-rebind
-        pattern remove_addr_watch uses below, for the same reason:
-        each is a single, whole-object assignment (atomic under the
-        GIL) rather than a mutation of the existing dict/set in place,
-        so a concurrent _swap_plan -> _build_plan never sees the two
-        fall out of sync."""
-        if not (0 <= addr <= 0xFFFFFFFC):
-            raise EngineError("address out of 32-bit range: %#x" % addr)
-        if addr % 4 != 0:
-            raise EngineError(
-                "address 0x%08X is not word-aligned" % addr)
-        if addr in self.guarded_addrs:
-            raise EngineError("address 0x%08X is guarded" % addr)
-        key = "@%08X" % addr
-        new_watches = dict(self._addr_watches)
-        new_watches[key] = addr
-        new_polled = self._polled_union(new_watches)
-        self._addr_watches = new_watches
-        self.polled = new_polled
-        self.addr_watch_labels[key] = label
-        self._swap_plan()
-        return key
-
-    def remove_addr_watch(self, addr_or_key: Union[int, str]) -> None:
-        """Popping the key from self._addr_watches and then recomputing
-        self.polled as two separate steps leaves a window, visible to
-        the poller thread's _on_poller_state -> _swap_plan ->
-        _build_plan, where self.polled (not yet reassigned) still
-        carries this "@" key after self._addr_watches has already
-        lost it - _build_plan then falls through to
-        model.resolve("@XXXXXXXX"), which raises SvdError. Avoid that
-        by computing the post-removal dict/set first and only then
-        rebinding self._addr_watches and self.polled (each a single,
-        whole-object assignment - atomic under the GIL, unlike
-        mutating the existing dict/set in place) before touching the
-        plan."""
-        if isinstance(addr_or_key, int):
-            key = "@%08X" % addr_or_key
-        else:
-            key = addr_or_key
-        new_watches = dict(self._addr_watches)
-        new_watches.pop(key, None)
-        new_polled = self._polled_union(new_watches)
-        self._addr_watches = new_watches
-        self.polled = new_polled
-        self.addr_watch_labels.pop(key, None)
-        self._swap_plan()
-
-    def _polled_union(self, addr_watches: Dict[str, int]) -> Set[str]:
-        """The one place the "what should be polled" union formula is
-        written - base registers, set_watch()'s extras, and the given
-        addr-watch keys - shared by _recompute_polled() and both
-        add_addr_watch()/remove_addr_watch() so the three call sites
-        can never drift apart."""
-        return (set(self._base_polled) | self._extra
-               | set(addr_watches.keys()))
-
     def _recompute_polled(self) -> None:
-        self.polled = self._polled_union(self._addr_watches)
+        self.polled = set(self._base_polled) | self._extra
 
     def _build_plan(self) -> List[ReadOp]:
-        entries: Dict[str, int] = {}
-        for key in self.polled:
-            addr = self._addr_watches.get(key)
-            if addr is None:
-                if key.startswith("@"):
-                    continue  # defensive: see remove_addr_watch
-                addr = self.model.resolve(key).address
-            entries[key] = addr
+        entries = {key: self.model.resolve(key).address
+                   for key in self.polled}
         return build_read_plan(
-            entries, forbidden_addrs=frozenset(self._guarded_addrs))
+            entries, forbidden_addrs=frozenset(self.guarded_addrs))
 
     def _swap_plan(self) -> None:
         """Rebuild the read plan from the current self.polled and
-        submit it as a poller command. Used both by set_watch() (and
-        add_addr_watch()/remove_addr_watch()) and by
+        submit it as a poller command. Used both by set_watch() and by
         _on_poller_state() below - always rebuilds from self.polled
         (the engine's source of truth for what should be watched)
         rather than closing over a plan computed earlier, so a

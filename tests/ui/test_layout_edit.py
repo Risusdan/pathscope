@@ -2854,3 +2854,29 @@ def test_handle_alignment_survives_the_release_grid_snap(qtbot):
     handle.mouseReleaseEvent(_FakeEvent())
 
     assert edge.points[1] == (120, 3)
+
+
+def test_progress_edge_map_recomputed_after_layout_edit(qtbot):
+    # Hygiene round R-E: the progress-text edge pick is geometry-based
+    # and was computed once at __init__ - after M8 made geometry
+    # editable, a re-routed diagram could keep the text on exactly the
+    # steep diagonal the picker avoids, until app restart.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    assert win._progress_edge    # sanity: f411 has a progress activity
+
+    # At build time dma2->busmx and busmx->sram1 tie at 90px, so the
+    # initial winner is iteration-order luck - which is exactly why
+    # each stage below forces an UNAMBIGUOUS winner. A stale
+    # (init-frozen) map cannot match both stages.
+
+    # Stage A: dma2 hugs busmx (its edge shrinks), sram1 goes far
+    # right - busmx->sram1 becomes the long horizontal by 300+ px.
+    _drag_block(win.blocks["dma2"], 540, 200)
+    _drag_block(win.blocks["sram1"], 1100, 230)
+    assert win._progress_edge["adc_to_sram"] == "busmx->sram1#5"
+
+    # Stage B: reverse it - sram1 hugs busmx, dma2 goes far left.
+    _drag_block(win.blocks["sram1"], 700, 45)
+    _drag_block(win.blocks["dma2"], 60, 340)
+    assert win._progress_edge["adc_to_sram"] == "dma2->busmx#4"

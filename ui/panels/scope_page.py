@@ -982,7 +982,7 @@ class ScopePage(QWidget):
         # mode exposes engine.trace_desc_addr (ui/demo.py); a real
         # engine has no such attribute at all, so it starts in
         # NO_SOURCE until load_elf() finds a ps_trace_desc symbol.
-        if hasattr(engine, "trace_desc_addr"):
+        if engine.trace_desc_addr is not None:
             self._discover_at(engine.trace_desc_addr)
         else:
             self.error_label.setText(NO_SOURCE_TEXT)

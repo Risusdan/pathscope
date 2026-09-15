@@ -447,10 +447,16 @@ def test_legend_drag_snaps_and_fires_callback_once(qtbot):
 
 
 def test_build_scene_reads_legend_pos_from_topology_when_present(qtbot):
+    # Acceptance round 5 note: this test used to assert that
+    # targets/f411's SHIPPED yaml has no layout.legend line - but the
+    # whole point of M8 is that the app writes that file, so the
+    # assertion broke the first time a real Save layout ran against
+    # the demo target. The no-legend half now forces legend=None
+    # explicitly instead of assuming the file's on-disk state.
     engine = Engine.load("targets/f411", MockAdapter({}))
+    topology_no_legend = dataclasses.replace(engine.topology, legend=None)
     state = DiagramState()
-    scene, blocks, wires = build_scene(engine.topology, state)
-    # f411.topology.yaml has no layout.legend - fallback stays available
+    scene, blocks, wires = build_scene(topology_no_legend, state)
     assert state.legend_pos is None
     assert LegendItem(state).geometry()[:2] == (700, 402)
 
@@ -2592,3 +2598,27 @@ def test_block_drag_after_a_legend_drag_does_not_teleport(qtbot):
     after = adc1.geometry()
     assert abs(after[0] - before[0]) <= 20
     assert abs(after[1] - before[1]) <= 20
+
+
+def test_auto_layout_parks_legend_below_blocks_and_undo_restores(qtbot):
+    # Acceptance round 5: auto-layout repositioned every block but
+    # left the legend at its stale pre-layout coordinates - on the
+    # f411 diagram that parked the legend on top of the relocated bus
+    # matrix. Auto-layout must move the legend too: below the whole
+    # picture, the one region no block placement can collide with.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+
+    legend_before = win.legend.geometry()
+
+    win._on_auto_layout()
+
+    lx, ly, _, _ = win.legend.geometry()
+    for item in win.blocks.values():
+        x, y, w, h = item.geometry()
+        assert ly >= y + h, "legend overlaps a block vertically"
+    assert lx % 10 == 0 and ly % 10 == 0
+    assert win._legend_moved is True   # Save must write the legend line
+
+    win._on_layout_undo()
+    assert win.legend.geometry() == legend_before

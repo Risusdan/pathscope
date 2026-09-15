@@ -30,7 +30,7 @@ from core.target.layout_io import LayoutPatchError, save_layout
 from core.target.topology import load_topology
 
 from .bridge import EngineBridge
-from .diagram.items import MONO, LegendItem, default_wh
+from .diagram.items import MONO, LegendItem, default_wh, snap
 from .diagram.scene import DiagramState, build_scene
 from .panels.event_log import EventLog
 from .panels.flow_page import FlowPage, build_flow_edge_map
@@ -491,7 +491,12 @@ class MainWindow(QMainWindow):
         self.layout_save_btn.clicked.connect(self._on_save_layout)
         self.layout_revert_btn = QPushButton("Revert")
         self.layout_revert_btn.clicked.connect(self._on_revert_layout)
-        self.layout_auto_btn = QPushButton("Auto-layout")
+        self.layout_auto_btn = QPushButton("Seed layout")
+        self.layout_auto_btn.setToolTip(
+            "Generate a first-draft layout from scratch: replaces ALL "
+            "block positions and clears explicit wire paths. One "
+            "Cmd/Ctrl+Z restores the previous layout. Meant for a new "
+            "target with no layout yet, not for tuning an existing one.")
         self.layout_auto_btn.clicked.connect(self._on_auto_layout)
         strip.addWidget(self.layout_save_btn)
         strip.addWidget(self.layout_revert_btn)
@@ -945,6 +950,23 @@ class MainWindow(QMainWindow):
             x, y = positions[bid]
             _, _, w, h = item.geometry()
             item.apply_geometry(x, y, w, h)
+
+        # Acceptance round 5: the legend moves too. Left at its stale
+        # pre-layout coordinates it routinely lands on top of a
+        # relocated block (seen on f411: legend over the bus matrix).
+        # Below the whole picture is the one spot no block placement
+        # can collide with; x aligns with the leftmost column.
+        if positions:
+            max_bottom = 0
+            for bid, item in self.blocks.items():
+                if bid not in positions:
+                    continue
+                x, y, w, h = item.geometry()
+                max_bottom = max(max_bottom, y + h)
+            lx = snap(min(x for x, _ in positions.values()), False)
+            ly = snap(max_bottom + 60, False)
+            self.legend.apply_geometry(lx, ly, 0, 0)
+            self._legend_moved = True
 
         for wire in self.wires.values():
             had_points = bool(wire.edge.points)

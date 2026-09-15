@@ -92,6 +92,27 @@ _HANDLE_HOVER_FILL = QColor("#FFE0B2")
 # endpoint itself.
 _ENDPOINT_MAGNET_PX = 20
 
+# M8 wave B1: arrow-key nudge. Shared by BlockItem/WaypointHandle/
+# LegendItem's keyPressEvent - one grid step per press, one unit with
+# Shift, matching the drag-time grid/fine step sizes exactly. Reads
+# the SHIFT state off the key event's own modifiers() rather than
+# _fine_snap()'s QApplication.keyboardModifiers() (used for live drags,
+# where polling global state each mouse-move is the natural fit) - a
+# discrete keypress already carries its own modifiers on the event,
+# which is both the more direct source and the only one an offscreen
+# test can drive without a real keyboard.
+_ARROW_DELTAS = {
+    Qt.Key_Left: (-1, 0),
+    Qt.Key_Right: (1, 0),
+    Qt.Key_Up: (0, -1),
+    Qt.Key_Down: (0, 1),
+}
+
+
+def _nudge_step(ev) -> int:
+    fine = bool(ev.modifiers() & Qt.ShiftModifier)
+    return _FINE_STEP if fine else _GRID_STEP
+
 
 def snap(value: float, fine: bool) -> int:
     """Grid-snap `value`: 10-unit steps normally, 1-unit when `fine`
@@ -135,6 +156,12 @@ class BlockItem(QGraphicsItem):
         self._editable = bool(on)
         self.setFlag(QGraphicsItem.ItemIsMovable, on)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
+        # M8 wave B1 (arrow-key nudge): selectable/focusable only while
+        # editing - matches WaypointHandle, which has carried both
+        # unconditionally since T4's Delete flow (a handle only exists
+        # at all while editable, so it never needed the on/off dance).
+        self.setFlag(QGraphicsItem.ItemIsSelectable, on)
+        self.setFlag(QGraphicsItem.ItemIsFocusable, on)
         self.handle.setVisible(on)
         # finding 2c: an open-hand cursor signals "draggable" while
         # editing; cleared (falls back to whatever the view/cursor
@@ -271,6 +298,11 @@ class BlockItem(QGraphicsItem):
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
             self.setCursor(Qt.ClosedHandCursor)   # finding 2c
+            # M8 wave B1: click-to-select/focus, mirroring WaypointHandle's
+            # own mousePressEvent - the arrow-key nudge below only ever
+            # fires on whichever item currently holds keyboard focus.
+            self.setSelected(True)
+            self.setFocus(Qt.MouseFocusReason)
         if self.state.edit_mode:
             ev.accept()
             return
@@ -290,6 +322,27 @@ class BlockItem(QGraphicsItem):
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
             self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
+        ev.accept()
+
+    def keyPressEvent(self, ev) -> None:
+        """M8 wave B1: arrow-key nudge - one grid step (10) per press,
+        one unit with Shift, on the currently-focused/selected block.
+        A completed gesture like a drag commit: moves via
+        apply_geometry (snap-bypassing - the step is already exact, it
+        must land exactly, not get re-snapped against a possibly
+        off-grid starting position) and fires on_geometry_changed once
+        so undo/dirty ride the same path a mouse drag commit uses.
+        Inert outside edit mode (mirrors WaypointHandle's Delete
+        handling - this item would not hold focus outside edit mode in
+        the real app, but a test may call this directly)."""
+        if not self._editable or ev.key() not in _ARROW_DELTAS:
+            ev.accept()
+            return
+        ddx, ddy = _ARROW_DELTAS[ev.key()]
+        step = _nudge_step(ev)
+        x, y, w, h = self.geometry()
+        self.apply_geometry(x + ddx * step, y + ddy * step, w, h)
+        self.state.on_geometry_changed()
         ev.accept()
 
 
@@ -1016,6 +1069,26 @@ class WaypointHandle(QGraphicsItem):
                 return
             wire.remove_point(self.index)
             ev.accept()
+        elif ev.key() in _ARROW_DELTAS:
+            # M8 wave B1: arrow-key nudge, on whichever waypoint handle
+            # is currently selected/focused (set in mousePressEvent) -
+            # one grid step per press, one unit with Shift. No magnet:
+            # nudge is exact-by-construction, so re-anchoring only
+            # applies to a mouse-dragged release (see
+            # mouseReleaseEvent).
+            wire = self.parentItem()
+            ddx, ddy = _ARROW_DELTAS[ev.key()]
+            step = _nudge_step(ev)
+            pos = self.pos()
+            nx, ny = pos.x() + ddx * step, pos.y() + ddy * step
+            wire.prepareGeometryChange()
+            self.setPos(nx, ny)
+            wire.pts[self.index] = QPointF(nx, ny)
+            wire.edge.points[self.index] = (int(nx), int(ny))
+            wire.update()
+            self._geom_at_press = (int(nx), int(ny))
+            wire.state.on_geometry_changed()
+            ev.accept()
         else:
             ev.accept()
 
@@ -1047,6 +1120,10 @@ class LegendItem(QGraphicsItem):
         self._editable = bool(on)
         self.setFlag(QGraphicsItem.ItemIsMovable, on)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
+        # M8 wave B1 (arrow-key nudge): see BlockItem.set_editable's
+        # matching comment.
+        self.setFlag(QGraphicsItem.ItemIsSelectable, on)
+        self.setFlag(QGraphicsItem.ItemIsFocusable, on)
 
     def geometry(self) -> Tuple[int, int, int, int]:
         pos = self.pos()
@@ -1075,6 +1152,23 @@ class LegendItem(QGraphicsItem):
         if self._editable:
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
+            # M8 wave B1: click-to-select/focus - see BlockItem's
+            # matching mousePressEvent comment.
+            self.setSelected(True)
+            self.setFocus(Qt.MouseFocusReason)
+        ev.accept()
+
+    def keyPressEvent(self, ev) -> None:
+        """M8 wave B1: arrow-key nudge - see BlockItem.keyPressEvent's
+        docstring; identical contract, just legend-shaped (no w/h)."""
+        if not self._editable or ev.key() not in _ARROW_DELTAS:
+            ev.accept()
+            return
+        ddx, ddy = _ARROW_DELTAS[ev.key()]
+        step = _nudge_step(ev)
+        x, y, w, h = self.geometry()
+        self.apply_geometry(x + ddx * step, y + ddy * step, w, h)
+        self.state.on_geometry_changed()
         ev.accept()
 
     def mouseReleaseEvent(self, ev):

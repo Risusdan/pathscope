@@ -43,15 +43,24 @@ class _FakeEvent:
 
 
 class _FakeKeyEvent:
-    """Minimal stand-in for QKeyEvent: WaypointHandle.keyPressEvent
-    only ever calls .key()/.accept()."""
+    """Minimal stand-in for QKeyEvent: WaypointHandle/BlockItem/
+    LegendItem's keyPressEvent handlers only ever call
+    .key()/.modifiers()/.accept(). modifiers defaults to NoModifier -
+    the arrow-key nudge reads Shift off the event itself (not
+    QApplication.keyboardModifiers(), which an offscreen test cannot
+    drive), so tests pass Qt.ShiftModifier directly here to exercise
+    the fine-step path."""
 
-    def __init__(self, key):
+    def __init__(self, key, modifiers=Qt.NoModifier):
         self._key = key
+        self._modifiers = modifiers
         self.accepted = False
 
     def key(self):
         return self._key
+
+    def modifiers(self):
+        return self._modifiers
 
     def accept(self):
         self.accepted = True
@@ -1477,3 +1486,109 @@ def test_repeated_wheel_zoom_clamps_at_min_and_max(qtbot):
     for _ in range(400):
         view.wheelEvent(_FakeWheelEvent(pixel_dy=-5))
     assert view._zoom == pytest.approx(_ZOOM_MIN)
+
+
+# -- M8 wave B1: arrow-key nudge -------------------------------------------
+
+
+def test_block_click_in_edit_mode_selects(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+
+    item.mousePressEvent(_FakeEvent())
+
+    assert item.isSelected() is True
+
+
+def test_nudge_block_moves_by_grid_step_and_fires_once(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(item.geometry())
+    item.set_editable(True)
+    orig = item.geometry()
+
+    item.keyPressEvent(_FakeKeyEvent(Qt.Key_Right))
+
+    expected = (orig[0] + 10, orig[1], orig[2], orig[3])
+    assert item.geometry() == expected
+    assert (item.block.x, item.block.y) == expected[:2]
+    assert calls == [expected]
+
+
+def test_nudge_block_with_shift_moves_by_one_unit(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+    orig = item.geometry()
+
+    item.keyPressEvent(_FakeKeyEvent(Qt.Key_Down, modifiers=Qt.ShiftModifier))
+
+    assert item.geometry() == (orig[0], orig[1] + 1, orig[2], orig[3])
+
+
+def test_nudge_block_inert_outside_edit_mode(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    orig = item.geometry()
+
+    item.keyPressEvent(_FakeKeyEvent(Qt.Key_Right))   # never set_editable
+
+    assert item.geometry() == orig
+    assert calls == []
+
+
+def test_nudge_waypoint_handle_moves_by_grid_step_and_fires_once():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(list(edge.points))
+    handle = wire._handles[1]   # interior point
+
+    handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Up))
+
+    assert edge.points == [(10, 10), (50, 0), (90, 10)]
+    assert [int(p.x()) for p in wire.pts] == [10, 50, 90]
+    assert [int(p.y()) for p in wire.pts] == [10, 0, 10]
+    assert calls == [[(10, 10), (50, 0), (90, 10)]]
+
+
+def test_nudge_waypoint_handle_with_shift_moves_by_one_unit():
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    handle = wire._handles[0]
+
+    handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Left, modifiers=Qt.ShiftModifier))
+
+    assert edge.points[0] == (9, 10)
+
+
+def test_nudge_legend_moves_by_grid_step_and_fires_once():
+    state = DiagramState()
+    legend = LegendItem(state)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(legend.geometry())
+    legend.set_editable(True)
+    orig = legend.geometry()
+
+    legend.keyPressEvent(_FakeKeyEvent(Qt.Key_Down))
+
+    expected = (orig[0], orig[1] + 10, 0, 0)
+    assert legend.geometry() == expected
+    assert calls == [expected]
+
+
+def test_nudge_legend_inert_outside_edit_mode():
+    state = DiagramState()
+    legend = LegendItem(state)
+    calls = []
+    state.on_geometry_changed = lambda: calls.append(1)
+    orig = legend.geometry()
+
+    legend.keyPressEvent(_FakeKeyEvent(Qt.Key_Down))   # never set_editable
+
+    assert legend.geometry() == orig
+    assert calls == []

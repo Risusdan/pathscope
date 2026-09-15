@@ -37,12 +37,26 @@ painful part.
 - Grid snap: 10 scene units on every drag/resize; hold Shift for
   1-unit free placement. Snap applies only to elements the user
   moves - untouched yaml values are preserved exactly.
-- Edges without a `points:` list show only their endpoints; the
-  first double-click converts the edge to an explicit waypoint path.
+- Every wire shows its two endpoint handles in edit mode,
+  auto-routed or not (acceptance gate: two visually identical
+  straight wires must not behave differently on invisible yaml
+  state). Dragging or arrow-nudging an auto wire's endpoint converts
+  it to an explicit 2-point path - the same conversion double-click
+  insert performs; a click-only press leaves it auto-routed.
   Untouched edges never gain a `points:` entry.
-- No orthogonality enforcement and no implicit collinear-point
-  merging - the grid keeps lines straight in practice, Delete
-  removes points deliberately.
+- Endpoints always re-anchor: release or nudge projects the endpoint
+  onto its own block's nearest boundary point (acceptance gate,
+  replacing an earlier 20px magnet radius). A dangling endpoint has
+  no meaning - structure lives in the yaml and an endpoint can never
+  re-bind to a different block - so endpoint dragging means choosing
+  the attachment point on the block edge, nothing else. The target
+  block stays highlighted for the whole endpoint drag.
+- A dragged handle axis-aligns to its adjacent polyline vertices
+  within the block-alignment threshold, live and at release
+  (acceptance gate: a slightly-crooked segment reads as sloppy);
+  release re-applies the neighbor's exact coordinate after the grid
+  snap. Beyond that, no orthogonality enforcement and no implicit
+  collinear-point merging - Delete removes points deliberately.
 - Ports are not separately draggable in v1: anchors follow their
   block with auto-computed positions.
 - Single-element drag only; multi-select is backlog.
@@ -77,12 +91,15 @@ painful part.
 - Result: a layout change produces a git diff that shows only real
   coordinate changes.
 
-## 6. Auto-layout (first-draft seed only)
+## 6. Seed layout (first-draft seed only)
 
-- "Auto-layout" button, available in edit mode at any time. It
-  replaces all block positions and clears explicit edge paths -
-  destructive to hand tuning, but a single undo restores everything,
-  so no confirmation ceremony.
+- "Seed layout" button (renamed from "Auto-layout" at the manual
+  gate - the name and its tooltip state the destructive first-draft
+  purpose), available in edit mode at any time. It replaces all
+  block positions, clears explicit edge paths, and parks the legend
+  below the placed picture (stale legend coordinates otherwise land
+  on top of relocated blocks) - destructive to hand tuning, but a
+  single undo restores everything, so no confirmation ceremony.
 - Implementation is a built-in layered heuristic, no new dependency:
   topological layering along edge direction into columns, kind-aware
   placement (cpu and memory kinds toward the outside, interconnect

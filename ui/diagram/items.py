@@ -966,6 +966,16 @@ class WireItem(QGraphicsItem):
             self._rebuild_handles()
         else:
             self._clear_handles()
+        # Acceptance round 6: while editing, the wire subtree rides
+        # ABOVE the blocks. A child's hit-test stacking is resolved by
+        # its top-level parent's z, so at z=-1 an endpoint handle
+        # sitting on its block's boundary was mostly unreachable by a
+        # real click - the block ate every press landing on the inner
+        # half of the handle square, and dragging "the endpoint"
+        # dragged the block instead. z=3 clears the blocks (0) while
+        # staying under the legend (5); normal mode returns to -1 so
+        # lines run underneath blocks as always.
+        self.setZValue(3 if on else -1)
         # finding 2c: a cross-hair cursor signals the double-click-to-
         # insert affordance while editing; cleared on exit.
         if on:

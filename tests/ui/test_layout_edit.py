@@ -2632,3 +2632,45 @@ def test_auto_layout_parks_legend_below_blocks_and_undo_restores(qtbot):
 
     win._on_layout_undo()
     assert win.legend.geometry() == legend_before
+
+
+def test_real_click_reaches_an_endpoint_handle_on_a_block_boundary(qtbot):
+    # Acceptance round 6: the DR wire's src endpoint handle sits ON
+    # adc1's right edge. WireItem carries z=-1 (lines run under blocks
+    # in normal view) and a child's stacking is resolved by its
+    # top-level parent's z, so the handle subtree sat BELOW the block
+    # - a real click there always hit the block and the endpoint was
+    # undraggable ("the endpoint is stuck to the block"). Fake-event
+    # tests call the handle's methods directly and skip hit-testing
+    # entirely, which is how every magnet test stayed green over it.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    before = wire.edge.points[0]
+    adc1_before = win.blocks["adc1"].geometry()
+
+    # Press 4px INSIDE adc1's right edge - still well within the
+    # 12px handle square centered on the boundary at (210, 320).
+    # This is where a real fingertip lands; pressing the exact
+    # boundary pixel dodges the bug because QRectF.contains()
+    # excludes the right edge, so the block never contests it.
+    start = win.view.mapFromScene(QPointF(206, 320))
+    QTest.mousePress(win.view.viewport(), Qt.LeftButton,
+                     Qt.NoModifier, start)
+    QApplication.processEvents()
+    end = QPoint(start.x(), start.y() - 40)
+    QTest.mouseMove(win.view.viewport(), end)
+    QApplication.processEvents()
+    QTest.mouseRelease(win.view.viewport(), Qt.LeftButton,
+                       Qt.NoModifier, end)
+    QApplication.processEvents()
+
+    after = wire.edge.points[0]
+    assert after != before, "real drag never reached the handle"
+    assert abs(after[1] - before[1]) >= 20
+    # and the block itself must NOT have been the thing dragged
+    assert win.blocks["adc1"].geometry() == adc1_before

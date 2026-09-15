@@ -15,7 +15,7 @@ changes are per task-8's porting instructions:
 """
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
                            QPainterPathStroker, QPen, QPolygonF)
 from PySide6.QtWidgets import QApplication, QGraphicsItem
@@ -215,6 +215,90 @@ def _select_exclusively(item: QGraphicsItem) -> None:
     item.setSelected(True)
 
 
+def _scene_view(item: QGraphicsItem):
+    """The QGraphicsView currently displaying `item`'s scene, or None
+    if it has no scene, or that scene has no view (an item under test
+    construction that was never added to a scene, or a scene never
+    shown in a view - build_scene()'s own return value, before
+    MainWindow wraps it in a _DiagramView)."""
+    scene = item.scene()
+    if scene is None:
+        return None
+    views = scene.views()
+    return views[0] if views else None
+
+
+def _view_mapping_fingerprint(view) -> QPointF:
+    """The scene point currently shown at the view's own (0, 0) -
+    encodes the view's ENTIRE widget-pixel-to-scene mapping (transform
+    scale/rotation AND scroll position AND viewport size all at once)
+    in one comparable value, for detecting a mid-gesture mapping shift
+    (see _GestureMappingGuard's docstring)."""
+    return view.mapToScene(QPoint(0, 0))
+
+
+class _GestureMappingGuard:
+    """M8 wave B fix round 5 (user-acceptance finding, round 2: the
+    round-1 fix - gating _apply_zoom while a gesture is in flight -
+    was NOT the whole story. A window/dock resize mid-drag reproduces
+    the identical "teleport" with NO zoom call anywhere involved:
+    resizing the view's VIEWPORT shifts its scrollbar range/position
+    even with the transform's scale left untouched, which is enough by
+    itself to corrupt Qt's default ItemIsMovable drag tracking the
+    same way a scale change does - see BlockItem.itemChange's matching
+    comment for the mechanism. Rather than keep chasing individual
+    triggers (zoom today, resize now, something else next), this
+    detects the SYMPTOM directly and generically: has the view's
+    widget-to-scene mapping - _view_mapping_fingerprint - moved since
+    this gesture started, for ANY reason at all.
+
+    Usage: `arm()` in mousePressEvent (while editable); `drifted()` at
+    the top of itemChange's ItemPositionChange branch - if True, the
+    incoming `value` is not trustworthy (it reflects the mapping
+    shift, not real mouse movement) and must be discarded outright
+    (return the item's OWN current position, unchanged) rather than
+    fed to snap/alignment logic, which can only ever bound a
+    correction RELATIVE TO an already-corrupted input.
+
+    Once drift is detected, EVERY remaining itemChange call for this
+    SAME gesture is rejected too (a "poisoned" gesture), not just the
+    one call that first noticed it. Qt's own default ItemIsMovable
+    tracking computes each step from event->pos() (current mapping)
+    minus buttonDownPos() (captured ONCE, at press, under whatever
+    mapping was active then) - buttonDownPos() is never recalibrated
+    mid-gesture by Qt itself, so once the two mappings disagree they
+    stay disagreeing, by roughly the same margin, for every subsequent
+    step of this same drag. Resyncing the baseline and trusting the
+    very next step (an earlier version of this class did that) still
+    let the next step apply a similarly-corrupted value. The item
+    simply stays frozen at wherever it was when the drift was first
+    caught until mouseReleaseEvent ends this gesture; the next press
+    starts a fresh, uncorrupted one."""
+
+    def __init__(self):
+        self._baseline: Optional[QPointF] = None
+        self._poisoned = False
+
+    def arm(self, item: QGraphicsItem) -> None:
+        view = _scene_view(item)
+        self._baseline = (_view_mapping_fingerprint(view)
+                          if view is not None else None)
+        self._poisoned = False
+
+    def drifted(self, item: QGraphicsItem) -> bool:
+        if self._poisoned:
+            return True   # already corrupted this gesture - stay frozen
+        if self._baseline is None:
+            return False   # never armed (no view) - nothing to compare
+        view = _scene_view(item)
+        if view is None:
+            return False
+        if _view_mapping_fingerprint(view) == self._baseline:
+            return False
+        self._poisoned = True
+        return True
+
+
 class BlockItem(QGraphicsItem):
     def __init__(self, block: Block, state):
         super().__init__()
@@ -251,6 +335,8 @@ class BlockItem(QGraphicsItem):
         # drag bypasses alignment snapping entirely.
         self._active_guides: Tuple[Optional[float], Optional[float]] = (
             None, None)
+        # M8 wave B fix round 5: see _GestureMappingGuard's docstring.
+        self._gesture_mapping = _GestureMappingGuard()
 
     def _position_handle(self) -> None:
         self.handle.setPos(self.w - _HANDLE_SIZE, self.h - _HANDLE_SIZE)
@@ -322,6 +408,20 @@ class BlockItem(QGraphicsItem):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.ItemPositionChange and self._editable
                 and not self._applying):
+            # M8 wave B fix round 5 (structural + root cause, user-
+            # acceptance finding round 2): if the view's widget-to-
+            # scene mapping shifted since this gesture started (a
+            # zoom, a window/dock resize, anything) `value` reflects
+            # that shift, not real mouse movement, and can be
+            # arbitrarily far from where the mouse actually is - see
+            # _GestureMappingGuard's docstring. Discard it outright
+            # (keep the item exactly where it already is) rather than
+            # feed it to snap/alignment below, which can only ever
+            # bound a correction RELATIVE TO its input - an
+            # already-corrupted input stays corrupted no matter how
+            # tightly the correction itself is bounded.
+            if self._gesture_mapping.drifted(self):
+                return self.pos()
             fine = _fine_snap()
             if fine:
                 # M8 wave B4: Shift disables alignment snapping
@@ -339,6 +439,15 @@ class BlockItem(QGraphicsItem):
             # falls back to the existing grid snap.
             fx = sx if gx is not None else snap(sx, False)
             fy = sy if gy is not None else snap(sy, False)
+            # Structural bound, enforced AGAIN here at the application
+            # site (not only inside _compute_alignment_snap's own
+            # clamp) - belt and suspenders: neither axis's applied
+            # value may differ from what the drag machinery proposed
+            # by more than one alignment threshold beyond the grid
+            # step's own rounding budget.
+            budget = _ALIGN_THRESHOLD + _GRID_STEP / 2.0
+            fx = max(value.x() - budget, min(value.x() + budget, fx))
+            fy = max(value.y() - budget, min(value.y() + budget, fy))
             self._active_guides = (gx, gy)
             return QPointF(fx, fy)
         if (change == QGraphicsItem.ItemPositionHasChanged
@@ -473,6 +582,9 @@ class BlockItem(QGraphicsItem):
             # wave B fix round 4.
             _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
+            # M8 wave B fix round 5: arm this gesture's mapping
+            # baseline - see _GestureMappingGuard's docstring.
+            self._gesture_mapping.arm(self)
         if self.state.edit_mode:
             ev.accept()
             return
@@ -1381,6 +1493,8 @@ class LegendItem(QGraphicsItem):
         self.setPos(x, y)
         self._geom_at_press = (int(x), int(y))
         self.setZValue(5)
+        # M8 wave B fix round 5: see _GestureMappingGuard's docstring.
+        self._gesture_mapping = _GestureMappingGuard()
 
     def set_editable(self, on: bool) -> None:
         self._editable = bool(on)
@@ -1410,6 +1524,10 @@ class LegendItem(QGraphicsItem):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.ItemPositionChange and self._editable
                 and not self._applying):
+            # M8 wave B fix round 5: see BlockItem.itemChange's
+            # matching comment / _GestureMappingGuard's docstring.
+            if self._gesture_mapping.drifted(self):
+                return self.pos()
             return QPointF(snap(value.x(), _fine_snap()),
                            snap(value.y(), _fine_snap()))
         if (change == QGraphicsItem.ItemPositionHasChanged
@@ -1434,6 +1552,9 @@ class LegendItem(QGraphicsItem):
             # round 4.
             _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
+            # M8 wave B fix round 5: see _GestureMappingGuard's
+            # docstring.
+            self._gesture_mapping.arm(self)
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:

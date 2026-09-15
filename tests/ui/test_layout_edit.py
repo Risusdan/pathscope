@@ -10,6 +10,7 @@ import shutil
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QPainter
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QToolBar
 
 from core.adapter.mock import MockAdapter
@@ -2359,3 +2360,112 @@ def test_nudge_after_reselect_moves_only_the_newly_selected_block(qtbot):
     # a stays exactly where its own nudge left it - the second nudge,
     # aimed at b, must not also move a.
     assert a.geometry() == (a_orig[0] + 10, a_orig[1], a_orig[2], a_orig[3])
+
+
+# -- M8 wave B fix round 5: alignment snap bounded on the LIVE drag ---------
+# path (user-acceptance finding, round 2)
+#
+# Round 1 added a threshold clamp inside _compute_alignment_snap and
+# fixed ONE trigger (gating _apply_zoom while a gesture is in flight).
+# The bug survived: dragging Flash "slightly" teleported it so its
+# left edge landed on PA1's x (8) - a ~770px jump. Round 1's own
+# property test called BlockItem.itemChange via a direct .setPos(...),
+# which never exercises the actual corruption - that lives entirely
+# inside Qt's OWN default ItemIsMovable mouse-move handling
+# (event->pos() minus buttonDownPos(), both item-local), which only
+# runs when Qt's real per-item drag tracking is driven by REAL mouse
+# events (QTest.mousePress/mouseMove below), not when test code calls
+# .setPos() directly with a value it chose itself.
+#
+# Root cause (round 2): NOT the pure function (still clamped, still
+# correct in isolation - the sweep below keeps proving that) and NOT
+# only _apply_zoom - a plain window/dock RESIZE mid-drag reproduces
+# the identical corruption with no zoom call anywhere involved
+# (resizing the viewport shifts its scrollbar range/position even
+# with the transform's scale left untouched, which is enough by
+# itself to desync event->pos() from the stale buttonDownPos() Qt
+# captured at press). Fixed generically via _GestureMappingGuard
+# (items.py): rather than gate each individual triggering call
+# (zoom today, resize now, whatever else tomorrow), BlockItem and
+# LegendItem now detect directly whether the view's widget-to-scene
+# mapping has moved since the gesture started, for ANY reason, and if
+# so discard every remaining itemChange proposal for that gesture
+# outright (freezing the item) rather than trust a value that cannot
+# be distinguished from real mouse movement once corrupted - a
+# helper's own clamp can only ever bound a correction RELATIVE TO its
+# input, and an already-corrupted input stays corrupted no matter how
+# tightly that correction is bounded. BlockItem.itemChange also now
+# re-applies the alignment/grid-snap threshold budget a second time,
+# directly at the application site, as explicit defense in depth.
+
+
+def test_window_resize_mid_drag_does_not_teleport_the_block(qtbot):
+    # THE repro: real mousePressEvent + real Qt-driven ItemPositionChange
+    # (QTest-simulated mouse events, not a direct .setPos() call) on a
+    # scene-mounted, edit-mode BlockItem, with another block (pa1) far
+    # away sharing flash's... no, actually pa1 shares NOTHING with
+    # flash's real geometry going in - the whole point is that the
+    # pre-fix bug did not need a legitimate nearby alignment candidate
+    # at all: the corrupted value it fed into snap could coincidentally
+    # land near ANY other block's line. flash/pa1 is exactly the pair
+    # from the user's screenshot.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()   # flush the deferred startup fit_view()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+    view = win.view
+    flash = win.blocks["flash"]
+    pa1 = win.blocks["pa1"]
+    before = flash.geometry()
+    assert before[0] != pa1.geometry()[0]   # not already aligned
+
+    scene_pos = flash.mapToScene(flash.boundingRect().center())
+    start = view.mapFromScene(scene_pos)
+    QTest.mousePress(view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QApplication.processEvents()
+
+    x, y = start.x() + 2, start.y() + 2
+    QTest.mouseMove(view.viewport(), QPoint(int(x), int(y)))
+    QApplication.processEvents()
+
+    # the disruption: an ordinary window resize mid-drag - no zoom
+    # call anywhere in this test.
+    win.resize(1000, 700)
+    QApplication.processEvents()
+
+    x += 2
+    y += 2
+    QTest.mouseMove(view.viewport(), QPoint(int(x), int(y)))
+    QApplication.processEvents()
+
+    QTest.mouseRelease(view.viewport(), Qt.LeftButton, Qt.NoModifier,
+                       QPoint(int(x), int(y)))
+    QApplication.processEvents()
+
+    after = flash.geometry()
+    # bounded to a "slight drag" worth of movement, not a teleport
+    # anywhere near pa1's x=8 (roughly 770 scene units away).
+    assert abs(after[0] - before[0]) <= 20
+    assert abs(after[1] - before[1]) <= 20
+
+
+def test_alignment_snap_still_works_near_a_legit_match_after_the_fix(qtbot):
+    # The bound must not kill the feature: an ordinary, undisrupted
+    # drag that comes within _ALIGN_THRESHOLD of another block's edge
+    # must still snap onto it exactly, through the SAME real-view path
+    # (_build_window, not the view-less _build) the guard above now
+    # runs on for every gesture.
+    engine, win = _build_window(qtbot)
+    QApplication.processEvents()
+    QApplication.processEvents()
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+
+    other.mousePressEvent(_FakeEvent())   # arms this gesture's guard
+    other.setPos(497, 900)   # 3px short of dma2's left edge (500)
+
+    assert (other.pos().x(), other.pos().y()) == (500, 900)
+    assert other._active_guides == (500, None)

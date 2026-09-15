@@ -8,7 +8,7 @@ import dataclasses
 import shutil
 
 import pytest
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QToolBar
 
@@ -55,6 +55,24 @@ class _FakeKeyEvent:
 
     def accept(self):
         self.accepted = True
+
+
+class _FakeWheelEvent:
+    """Minimal stand-in for QWheelEvent: _DiagramView.wheelEvent only
+    ever calls .pixelDelta()/.angleDelta(). Real trackpad events carry
+    a QPoint pixelDelta (possibly (0, 0) when the platform does not
+    report pixel deltas) and a QPoint angleDelta in eighths of a
+    degree (only ever the y component matters here)."""
+
+    def __init__(self, pixel_dy=0, angle_dy=0):
+        self._pixel = QPoint(0, pixel_dy)
+        self._angle = QPoint(0, angle_dy)
+
+    def pixelDelta(self):
+        return self._pixel
+
+    def angleDelta(self):
+        return self._angle
 
 
 def _build(qtbot):
@@ -1377,3 +1395,85 @@ def test_live_move_tracking_resets_on_non_drag_geometry_changes(qtbot):
     assert win._live_move_tracking is not None
     win._on_auto_layout()   # bypasses the drag path entirely
     assert win._live_move_tracking is None
+
+
+# -- M8 manual-gate finding 3: trackpad/wheel zoom -------------------------
+#
+# Root cause (verified): macOS trackpad wheel events typically carry
+# angleDelta().y() == 0 (pixel-based scrolling), so the old
+# `angleDelta().y() > 0 else zoom-out` logic fell into the zoom-out
+# branch on every trackpad scroll. A real pinch gesture is a separate
+# QEvent.NativeGesture entirely (hardware-only, not simulatable
+# offscreen - noted for the user's manual re-test); these tests cover
+# the wheelEvent path and the pure clamp helper.
+
+
+def test_wheel_zero_delta_leaves_transform_unchanged(qtbot):
+    from ui.main_window import _DiagramView
+    view = _DiagramView()
+    qtbot.addWidget(view)
+    before = view.transform()
+
+    view.wheelEvent(_FakeWheelEvent(pixel_dy=0, angle_dy=0))
+
+    assert view.transform() == before
+    assert view._zoom == 1.0
+
+
+def test_wheel_prefers_pixel_delta_over_angle_delta(qtbot):
+    from ui.main_window import _DiagramView
+    view = _DiagramView()
+    qtbot.addWidget(view)
+
+    # pixelDelta says zoom IN; angleDelta (consulted only as a
+    # fallback) says zoom OUT - pixelDelta must win since it is
+    # non-zero, or the view would zoom the wrong way.
+    view.wheelEvent(_FakeWheelEvent(pixel_dy=5, angle_dy=-120))
+
+    assert view._zoom > 1.0
+
+
+def test_wheel_falls_back_to_angle_delta_when_pixel_delta_is_zero(qtbot):
+    from ui.main_window import _DiagramView
+    view = _DiagramView()
+    qtbot.addWidget(view)
+
+    view.wheelEvent(_FakeWheelEvent(pixel_dy=0, angle_dy=120))
+    assert view._zoom > 1.0
+    grew = view._zoom
+
+    view.wheelEvent(_FakeWheelEvent(pixel_dy=0, angle_dy=-120))
+    assert view._zoom < grew
+
+
+def test_clamped_zoom_factor_stays_within_bounds():
+    from ui.main_window import _clamped_zoom_factor, _ZOOM_MAX, _ZOOM_MIN
+
+    # in-range zoom: the requested factor passes through unchanged.
+    assert _clamped_zoom_factor(1.0, 1.15) == pytest.approx(1.15)
+
+    # already at the max: any further zoom-in is a no-op factor.
+    assert _clamped_zoom_factor(_ZOOM_MAX, 1.15) == pytest.approx(1.0)
+
+    # near the max: a big zoom-in factor is clamped to land EXACTLY at
+    # the max rather than overshoot it.
+    near_max = _ZOOM_MAX / 1.05
+    result = _clamped_zoom_factor(near_max, 1.15)
+    assert near_max * result == pytest.approx(_ZOOM_MAX)
+
+    # already at the min: any further zoom-out is a no-op factor.
+    assert _clamped_zoom_factor(_ZOOM_MIN, 1 / 1.15) == pytest.approx(1.0)
+
+
+def test_repeated_wheel_zoom_clamps_at_min_and_max(qtbot):
+    from ui.main_window import _DiagramView, _ZOOM_MAX, _ZOOM_MIN
+    view = _DiagramView()
+    qtbot.addWidget(view)
+
+    for _ in range(200):
+        view.wheelEvent(_FakeWheelEvent(pixel_dy=5))
+    assert view._zoom == pytest.approx(_ZOOM_MAX)
+
+    for _ in range(400):
+        view.wheelEvent(_FakeWheelEvent(pixel_dy=-5))
+    assert view._zoom == pytest.approx(_ZOOM_MIN)

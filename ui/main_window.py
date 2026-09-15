@@ -15,7 +15,7 @@ position with the page content) and the poll rate."""
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Set
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QDockWidget, QGraphicsView,
                                QHBoxLayout, QLabel, QMainWindow,
@@ -53,16 +53,83 @@ RATE_ORANGE_STYLE = "color: #E65100;"
 RATE_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
                 "contiguous addresses")
 
+# Manual-gate finding 3: trackpad/wheel zoom. _ZOOM_MIN/_ZOOM_MAX bound
+# the view's CUMULATIVE scale (tracked in _DiagramView._zoom, since
+# extracting a scalar "current zoom" back out of a QTransform is more
+# indirection than just keeping our own running total); both the wheel
+# and the native pinch-gesture path share the one clamp.
+_ZOOM_MIN = 0.2
+_ZOOM_MAX = 5.0
+_WHEEL_ZOOM_FACTOR = 1.15
+
+
+def _clamped_zoom_factor(current_scale: float, requested_factor: float,
+                         min_scale: float = _ZOOM_MIN,
+                         max_scale: float = _ZOOM_MAX) -> float:
+    """Given the view's current cumulative scale and a requested
+    multiplicative zoom factor, returns the ACTUAL factor to apply so
+    that current_scale * factor lands within [min_scale, max_scale] -
+    clamping the requested zoom rather than rejecting it outright, so
+    a large pinch/scroll right at the boundary still glides smoothly
+    up to the limit instead of doing nothing. Returns exactly 1.0
+    (a no-op factor) once current_scale is already sitting at (or
+    would overshoot past) the boundary in the requested direction.
+    Pure - no Qt dependency - so it is unit-testable without a
+    QApplication."""
+    target = current_scale * requested_factor
+    clamped_target = max(min_scale, min(target, max_scale))
+    return clamped_target / current_scale
+
 
 class _DiagramView(QGraphicsView):
-    """QGraphicsView with wheel-to-zoom. The prototype overrode
-    wheelEvent on the QMainWindow itself; here it lives on the view
-    widget directly, which receives wheel events unconditionally
-    (independent of Qt's event-bubbling path for unhandled events)."""
+    """QGraphicsView with wheel-to-zoom and trackpad pinch-to-zoom. The
+    prototype overrode wheelEvent on the QMainWindow itself; here it
+    lives on the view widget directly, which receives wheel events
+    unconditionally (independent of Qt's event-bubbling path for
+    unhandled events).
+
+    Manual-gate finding 3 (trackpad zoomed out but never in): macOS
+    trackpad wheel events typically carry angleDelta().y() == 0 (the
+    trackpad reports pixel-based scrolling, not the discrete "clicks"
+    angleDelta measures) - the old `angleDelta().y() > 0 else
+    zoom-out` logic fell into the zoom-out branch on EVERY trackpad
+    scroll, so the view could zoom out but never in. pixelDelta() is
+    now preferred whenever it is non-zero; angleDelta() is the
+    fallback for a real (non-trackpad) wheel; a genuinely zero delta
+    from either is a no-op rather than the old default zoom-out.
+
+    A trackpad PINCH is an entirely separate Qt event -
+    QEvent.NativeGesture, NativeGestureType.ZoomNativeGesture subtype
+    - which never reaches wheelEvent at all; handled here via an
+    event() override. Both paths share one cumulative-scale clamp
+    (_clamped_zoom_factor, module-level, pure, unit-tested directly)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._zoom = 1.0
+
+    def _apply_zoom(self, factor: float) -> None:
+        factor = _clamped_zoom_factor(self._zoom, factor)
+        if factor == 1.0:
+            return   # already at (or would overshoot) a clamp boundary
+        self._zoom *= factor
+        self.scale(factor, factor)
 
     def wheelEvent(self, ev) -> None:
-        factor = 1.15 if ev.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(factor, factor)
+        dy = ev.pixelDelta().y()
+        if dy == 0:
+            dy = ev.angleDelta().y()
+        if dy == 0:
+            return
+        factor = _WHEEL_ZOOM_FACTOR if dy > 0 else 1 / _WHEEL_ZOOM_FACTOR
+        self._apply_zoom(factor)
+
+    def event(self, ev) -> bool:
+        if ev.type() == QEvent.NativeGesture:
+            if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self._apply_zoom(1 + ev.value())
+                return True
+        return super().event(ev)
 
 
 class MainWindow(QMainWindow):

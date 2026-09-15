@@ -192,6 +192,29 @@ def _fine_snap() -> bool:
     return bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
 
 
+def _select_exclusively(item: QGraphicsItem) -> None:
+    """Select ONLY `item`, clearing any other currently-selected item
+    first (M8 wave B fix round 4, user-acceptance finding: clicking
+    three items in a row left all three showing the selection
+    outline). QGraphicsItem.setSelected(True) alone is ADDITIVE -
+    normally a plain click's base-class mousePressEvent handling is
+    what clears the scene's previous selection, but every edit-mode
+    press site below fully consumes its own event (ev.accept(), no
+    super().mousePressEvent(ev) call), so that base-class clearing
+    never runs. Multi-select (Ctrl/Shift-click) is an explicit backlog
+    exclusion - single, exclusive selection is the spec'd model.
+
+    `item.scene()` is None for an item under test construction that
+    was never added to a QGraphicsScene (several tests build a
+    WireItem/LegendItem standalone) - guarded rather than assumed,
+    since clicking such an item is still a valid, scene-independent
+    way to exercise its own selection/nudge behavior directly."""
+    scene = item.scene()
+    if scene is not None:
+        scene.clearSelection()
+    item.setSelected(True)
+
+
 class BlockItem(QGraphicsItem):
     def __init__(self, block: Block, state):
         super().__init__()
@@ -446,7 +469,9 @@ class BlockItem(QGraphicsItem):
             # M8 wave B1: click-to-select/focus, mirroring WaypointHandle's
             # own mousePressEvent - the arrow-key nudge below only ever
             # fires on whichever item currently holds keyboard focus.
-            self.setSelected(True)
+            # Exclusive (see _select_exclusively's docstring) as of
+            # wave B fix round 4.
+            _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
         if self.state.edit_mode:
             ev.accept()
@@ -1192,7 +1217,9 @@ class WaypointHandle(QGraphicsItem):
         self.update()
 
     def mousePressEvent(self, ev):
-        self.setSelected(True)
+        # Exclusive (see _select_exclusively's docstring) as of wave B
+        # fix round 4.
+        _select_exclusively(self)
         self.setFocus(Qt.MouseFocusReason)
         pos = self.pos()
         self._geom_at_press = (int(pos.x()), int(pos.y()))
@@ -1402,8 +1429,10 @@ class LegendItem(QGraphicsItem):
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
             # M8 wave B1: click-to-select/focus - see BlockItem's
-            # matching mousePressEvent comment.
-            self.setSelected(True)
+            # matching mousePressEvent comment. Exclusive (see
+            # _select_exclusively's docstring) as of wave B fix
+            # round 4.
+            _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
         ev.accept()
 

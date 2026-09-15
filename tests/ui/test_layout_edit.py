@@ -10,7 +10,7 @@ import shutil
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtWidgets import QToolBar
+from PySide6.QtWidgets import QApplication, QToolBar
 
 from core.adapter.mock import MockAdapter
 from core.engine.core import Engine
@@ -2269,3 +2269,93 @@ def test_zoom_is_ignored_while_a_gesture_is_in_flight(qtbot):
     item.ungrabMouse()
     win.view._apply_zoom(0.85)
     assert win.view._zoom != before   # works again once the grab ends
+
+
+# -- M8 wave B fix round 4: exclusive selection in edit mode --------------
+#
+# User-acceptance finding: clicking three items one after another left
+# ALL THREE showing the teal selection outline - setSelected(True)
+# alone is ADDITIVE (matches multiple items' own selection state). A
+# plain click's normal exclusivity comes from QGraphicsItem's
+# base-class mousePressEvent, which clears the scene's previous
+# selection before selecting the clicked item - but every edit-mode
+# press site here fully consumes its own event (ev.accept(), no
+# super().mousePressEvent(ev) call), so that base-class clearing never
+# ran. Fixed via _select_exclusively (items.py): scene().clearSelection()
+# before setSelected(True), guarded for items under test construction
+# that were never added to a scene. Multi-select (Ctrl-click) is an
+# explicit backlog exclusion - single, exclusive selection is the
+# spec'd model.
+
+
+def test_edit_mode_click_selection_is_exclusive(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    a = win.blocks["adc1"]
+    b = win.blocks["cm4"]
+    legend = win.legend
+
+    a.mousePressEvent(_FakeEvent())
+    assert a.isSelected() is True
+
+    b.mousePressEvent(_FakeEvent())
+    assert a.isSelected() is False
+    assert b.isSelected() is True
+
+    # a THIRD item, and a different item TYPE too - the same scene-wide
+    # selection group spans BlockItem and LegendItem alike.
+    legend.mousePressEvent(_FakeEvent())
+    assert a.isSelected() is False
+    assert b.isSelected() is False
+    assert legend.isSelected() is True
+
+
+def test_empty_diagram_space_click_clears_selection(qtbot):
+    # Unlike every other test in this file, this one goes through a
+    # REAL Qt mouse click (qtbot.mouseClick on the actual viewport)
+    # rather than calling an item's own handler directly - there is no
+    # item-level handler to call here, since a click on truly empty
+    # scene space never reaches any BlockItem/LegendItem/WaypointHandle
+    # at all. This is QGraphicsScene's own default behavior (clear
+    # selection on an unhandled plain click, no modifier held) - it
+    # already held before this fix (verified empirically) and keeps
+    # holding now that every edit-mode press site stopped fully
+    # consuming its own event; this locks that in.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    QApplication.processEvents()   # flush the deferred startup fit_view()
+    QApplication.processEvents()
+    item = win.blocks["adc1"]
+    item.mousePressEvent(_FakeEvent())
+    assert item.isSelected() is True
+
+    empty_pt = QPoint(3, 3)   # viewport corner - empty once fit_view has run
+    assert (win.view.scene().itemAt(win.view.mapToScene(empty_pt),
+                                    win.view.transform())
+           is None)
+    qtbot.mouseClick(win.view.viewport(), Qt.LeftButton, pos=empty_pt)
+
+    assert item.isSelected() is False
+
+
+def test_nudge_after_reselect_moves_only_the_newly_selected_block(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    a = blocks["adc1"]
+    b = blocks["cm4"]
+    a.set_editable(True)
+    b.set_editable(True)
+    a_orig = a.geometry()
+    b_orig = b.geometry()
+
+    a.mousePressEvent(_FakeEvent())
+    a.keyPressEvent(_FakeKeyEvent(Qt.Key_Right))
+    assert a.geometry() == (a_orig[0] + 10, a_orig[1], a_orig[2], a_orig[3])
+    assert b.geometry() == b_orig   # unaffected by a's nudge
+
+    b.mousePressEvent(_FakeEvent())
+    assert a.isSelected() is False   # b's press deselected a
+    b.keyPressEvent(_FakeKeyEvent(Qt.Key_Right))
+    assert b.geometry() == (b_orig[0] + 10, b_orig[1], b_orig[2], b_orig[3])
+    # a stays exactly where its own nudge left it - the second nudge,
+    # aimed at b, must not also move a.
+    assert a.geometry() == (a_orig[0] + 10, a_orig[1], a_orig[2], a_orig[3])

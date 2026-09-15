@@ -14,10 +14,12 @@ painful part.
 
 ## 2. Edit mode
 
-- Explicit toolbar toggle "Edit layout", checkable, Data Path page
-  only. Entering shows a clear visual cue (button highlight plus a
-  dashed border around the diagram viewport). Switching to the Scope
-  page exits edit mode automatically.
+- Explicit checkable "Edit layout" toggle on the Data Path page's
+  header row (next to Halt MCU - relocated from the toolbar during
+  the manual gate: on the toolbar it read as a third page switcher).
+  Entering shows a clear visual cue (button highlight plus a dashed
+  border around the diagram viewport). Switching to the Scope page
+  exits edit mode automatically.
 - In edit mode, mouse gestures route to layout editing exclusively:
   inspector block/edge clicks are disabled. Flow animation and live
   values keep rendering - only input routing changes.

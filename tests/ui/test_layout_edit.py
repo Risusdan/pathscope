@@ -1819,7 +1819,10 @@ def test_legend_drag_emits_live_status_and_clears_on_release():
     assert calls[-1] == ""
 
 
-def test_main_window_forwards_live_status_to_statusbar(qtbot):
+def test_main_window_shows_live_status_as_overlay_in_the_drawing_area(qtbot):
+    # Acceptance round 6: the readout moved from the window-bottom
+    # status bar to an overlay label inside the view - reading the
+    # status bar mid-drag meant taking eyes off the diagram.
     engine, win = _build_window(qtbot)
     win.edit_layout_btn.setChecked(True)
     item = win.blocks["adc1"]
@@ -1827,11 +1830,13 @@ def test_main_window_forwards_live_status_to_statusbar(qtbot):
     item.mousePressEvent(_FakeEvent())
     item.setPos(item.pos().x() + 10, item.pos().y())
 
-    assert (win.statusBar().currentMessage()
+    assert win.live_coord_label.isVisible() is True
+    assert (win.live_coord_label.text()
            == "adc1: %d, %d (%d x %d)" % item.geometry())
+    assert win.statusBar().currentMessage() == ""   # bar stays free
 
     item.mouseReleaseEvent(_FakeEvent())
-    assert win.statusBar().currentMessage() == ""
+    assert win.live_coord_label.isVisible() is False
 
 
 # -- M8 wave B4a: dynamic alignment guides - detection (snap) --------------
@@ -2002,11 +2007,11 @@ def test_mode_exit_mid_block_drag_clears_readout(qtbot):
 
     item.mousePressEvent(_FakeEvent())
     item.setPos(item.pos().x() + 10, item.pos().y())
-    assert win.statusBar().currentMessage() != ""
+    assert win.live_coord_label.isVisible() is True
 
     win.edit_layout_btn.setChecked(False)   # terminator: mode exit, no release
 
-    assert win.statusBar().currentMessage() == ""
+    assert win.live_coord_label.isVisible() is False
 
 
 def test_mode_exit_mid_waypoint_drag_clears_magnet_highlight(qtbot):
@@ -2082,11 +2087,11 @@ def test_revert_mid_drag_cancels_gesture_visuals(qtbot, tmp_path):
 
     item.mousePressEvent(_FakeEvent())
     item.setPos(item.pos().x() + 10, item.pos().y())
-    assert win.statusBar().currentMessage() != ""
+    assert win.live_coord_label.isVisible() is True
 
     win._on_revert_layout()   # terminator: revert, no release
 
-    assert win.statusBar().currentMessage() == ""
+    assert win.live_coord_label.isVisible() is False
 
 
 def test_auto_layout_mid_drag_cancels_gesture_visuals(qtbot):
@@ -2096,11 +2101,11 @@ def test_auto_layout_mid_drag_cancels_gesture_visuals(qtbot):
 
     item.mousePressEvent(_FakeEvent())
     item.setPos(item.pos().x() + 10, item.pos().y())
-    assert win.statusBar().currentMessage() != ""
+    assert win.live_coord_label.isVisible() is True
 
     win._on_auto_layout()   # terminator: auto-layout, no release
 
-    assert win.statusBar().currentMessage() == ""
+    assert win.live_coord_label.isVisible() is False
 
 
 # -- M8 wave B fix round 1 (finding 4): edit-mode selection indicator ------
@@ -2193,13 +2198,16 @@ def test_normal_mode_click_leaves_persistent_status_message_alone(qtbot):
     item.mouseReleaseEvent(_FakeEvent())
 
     assert win.statusBar().currentMessage() == "poller: running"
+    assert win.live_coord_label.isVisible() is False
 
-    # The gated form still does its job: a real edit-mode drag release
-    # clears the live-coordinate readout.
+    # The readout lives in the overlay now (acceptance round 6): an
+    # edit-mode drag never touches the status bar at all, and the
+    # overlay clears on release.
     win.edit_layout_btn.setChecked(True)
     _drag_block(item, item.pos().x() + 10, item.pos().y())
 
-    assert win.statusBar().currentMessage() == ""
+    assert win.statusBar().currentMessage() == "poller: running"
+    assert win.live_coord_label.isVisible() is False
 
 
 # -- M8 wave B fix round 3: user-acceptance finding 1 - "ADC1 flies -------

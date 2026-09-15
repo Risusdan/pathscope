@@ -220,6 +220,18 @@ class MainWindow(QMainWindow):
         self.view = _DiagramView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+        # Acceptance round 6: the live coordinate readout (wave B3)
+        # lives INSIDE the drawing area - reading the window-bottom
+        # status bar mid-drag meant taking eyes off the diagram. An
+        # overlay label pinned to the view's top-left corner, shown
+        # only while a gesture is feeding coordinates.
+        self.live_coord_label = QLabel(self.view)
+        self.live_coord_label.setFont(MONO)
+        self.live_coord_label.setStyleSheet(
+            "background: rgba(255, 255, 255, 220); color: #1565C0;"
+            " border: 1px solid #90A4AE; padding: 2px 6px;")
+        self.live_coord_label.move(10, 10)
+        self.live_coord_label.hide()
         # (central widget is set below, by _build_central_tabs() - the
         # view sits inside the Data Path page of a Data Path/Scope
         # QStackedWidget rather than being the window's sole central
@@ -825,15 +837,16 @@ class MainWindow(QMainWindow):
         (WaypointHandle), or a legend drag (LegendItem) all forward
         their own formatted "id: x, y (w x h)" / "waypoint: x, y" /
         "legend: x, y" string here on every live move step, and an
-        empty string on release. statusBar().showMessage() with no
-        timeout persists the message until the next call replaces or
-        clears it - matching a live readout, not a transient
-        notification like _toggle_halt's error message (which DOES
-        pass a timeout)."""
+        empty string on release. Acceptance round 6 moved the readout
+        from the window status bar into live_coord_label, an overlay
+        inside the drawing area itself (see __init__) - visible only
+        while a gesture feeds it."""
         if msg:
-            self.statusBar().showMessage(msg)
+            self.live_coord_label.setText(msg)
+            self.live_coord_label.adjustSize()
+            self.live_coord_label.show()
         else:
-            self.statusBar().clearMessage()
+            self.live_coord_label.hide()
 
     def _on_layout_undo(self) -> None:
         if not self.diagram_state.edit_mode or not self._undo_stack:

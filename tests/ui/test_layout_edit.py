@@ -785,6 +785,18 @@ def test_edit_layout_button_and_dirty_label_live_in_datapath_header(qtbot):
     assert not _in_a_toolbar(win.layout_dirty_label)
 
 
+def test_header_buttons_share_the_same_minimum_height(qtbot):
+    # User-acceptance finding 2 (styling): Halt MCU, Edit Layout, and
+    # Run/Stop all sit in the same Data Path header row - Edit Layout
+    # was left at the default (short) QToolButton height while the
+    # other two were explicitly set to 36px, reading as smaller and
+    # vertically misaligned next to them.
+    engine, win = _build_window(qtbot)
+    assert win.edit_layout_btn.minimumHeight() == win.halt_btn.minimumHeight()
+    assert (win.dp_run_stop_btn.minimumHeight()
+           == win.halt_btn.minimumHeight())
+
+
 def test_edit_toggle_sets_state_and_every_item_editable_both_ways(qtbot):
     # The CRITICAL combination (task handover note): edit_mode and
     # every item's own set_editable must always flip together, never

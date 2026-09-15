@@ -451,13 +451,25 @@ class MainWindow(QMainWindow):
         self.edit_layout_btn = QToolButton()
         self.edit_layout_btn.setText("Edit Layout")
         self.edit_layout_btn.setCheckable(True)
+        # User-acceptance finding 2: same setMinimumHeight/Width
+        # treatment as halt_btn, above - without it this button was
+        # the header row's default (short) QToolButton height, reading
+        # as smaller and vertically misaligned next to Halt MCU and
+        # dp_run_stop_btn (both explicitly 36px tall).
+        self.edit_layout_btn.setMinimumHeight(36)
+        self.edit_layout_btn.setMinimumWidth(110)
         self.edit_layout_btn.toggled.connect(self._on_edit_layout_toggled)
         header.addWidget(self.edit_layout_btn)
 
         self.layout_dirty_label = QLabel("unsaved layout changes")
         self.layout_dirty_label.setStyleSheet("color: #B71C1C;")
         self.layout_dirty_label.setVisible(False)
-        header.addWidget(self.layout_dirty_label)
+        # User-acceptance finding 2: explicitly vertically centered in
+        # the row - the row's height is driven by the 36px buttons on
+        # either side of it, and the label should not default to
+        # whatever top/stretch behavior QHBoxLayout gives an
+        # un-flagged widget in a taller row.
+        header.addWidget(self.layout_dirty_label, 0, Qt.AlignVCenter)
 
         header.addStretch(1)
         self.dp_run_stop_btn = QPushButton("Stop")

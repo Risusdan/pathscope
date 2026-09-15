@@ -18,7 +18,7 @@ from core.target.layout_io import LayoutPatchError
 from core.target.topology import Edge, load_topology
 from ui.bridge import EngineBridge
 from ui.demo import make_demo_engine
-from ui.diagram.items import LegendItem, WireItem, snap
+from ui.diagram.items import LegendItem, WireItem, _straight_route_points, snap
 from ui.diagram.scene import DiagramState, build_scene
 from ui.main_window import MainWindow
 
@@ -1038,6 +1038,91 @@ def test_born_pointed_edge_delete_to_auto_route_renders_fresh_straight_line(
     assert wire.pts != original_dogleg
 
 
+# -- M8 manual-gate finding 2d: endpoint re-anchor magnet ------------------
+
+
+def test_nearest_rect_boundary_point_outside_and_inside():
+    from ui.diagram.items import _nearest_rect_boundary_point
+    rect = (0, 0, 100, 50)
+    # outside the rect: nearest point is a plain clamp onto the edge.
+    assert _nearest_rect_boundary_point(50, -10, *rect) == (50, 0)
+    assert _nearest_rect_boundary_point(-10, 25, *rect) == (0, 25)
+    assert _nearest_rect_boundary_point(50, 60, *rect) == (50, 50)
+    assert _nearest_rect_boundary_point(110, 25, *rect) == (100, 25)
+    # inside the rect: pushed out to whichever of the 4 edges is nearest.
+    assert _nearest_rect_boundary_point(10, 25, *rect) == (0, 25)    # left
+    assert _nearest_rect_boundary_point(90, 25, *rect) == (100, 25)  # right
+    assert _nearest_rect_boundary_point(50, 5, *rect) == (50, 0)     # top
+    assert _nearest_rect_boundary_point(50, 45, *rect) == (50, 50)   # bottom
+
+
+def test_endpoint_magnet_snaps_onto_block_boundary_within_radius(qtbot):
+    # adc1: x=70, y=280, w=140, h=80 -> right edge at x=210 (grid-
+    # aligned already). Releasing the src-anchor handle (index 0) 5px
+    # inside that edge must pull it back onto the boundary - NOT the
+    # plain grid-snap of the raw drop point (205 -> 200, banker's
+    # rounding), which would land 10 units short of the block.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    handle = wire._handles[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert wire.edge.points[0] == (210, 320)   # magnetized, not (200, 320)
+
+
+def test_endpoint_magnet_does_not_apply_beyond_radius(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    handle = wire._handles[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(150, 320)))  # 60px in
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert wire.edge.points[0] == (150, 320)   # plain grid-snap, no magnet
+
+
+def test_endpoint_magnet_does_not_apply_to_interior_handles(qtbot):
+    # An interior waypoint (index 1 of this 4-point path) dropped 15px
+    # from mux0's own (off-grid, x=255) boundary must NOT be
+    # magnetized - only index 0/-1 are anchors. If the index gate were
+    # missing, this would land on (260, 350) instead.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    handle = wire._handles[1]
+    orig = wire.edge.points[1]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(*orig)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(240, 350)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert wire.edge.points[1] == (240, 350)   # plain grid-snap, unaffected
+
+
+def test_endpoint_magnet_is_inert_on_a_standalone_wire_without_blocks(qtbot):
+    # _make_wire-built wires never had refresh_auto_route(blocks)
+    # called, so _src_item/_dst_item stay None - the magnet must
+    # degrade to plain grid-snap rather than raise.
+    wire, state, edge = _make_wire(points=[(10, 10), (50, 10), (90, 10)])
+    wire.set_editable(True)
+    handle = wire._handles[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(10, 10)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(13, 17)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert edge.points[0] == (10, 20)   # plain snap(13)->10, snap(17)->20
+
+
 def test_block_drag_commit_reroutes_attached_pointless_wires(qtbot):
     # M8 fix round 2 CRITICAL: spec 3's "anchors follow their block"
     # for a pointless (auto-routed) edge, live during a plain drag -
@@ -1136,3 +1221,159 @@ def test_tab_switch_to_scope_exits_edit_mode_dirty_flag_persists(qtbot):
         assert win._layout_dirty is True
     finally:
         engine.stop()
+
+
+# -- M8 wave 2: Visio-style connector glue (findings 4/5) -----------------
+#
+# mux0 is the drag target throughout: it is both the dst of two
+# EXPLICIT-path edges (adc1->mux0, tim1->mux0 - real f411 dog-legs)
+# and the src of one POINTLESS edge (mux0->dma2) - one drag exercises
+# live re-route (finding 4) and endpoint glue (finding 5) together,
+# matching how they actually interact in the real diagram.
+
+
+def test_live_move_reroutes_attached_pointless_wire_mid_gesture(qtbot):
+    # finding 4: a pointless wire's line must stay attached DURING a
+    # drag, not only snap into place at release - setPos (like every
+    # other drag test in this file) drives BlockItem.itemChange
+    # directly, and the assertion runs BEFORE mouseReleaseEvent.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+    assert wire.edge.points == []   # f411's born-pointless edge
+    original_pts = list(wire.pts)
+    # sanity: an UNattached pointless-if-any wire is not touched by
+    # this block's drag - adc1->mux0 is not pointless, skip; instead
+    # confirm the filter by checking a wire on the other side of the
+    # diagram is untouched.
+    unrelated = next(w for w in win.wires.values()
+                     if w.edge.src == "flash" and w.edge.dst == "busmx")
+    unrelated_pts = list(unrelated.pts)
+
+    item = win.blocks["mux0"]
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 100, item.pos().y())   # live, pre-release
+
+    expected = _straight_route_points(win.blocks["mux0"], win.blocks["dma2"],
+                                      wire.edge)
+    assert wire.pts == expected
+    assert wire.pts != original_pts
+    assert unrelated.pts == unrelated_pts   # untouched
+
+    item.mouseReleaseEvent(_FakeEvent())
+    assert wire.pts == _straight_route_points(win.blocks["mux0"],
+                                              win.blocks["dma2"], wire.edge)
+
+
+def test_live_move_glues_explicit_endpoints_interior_points_unchanged(qtbot):
+    # finding 5: an explicit path's endpoint anchored to the dragged
+    # block translates by the block's own exact delta, live, while
+    # everything else in edge.points (the other anchor, any interior
+    # waypoint) stays put.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire_adc = next(w for w in win.wires.values()
+                   if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire_tim = next(w for w in win.wires.values()
+                   if w.edge.src == "tim1" and w.edge.dst == "mux0")
+    orig_adc = list(wire_adc.edge.points)
+    orig_tim = list(wire_tim.edge.points)
+    orig_x, orig_y, _, _ = win.blocks["mux0"].geometry()
+
+    item = win.blocks["mux0"]
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 100, item.pos().y() + 20)   # live
+    new_x, new_y, _, _ = item.geometry()
+    dx, dy = new_x - orig_x, new_y - orig_y
+    assert (dx, dy) != (0, 0)
+
+    # glued mid-gesture, BEFORE release:
+    assert wire_adc.edge.points[-1] == (orig_adc[-1][0] + dx,
+                                        orig_adc[-1][1] + dy)
+    assert wire_tim.edge.points[-1] == (orig_tim[-1][0] + dx,
+                                        orig_tim[-1][1] + dy)
+    assert wire_adc.edge.points[:-1] == orig_adc[:-1]   # src anchor + interior
+    assert wire_tim.edge.points[:-1] == orig_tim[:-1]
+
+    item.mouseReleaseEvent(_FakeEvent())   # commit - unchanged by release
+
+    assert wire_adc.edge.points[-1] == (orig_adc[-1][0] + dx,
+                                        orig_adc[-1][1] + dy)
+    assert wire_tim.edge.points[-1] == (orig_tim[-1][0] + dx,
+                                        orig_tim[-1][1] + dy)
+    assert win._layout_dirty is True
+    assert wire_adc.edge_key() in win._dirty_wire_keys
+    assert wire_tim.edge_key() in win._dirty_wire_keys
+
+
+def test_live_move_glue_undo_restores_block_and_both_glued_wires(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire_adc = next(w for w in win.wires.values()
+                   if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire_tim = next(w for w in win.wires.values()
+                   if w.edge.src == "tim1" and w.edge.dst == "mux0")
+    orig_adc_points = list(wire_adc.edge.points)
+    orig_tim_points = list(wire_tim.edge.points)
+    item = win.blocks["mux0"]
+    orig_geom = item.geometry()
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 100, item.pos().y())
+    item.mouseReleaseEvent(_FakeEvent())
+    assert wire_adc.edge.points != orig_adc_points   # sanity: glue happened
+
+    win._on_layout_undo()
+
+    assert wire_adc.edge.points == orig_adc_points
+    assert wire_tim.edge.points == orig_tim_points
+    assert item.geometry() == orig_geom
+
+
+def test_live_move_glue_save_round_trip_reproduces(qtbot, tmp_path):
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    engine, win = _build_window(qtbot, str(tdir))
+    win.edit_layout_btn.setChecked(True)
+    wire_adc = next(w for w in win.wires.values()
+                   if w.edge.src == "adc1" and w.edge.dst == "mux0")
+
+    item = win.blocks["mux0"]
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 100, item.pos().y())
+    item.mouseReleaseEvent(_FakeEvent())
+    expected_points = list(wire_adc.edge.points)
+    assert expected_points  # sanity: still explicit
+
+    win._on_save_layout()
+
+    reloaded = load_topology(engine.topology_path, engine.model)
+    reloaded_edge = next(e for e in reloaded.edges
+                         if e.src == "adc1" and e.dst == "mux0")
+    assert reloaded_edge.points == expected_points
+
+
+def test_live_move_tracking_resets_on_non_drag_geometry_changes(qtbot):
+    # Correctness guard (not directly asked for by the finding, but
+    # load-bearing for it): if a block's position changes via undo/
+    # revert/auto-layout rather than a live drag, any in-progress
+    # live-move tracking baseline must be invalidated - otherwise the
+    # NEXT drag's first live-move event would diff the block's new
+    # position against a STALE remembered one and apply a wildly wrong
+    # delta to any glued wire endpoint.
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["mux0"]
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 50, item.pos().y())
+    assert win._live_move_tracking is not None
+    item.mouseReleaseEvent(_FakeEvent())
+    assert win._live_move_tracking is None   # commit resets it
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 20, item.pos().y())
+    assert win._live_move_tracking is not None
+    win._on_auto_layout()   # bypasses the drag path entirely
+    assert win._live_move_tracking is None

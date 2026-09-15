@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self.diagram_state.on_badge_clicked = self._on_badge_clicked
         self.diagram_state.on_geometry_changed = (
             self._on_layout_geometry_changed)
+        self.diagram_state.on_block_live_moved = self._on_block_live_moved
         self.flow_page.on_pick = self._highlight_flow
         self.event_log.on_focus = self._on_log_focus
         self.event_log.on_event_time = self._on_log_time_focus
@@ -413,6 +414,15 @@ class MainWindow(QMainWindow):
         self._layout_dirty = False
         self._legend_moved = self.engine.topology.legend is not None
         self._layout_world = self._capture_layout_world()
+        # M8 wave 2 (Visio-style connector glue): (block_id, x, y) of
+        # the block's position as of the LAST on_block_live_moved call
+        # this gesture, or None between gestures - see
+        # _on_block_live_moved's docstring. Reset to None any time a
+        # block's geometry changes through a path OTHER than a live
+        # drag (a commit, undo, revert, or auto-layout), so a stale
+        # value from an earlier gesture can never be diffed against a
+        # position that block reached some other way.
+        self._live_move_tracking = None
 
         self._undo_shortcut = QShortcut(QKeySequence.Undo, self)
         self._undo_shortcut.activated.connect(self._on_layout_undo)
@@ -476,6 +486,9 @@ class MainWindow(QMainWindow):
         # changes block geometry (see refresh_auto_route's docstring).
         for wire in self.wires.values():
             wire.refresh_auto_route(self.blocks)
+        # M8 wave 2: this bypassed the live-drag path entirely - any
+        # in-progress live-move tracking baseline is now meaningless.
+        self._live_move_tracking = None
 
     def _on_layout_geometry_changed(self) -> None:
         """Wired to diagram_state.on_geometry_changed - fires once per
@@ -508,6 +521,57 @@ class MainWindow(QMainWindow):
         # auto-route on an explicit-path wire never falls back to a
         # stale route.
         for wire in self.wires.values():
+            wire.refresh_auto_route(self.blocks)
+        # M8 wave 2: this gesture (whatever kind) is now fully
+        # committed - a block's live-move tracking baseline, if any,
+        # is stale from here on (the NEXT drag on that block starts a
+        # fresh gesture with its own baseline).
+        self._live_move_tracking = None
+
+    def _on_block_live_moved(self, block_id: str) -> None:
+        """Wired to diagram_state.on_block_live_moved - fires on EVERY
+        snapped step of a block drag, well before release/commit (M8
+        wave 2, Visio-style connector glue). Unlike
+        _on_layout_geometry_changed this only touches the wires
+        actually attached to `block_id` (cheap - there are only ever a
+        few), and does not touch the undo stack or dirty bookkeeping
+        at all: dirty-marking and the undo snapshot are both already
+        handled for free at commit, because translate_endpoint (below)
+        mutates wire.edge.points directly, and
+        _on_layout_geometry_changed's own before/after world-snapshot
+        diff (unchanged) already catches that mutation exactly like
+        any other points change - self._layout_world/`old` was
+        captured at the END of the PREVIOUS commit, i.e. before this
+        gesture (and all of its live-move calls) ever started.
+
+        Computes this block's delta since the LAST call this gesture -
+        or, on the FIRST call, since the gesture's own start
+        (BlockItem.gesture_origin(), not "wherever we happened to
+        start tracking"), so the very first snapped step of a drag is
+        not silently dropped. Applies that delta two ways per attached
+        wire: translate_endpoint (a no-op for a pointless wire) glues
+        an explicit path's own endpoint to the block; refresh_auto_route
+        (a no-op on RENDERING for a pointed wire) re-derives a
+        pointless wire's straight route from the block's now-current
+        position, so it visibly stays attached through the whole drag
+        instead of only snapping back at release."""
+        item = self.blocks.get(block_id)
+        if item is None:
+            return
+        x, y, _, _ = item.geometry()
+        if (self._live_move_tracking is not None
+                and self._live_move_tracking[0] == block_id):
+            _, lx, ly = self._live_move_tracking
+        else:
+            lx, ly = item.gesture_origin()
+        dx, dy = x - lx, y - ly
+        attached = [w for w in self.wires.values()
+                   if w.edge.src == block_id or w.edge.dst == block_id]
+        if dx or dy:
+            for wire in attached:
+                wire.translate_endpoint(block_id, dx, dy)
+        self._live_move_tracking = (block_id, x, y)
+        for wire in attached:
             wire.refresh_auto_route(self.blocks)
 
     def _on_layout_undo(self) -> None:
@@ -603,6 +667,7 @@ class MainWindow(QMainWindow):
         self._legend_moved = fresh.legend is not None
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
+        self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
 
     def _on_auto_layout(self) -> None:
         """auto_layout() only returns (x, y) - width/height are kept as
@@ -642,6 +707,7 @@ class MainWindow(QMainWindow):
         self._layout_dirty = True
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
+        self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
 
     # -- actions ---------------------------------------------------------
 

@@ -71,6 +71,27 @@ _HANDLE_SIZE = 8
 _MIN_BLOCK_W = 30
 _MIN_BLOCK_H = 24
 
+# M8 task 5 manual-gate fix (finding 2): grab/click affordance. A
+# WaypointHandle is bigger than the block resize handle (_HANDLE_SIZE
+# stays 8, unchanged - this is a separate constant on purpose) and a
+# wire's own clickable shape() widens in edit mode, since that is
+# where double-click-to-insert precision actually matters; normal-mode
+# click-to-select keeps the original width.
+_WAYPOINT_HANDLE_SIZE = 12
+_WIRE_HIT_WIDTH = 12
+_WIRE_HIT_WIDTH_EDIT = 20
+_HANDLE_HOVER_FILL = QColor("#FFE0B2")
+# Endpoint re-anchor magnet (finding 2d): releasing an ENDPOINT
+# waypoint handle within this many scene units of its own block's
+# boundary snaps it onto that boundary (then grid-snaps). A block
+# MOVE now glues an explicit path's endpoints to it automatically
+# (BlockItem.itemChange -> DiagramState.on_block_live_moved ->
+# WireItem.translate_endpoint, M8 wave 2) - the magnet's remaining job
+# is the cases glue does not cover: a block RESIZE (only a position
+# change fires the glue callback) and any manual fine-tune drag of the
+# endpoint itself.
+_ENDPOINT_MAGNET_PX = 20
+
 
 def snap(value: float, fine: bool) -> int:
     """Grid-snap `value`: 10-unit steps normally, 1-unit when `fine`
@@ -115,6 +136,13 @@ class BlockItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.ItemIsMovable, on)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
         self.handle.setVisible(on)
+        # finding 2c: an open-hand cursor signals "draggable" while
+        # editing; cleared (falls back to whatever the view/cursor
+        # stack underneath shows) the moment edit mode exits.
+        if on:
+            self.setCursor(Qt.OpenHandCursor)
+        else:
+            self.unsetCursor()
 
     def geometry(self) -> Tuple[int, int, int, int]:
         pos = self.pos()
@@ -143,7 +171,27 @@ class BlockItem(QGraphicsItem):
                 and not self._applying):
             return QPointF(snap(value.x(), _fine_snap()),
                            snap(value.y(), _fine_snap()))
+        if (change == QGraphicsItem.ItemPositionHasChanged
+                and self._editable and not self._applying):
+            # M8 wave 2 (Visio-style connector glue): fires on every
+            # snapped step of a live drag (ItemSendsGeometryChanges is
+            # only on while editable, so this never fires outside a
+            # drag; _applying excludes apply_geometry's own
+            # programmatic setPos - undo/revert/auto-layout notify
+            # MainWindow through their own explicit calls instead, not
+            # this live-drag path). MainWindow filters to the wires
+            # actually attached to this block.
+            self.state.on_block_live_moved(self.block.id)
         return super().itemChange(change, value)
+
+    def gesture_origin(self) -> Tuple[int, int]:
+        """The (x, y) this block's CURRENT drag/resize gesture started
+        from - _geom_at_press, exposed read-only so MainWindow's live-
+        move handler (see DiagramState.on_block_live_moved) can compute
+        the FULL delta since gesture start on its very first callback,
+        rather than only catching up from the second snapped step
+        onward."""
+        return self._geom_at_press
 
     def boundingRect(self):
         return QRectF(-12, -12, self.w + 24, self.h + 24)
@@ -222,6 +270,7 @@ class BlockItem(QGraphicsItem):
         if self._editable:
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
+            self.setCursor(Qt.ClosedHandCursor)   # finding 2c
         if self.state.edit_mode:
             ev.accept()
             return
@@ -240,6 +289,7 @@ class BlockItem(QGraphicsItem):
                 self.block.x, self.block.y = new_xy
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
+            self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
         ev.accept()
 
 
@@ -256,6 +306,11 @@ class _ResizeHandle(QGraphicsItem):
         self._drag_from = None
         self._start_w = 0.0
         self._start_h = 0.0
+        # finding 2c: diagonal-resize cursor. Set unconditionally - the
+        # handle only exists/is interactive while its parent block is
+        # editable (BlockItem.set_editable toggles handle.setVisible),
+        # so there is no separate on/off to manage here.
+        self.setCursor(Qt.SizeFDiagCursor)
 
     def boundingRect(self):
         return QRectF(0, 0, _HANDLE_SIZE, _HANDLE_SIZE)
@@ -319,6 +374,31 @@ def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
     return (p.x() - cx) ** 2 + (p.y() - cy) ** 2
 
 
+def _nearest_rect_boundary_point(px: float, py: float, x: float, y: float,
+                                 w: float, h: float) -> Tuple[float, float]:
+    """Nearest point ON the boundary (perimeter, not interior) of the
+    rect (x, y, w, h) to (px, py) - used by the endpoint re-anchor
+    magnet (finding 2d) to snap a released handle onto its block's
+    edge. If (px, py) is outside the rect, simple clamping already
+    lands exactly on the boundary; if it is inside (or exactly on it),
+    clamping alone would land in the interior, so the clamped point is
+    pushed out to whichever of the 4 edges is closest."""
+    cx = max(x, min(px, x + w))
+    cy = max(y, min(py, y + h))
+    if cx != px or cy != py:
+        return cx, cy
+    d_left, d_right = cx - x, (x + w) - cx
+    d_top, d_bottom = cy - y, (y + h) - cy
+    m = min(d_left, d_right, d_top, d_bottom)
+    if m == d_left:
+        return x, cy
+    if m == d_right:
+        return x + w, cy
+    if m == d_top:
+        return cx, y
+    return cx, y + h
+
+
 # ---------------------------------------------------------------------------
 # M8 task 5 fix round 2: live auto-route recompute. This IS the single
 # routing implementation for a pointless edge's straight-line path -
@@ -330,28 +410,28 @@ def _point_segment_dist2(p: QPointF, a: QPointF, b: QPointF) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _side_point(block: Block, w: float, h: float, side: str,
+def _side_point(x: float, y: float, w: float, h: float, side: str,
                 frac: float) -> Tuple[float, float]:
     if side == "l":
-        return block.x, block.y + h * frac
+        return x, y + h * frac
     if side == "r":
-        return block.x + w, block.y + h * frac
+        return x + w, y + h * frac
     if side == "t":
-        return block.x + w * frac, block.y
-    return block.x + w * frac, block.y + h   # "b"
+        return x + w * frac, y
+    return x + w * frac, y + h   # "b"
 
 
 def _ranges_overlap(a0: float, a1: float, b0: float, b1: float) -> bool:
     return a0 < b1 and b0 < a1
 
 
-def _facing_sides(src: Block, sw: float, sh: float, dst: Block, dw: float,
-                  dh: float) -> Tuple[str, str]:
-    if not _ranges_overlap(src.x, src.x + sw, dst.x, dst.x + dw):
-        if src.x + sw <= dst.x:
+def _facing_sides(sx: float, sy: float, sw: float, sh: float, dx: float,
+                  dy: float, dw: float, dh: float) -> Tuple[str, str]:
+    if not _ranges_overlap(sx, sx + sw, dx, dx + dw):
+        if sx + sw <= dx:
             return "r", "l"
         return "l", "r"
-    if src.y + sh <= dst.y:
+    if sy + sh <= dy:
         return "b", "t"
     return "t", "b"
 
@@ -359,16 +439,28 @@ def _facing_sides(src: Block, sw: float, sh: float, dst: Block, dw: float,
 def _straight_route_points(src_item: "BlockItem", dst_item: "BlockItem",
                            edge: Edge) -> List[QPointF]:
     """Two-point straight route between src_item/dst_item's CURRENT
-    geometry, honoring the edge's declared ports if any - reads block
-    position/size off the two BlockItems directly rather than a
-    topology+blocks-dict pair, so it needs no reference back to a
-    Topology. The single routing implementation: scene.py's
+    geometry, honoring the edge's declared ports if any. Position
+    comes from src_item.pos()/dst_item.pos() - the LIVE QGraphicsItem
+    position - deliberately NOT from src_item.block.x/y: BlockItem
+    only writes a drag's final position back into block.x/y at
+    mouseReleaseEvent (see BlockItem.mouseReleaseEvent), so during a
+    live drag (M8 wave 2's mid-gesture refresh_auto_route calls)
+    block.x/y is still the GESTURE-START position - reading it here
+    would silently recompute the OLD route every time, defeating the
+    whole point of a live reroute. pos() carries no such lag; at
+    construction and at every commit it is exactly block.x/y anyway,
+    so this is a strict improvement with no behavior change outside a
+    live drag. block.ports is still read off src_item.block/
+    dst_item.block - the declared-port table is static, never
+    mid-drag state. The single routing implementation: scene.py's
     build_scene imports this directly for a pointless edge's initial
     path, and WireItem.refresh_auto_route (below) calls it again to
     recompute that same route later, after a block has moved."""
     src_b, dst_b = src_item.block, dst_item.block
-    side_s, side_d = _facing_sides(src_b, src_item.w, src_item.h,
-                                   dst_b, dst_item.w, dst_item.h)
+    sx, sy = src_item.pos().x(), src_item.pos().y()
+    dx, dy = dst_item.pos().x(), dst_item.pos().y()
+    side_s, side_d = _facing_sides(sx, sy, src_item.w, src_item.h,
+                                   dx, dy, dst_item.w, dst_item.h)
     frac_s = frac_d = 0.5
     port = src_b.ports.get(edge.src_port) if edge.src_port else None
     if port:
@@ -376,8 +468,8 @@ def _straight_route_points(src_item: "BlockItem", dst_item: "BlockItem",
     port = dst_b.ports.get(edge.dst_port) if edge.dst_port else None
     if port:
         side_d, frac_d = port
-    p0 = _side_point(src_b, src_item.w, src_item.h, side_s, frac_s)
-    p1 = _side_point(dst_b, dst_item.w, dst_item.h, side_d, frac_d)
+    p0 = _side_point(sx, sy, src_item.w, src_item.h, side_s, frac_s)
+    p1 = _side_point(dx, dy, dst_item.w, dst_item.h, side_d, frac_d)
     return [QPointF(*p0), QPointF(*p1)]
 
 
@@ -386,14 +478,18 @@ class WireItem(QGraphicsItem):
     edge.points when non-empty (index 0 and -1 are the source/dest
     anchors, everything between is an interior waypoint), an
     auto-routed straight line to the connected blocks' ports
-    otherwise. An auto-routed (pointless) wire's line DOES follow its
-    blocks live - MainWindow calls refresh_auto_route() after every
-    block-geometry change (M8 task 5 fix round 2; see that method's
-    docstring). The one remaining limitation is explicit paths: once
-    an edge has one, its own anchors do not re-track a moved block
-    (this has always been true of hand-authored edges too) - drag the
-    endpoint's WaypointHandle to manually re-anchor it after moving a
-    block."""
+    otherwise. A moved block drags BOTH kinds of wire along with it
+    (Visio-style connector glue, M8 wave 2): a pointless wire's line
+    is recomputed from the block's live position (refresh_auto_route,
+    called by MainWindow after every block-geometry change - drag,
+    auto-layout, undo, revert); an explicit path's own endpoint
+    anchor(s) translate by the block's exact drag delta, live, during
+    the drag (translate_endpoint, called from
+    DiagramState.on_block_live_moved). The one remaining limitation is
+    interior waypoints: they do not re-route around a moved block - a
+    dog-leg that used to clear an obstacle may need re-jigging by hand
+    (drag the interior WaypointHandle) after the blocks around it
+    move."""
 
     def __init__(self, edge: Edge, pts, state):
         super().__init__()
@@ -416,13 +512,18 @@ class WireItem(QGraphicsItem):
         # (it is that original path, not a straight route) until
         # refresh_auto_route() runs at least once - see that method's
         # docstring for who calls it and when. WireItem has no
-        # reference to the src/dst BlockItems (only DiagramState,
-        # which carries no block geometry), so it cannot compute a
-        # correct route on its own; refresh_auto_route(blocks) is the
-        # owner-supplied fix for that.
+        # reference to the src/dst BlockItems at construction (only
+        # DiagramState, which carries no block geometry) - _src_item/
+        # _dst_item start out None and are populated the first time
+        # refresh_auto_route(blocks) runs (finding 2d's endpoint
+        # magnet reads them off a WaypointHandle release; they stay
+        # None for a wire built standalone in a test that never calls
+        # refresh_auto_route, which simply disables the magnet for it).
         self._editable = False
         self._handles: List["WaypointHandle"] = []
         self._auto_pts = list(pts)
+        self._src_item = None
+        self._dst_item = None
 
     def set_editable(self, on: bool) -> None:
         self._editable = bool(on)
@@ -430,6 +531,12 @@ class WireItem(QGraphicsItem):
             self._rebuild_handles()
         else:
             self._clear_handles()
+        # finding 2c: a cross-hair cursor signals the double-click-to-
+        # insert affordance while editing; cleared on exit.
+        if on:
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.unsetCursor()
 
     def edge_key(self) -> Tuple[str, str, str]:
         """Identity tuple matching core/target/layout_io.py's
@@ -500,9 +607,10 @@ class WireItem(QGraphicsItem):
         blocks, per spec section 3's "anchors follow their block".
         An edge with an explicit path only gets its _auto_pts fallback
         refreshed quietly; self.pts (the explicit path itself) is
-        untouched - explicit-path endpoints still do not re-track a
-        moved block (see the class docstring's one remaining
-        limitation).
+        untouched HERE - an explicit path's endpoints do still track a
+        moved block, just via a different method (translate_endpoint,
+        M8 wave 2) called separately by MainWindow's live-move handler,
+        not by this one.
 
         MainWindow - the only owner with a full id -> BlockItem map -
         is responsible for calling this for every wire: once right
@@ -517,17 +625,93 @@ class WireItem(QGraphicsItem):
         on_geometry_changed - this is a passive re-derivation, not a
         new user gesture. A no-op if either endpoint block is missing
         from `blocks` (defensive only; MainWindow always passes its
-        own complete self.blocks, which contains every block)."""
+        own complete self.blocks, which contains every block).
+
+        Side effect (finding 2d): also caches src_item/dst_item as
+        self._src_item/_dst_item - a live BlockItem reference always
+        reflects that block's CURRENT geometry via its own .geometry()
+        regardless of when it was cached (blocks are mutated in place,
+        never replaced), so caching once, here, is enough for
+        WaypointHandle's endpoint magnet to always read fresh block
+        rects without needing its own blocks-dict plumbing."""
         src_item = blocks.get(self.edge.src)
         dst_item = blocks.get(self.edge.dst)
         if src_item is None or dst_item is None:
             return
+        self._src_item = src_item
+        self._dst_item = dst_item
         self._auto_pts = _straight_route_points(src_item, dst_item,
                                                 self.edge)
         if not self.edge.points:
             self.prepareGeometryChange()
             self.pts = list(self._auto_pts)
             self.update()
+
+    def translate_endpoint(self, block_id: str, dx: int, dy: int) -> None:
+        """Visio-style connector glue (M8 wave 2): translates THIS
+        wire's explicit-path endpoint(s) anchored to `block_id` by
+        (dx, dy) - edge.points[0] if block_id == self.edge.src,
+        edge.points[-1] if block_id == self.edge.dst (both are checked
+        independently, so a - never occurring in practice -
+        src == dst self-loop edge would translate both ends). A no-op
+        if this wire is pointless (edge.points empty - refresh_auto_route
+        is the pointless-wire counterpart MainWindow calls alongside
+        this) or if block_id matches neither end.
+
+        RAW delta, never re-snapped: dx/dy is simply how far the
+        block's own (already-snapped, by BlockItem's itemChange)
+        position moved, so an unshifted drag's delta lands on a grid
+        multiple whenever the block's STARTING position was itself
+        grid-aligned (a fresh drag from an off-grid hand-authored
+        position, e.g. an odd x from a hand-edited yaml, produces
+        whatever offset the snap needed to land on-grid - still
+        exactly the block's own delta, nothing extra). A Shift (fine)
+        drag's delta is fine-grained and the endpoint follows at that
+        same fine grain - acceptable, documented behavior (finding
+        2d/5c), not a bug.
+
+        Called by MainWindow from BOTH DiagramState.on_block_live_moved
+        (live, mid-drag - so the wire visibly stays attached instead of
+        detaching until release) and, implicitly, by the fact that the
+        SAME edge.points mutation this makes is what
+        MainWindow._on_layout_geometry_changed's existing world-
+        snapshot diff already detects at commit - no separate dirty-
+        marking or undo-snapshot logic was needed for this: the commit
+        handler's `old` snapshot was captured before this gesture even
+        started, so it already holds the PRE-drag endpoint, and its
+        diff against `new` (captured at commit, after every live
+        translate_endpoint call this gesture made) already flags this
+        wire's edge_key() dirty exactly like any other points change.
+
+        Keeps the corresponding WaypointHandle(s) in sync too (position
+        and gesture-start baseline) if the wire is currently editable,
+        without a full handle rebuild (cheap - this can fire many
+        times per drag)."""
+        if not self.edge.points:
+            return
+        n = len(self.edge.points)
+        touched: List[int] = []
+        if block_id == self.edge.src:
+            x, y = self.edge.points[0]
+            self.edge.points[0] = (x + dx, y + dy)
+            touched.append(0)
+        if block_id == self.edge.dst:
+            x, y = self.edge.points[-1]
+            self.edge.points[-1] = (x + dx, y + dy)
+            touched.append(n - 1)
+        if not touched:
+            return
+        self.prepareGeometryChange()
+        for i in touched:
+            self.pts[i] = QPointF(*self.edge.points[i])
+        if self._editable:
+            for handle in self._handles:
+                if handle.index in touched:
+                    new_pt = self.pts[handle.index]
+                    handle.setPos(new_pt)
+                    handle._geom_at_press = (int(new_pt.x()),
+                                             int(new_pt.y()))
+        self.update()
 
     def remove_point(self, index: int) -> None:
         """Delete key on a selected WaypointHandle: removes an
@@ -623,8 +807,13 @@ class WireItem(QGraphicsItem):
         return self.path().boundingRect().adjusted(-14, -20, 14, 20)
 
     def shape(self):
+        # finding 2a: wider click/double-click hit area while editing
+        # (the geometry that matters for placing a waypoint precisely)
+        # - normal mode (edge-select-to-inspect) keeps the original
+        # width.
         st = QPainterPathStroker()
-        st.setWidth(12)
+        st.setWidth(_WIRE_HIT_WIDTH_EDIT if self.state.edit_mode
+                   else _WIRE_HIT_WIDTH)
         return st.createStroke(self.path())
 
     def paint(self, p, opt, widget=None):
@@ -694,39 +883,59 @@ class WireItem(QGraphicsItem):
 
 
 class WaypointHandle(QGraphicsItem):
-    """8x8 square handle, child of a WireItem, one per edge.points
+    """12x12 square handle, child of a WireItem, one per edge.points
     entry - shown only while the wire is editable (WireItem.
     set_editable(True) creates one per point; set_editable(False)
     destroys them). Dragging live-moves its point (prepareGeometry-
-    Change + repaint, snap 10 / Shift 1 on release); release writes
-    edge.points[index] and fires state.on_geometry_changed() exactly
-    once IF the point actually moved - a click-only press/release
-    fires nothing, mirroring BlockItem/_ResizeHandle's gesture-start-
-    baseline discipline. Clicking a handle selects it; Delete then
-    removes its point via the parent WireItem.remove_point (no
-    implicit collinear merging)."""
+    Change + repaint, snap 10 / Shift 1 on release, endpoint magnet -
+    see mouseReleaseEvent - first); release writes edge.points[index]
+    and fires state.on_geometry_changed() exactly once IF the point
+    actually moved - a click-only press/release fires nothing,
+    mirroring BlockItem/_ResizeHandle's gesture-start-baseline
+    discipline. Clicking a handle selects it; Delete then removes its
+    point via the parent WireItem.remove_point (no implicit collinear
+    merging). Hover highlight and an open/closed-hand cursor (finding
+    2b) give it the same grab affordance as a block drag."""
 
     def __init__(self, wire: "WireItem", index: int):
         super().__init__(wire)
         self.setZValue(10)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemIsFocusable, True)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.OpenHandCursor)
         self.index = index
         self._drag_from = None
         self._start_point = (0.0, 0.0)
+        self._hovered = False
         pt = wire.pts[index]
         self.setPos(pt)
         self._geom_at_press = (int(pt.x()), int(pt.y()))
 
     def boundingRect(self):
-        half = _HANDLE_SIZE / 2
-        return QRectF(-half, -half, _HANDLE_SIZE, _HANDLE_SIZE)
+        half = _WAYPOINT_HANDLE_SIZE / 2
+        return QRectF(-half, -half, _WAYPOINT_HANDLE_SIZE,
+                      _WAYPOINT_HANDLE_SIZE)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(COL_SELECT if self.isSelected() else Qt.white))
+        if self.isSelected():
+            fill = COL_SELECT
+        elif self._hovered:
+            fill = _HANDLE_HOVER_FILL
+        else:
+            fill = Qt.white
+        p.setBrush(QBrush(fill))
         p.setPen(QPen(Qt.black, 1))
         p.drawRect(self.boundingRect())
+
+    def hoverEnterEvent(self, ev):
+        self._hovered = True
+        self.update()
+
+    def hoverLeaveEvent(self, ev):
+        self._hovered = False
+        self.update()
 
     def mousePressEvent(self, ev):
         self.setSelected(True)
@@ -735,6 +944,7 @@ class WaypointHandle(QGraphicsItem):
         self._geom_at_press = (int(pos.x()), int(pos.y()))
         self._drag_from = ev.scenePos()
         self._start_point = (pos.x(), pos.y())
+        self.setCursor(Qt.ClosedHandCursor)
         ev.accept()
 
     def mouseMoveEvent(self, ev):
@@ -753,9 +963,29 @@ class WaypointHandle(QGraphicsItem):
 
     def mouseReleaseEvent(self, ev):
         wire = self.parentItem()
-        fine = _fine_snap()
         pos = self.pos()
-        new_xy = (snap(pos.x(), fine), snap(pos.y(), fine))
+        px, py = pos.x(), pos.y()
+        n = len(wire.edge.points)
+        # finding 2d: endpoint re-anchor magnet. Only index 0 (src) and
+        # index n-1 (dst) are anchors at all; an interior waypoint is
+        # never magnetized. wire._src_item/_dst_item are None until
+        # refresh_auto_route(blocks) has run at least once (real
+        # MainWindow sessions always do this - see that method's
+        # docstring) - the magnet is simply inert until then, same as
+        # a standalone test-built wire with no real blocks.
+        magnet_item = None
+        if self.index == 0:
+            magnet_item = wire._src_item
+        elif self.index == n - 1:
+            magnet_item = wire._dst_item
+        if magnet_item is not None:
+            bx, by, bw, bh = magnet_item.geometry()
+            nx, ny = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
+            dist = ((px - nx) ** 2 + (py - ny) ** 2) ** 0.5
+            if dist <= _ENDPOINT_MAGNET_PX:
+                px, py = nx, ny
+        fine = _fine_snap()
+        new_xy = (snap(px, fine), snap(py, fine))
         wire.prepareGeometryChange()
         self.setPos(new_xy[0], new_xy[1])
         wire.pts[self.index] = QPointF(new_xy[0], new_xy[1])
@@ -765,6 +995,7 @@ class WaypointHandle(QGraphicsItem):
             wire.state.on_geometry_changed()
         self._geom_at_press = new_xy
         self._drag_from = None
+        self.setCursor(Qt.OpenHandCursor)
         ev.accept()
 
     def keyPressEvent(self, ev):

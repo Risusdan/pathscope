@@ -99,16 +99,13 @@ painful part.
 - Multi-select group drag.
 - Draggable port anchors.
 - Redo.
-- Explicit-path endpoint auto-tracking on block move (v1: endpoints
-  are draggable anchors, never deletable; re-anchor by hand after
-  moving a block - a documented limitation of the full-polyline
-  points schema). This is scoped to edges that HAVE an explicit path
-  only - a pointless (auto-routed) edge's anchors already follow a
-  moved block live (section 3), including immediately after
-  auto-layout, undo, and revert, and a pointed edge whose waypoints
-  get deleted back down to auto-routing picks up a fresh
-  block-anchored line at that moment rather than replaying its old
-  explicit path.
+- Interior-waypoint re-routing around a moved block: only the two
+  endpoint anchors track a moved block automatically (a pointless
+  edge's whole straight-line route, or an explicit path's own
+  endpoints via Visio-style connector glue on block drag, live during
+  the drag and settled at release - section 3); an interior waypoint
+  stays exactly where it was placed and may need re-jigging by hand
+  (drag its WaypointHandle) if the blocks around it move.
 
 ## 8. Validation
 

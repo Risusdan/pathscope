@@ -55,6 +55,15 @@ class DiagramState:
         self.edit_mode: bool = False
         self.on_geometry_changed: Callable[[], None] = _noop_geometry
         self.legend_pos: Optional[Tuple[int, int]] = None
+        # M8 wave 2 (Visio-style connector glue): fires on EVERY
+        # position change of an editable block DURING a drag (before
+        # release/commit) - BlockItem.itemChange on
+        # ItemPositionHasChanged. MainWindow uses this to live-reroute
+        # pointless wires attached to the moving block and to glue
+        # explicit-path endpoints to it; unlike on_geometry_changed
+        # this can fire many times per gesture, so it carries the
+        # moved block's id rather than nothing.
+        self.on_block_live_moved: Callable[[str], None] = _noop
 
 
 def build_scene(topology: Topology, state: DiagramState

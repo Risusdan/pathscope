@@ -1013,8 +1013,15 @@ class WireItem(QGraphicsItem):
         self._handles = []
 
     def _rebuild_handles(self) -> None:
+        # Acceptance round 7: an auto-routed wire (edge.points empty)
+        # gets handles for its two route endpoints too - self.pts is
+        # its 2-point auto route, and dragging one converts the wire
+        # to an explicit path (WaypointHandle.mouseReleaseEvent).
+        # Before this, two visually identical straight wires behaved
+        # differently depending on invisible yaml state.
         self._clear_handles()
-        for i in range(len(self.edge.points)):
+        n = len(self.edge.points) or len(self.pts)
+        for i in range(n):
             self._handles.append(WaypointHandle(self, i))
 
     def apply_points(self, points: List[Tuple[int, int]]) -> None:
@@ -1104,6 +1111,18 @@ class WireItem(QGraphicsItem):
         if not self.edge.points:
             self.prepareGeometryChange()
             self.pts = list(self._auto_pts)
+            # Acceptance round 7: an auto wire's endpoint handles ride
+            # the re-route (the explicit-path counterpart is
+            # translate_endpoint's handle sync below). Baseline reset
+            # matches translate_endpoint's: the handle did not gesture
+            # here, so its next release must not read this move as its
+            # own.
+            for handle in self._handles:
+                if handle.index < len(self.pts):
+                    new_pt = self.pts[handle.index]
+                    handle.setPos(new_pt)
+                    handle._geom_at_press = (int(new_pt.x()),
+                                             int(new_pt.y()))
             self.update()
 
     def translate_endpoint(self, block_id: str, dx: int, dy: int) -> None:
@@ -1366,6 +1385,7 @@ class WaypointHandle(QGraphicsItem):
         self.index = index
         self._drag_from = None
         self._start_point = (0.0, 0.0)
+        self._gesture_moved = False
         self._hovered = False
         # M8 wave B2: the BlockItem currently showing the "drop here to
         # connect" magnet-highlight cue because of THIS handle's live
@@ -1409,6 +1429,7 @@ class WaypointHandle(QGraphicsItem):
         self._geom_at_press = (int(pos.x()), int(pos.y()))
         self._drag_from = ev.scenePos()
         self._start_point = (pos.x(), pos.y())
+        self._gesture_moved = False
         self.setCursor(Qt.ClosedHandCursor)
         ev.accept()
 
@@ -1420,8 +1441,10 @@ class WaypointHandle(QGraphicsItem):
         (blocks) has run at least once (real MainWindow sessions
         always do this - see that method's docstring), so the magnet
         (and its highlight) is simply inert until then, same as a
-        standalone test-built wire with no real blocks."""
-        n = len(wire.edge.points)
+        standalone test-built wire with no real blocks. An auto-routed
+        wire has no edge.points yet (acceptance round 7) - its handle
+        count is wire.pts' 2 route endpoints."""
+        n = len(wire.edge.points) or len(wire.pts)
         if self.index == 0:
             return wire._src_item
         if self.index == n - 1:
@@ -1457,6 +1480,7 @@ class WaypointHandle(QGraphicsItem):
         wire = self.parentItem()
         dx = ev.scenePos().x() - self._drag_from.x()
         dy = ev.scenePos().y() - self._drag_from.y()
+        self._gesture_moved = True
         nx, ny = self._start_point[0] + dx, self._start_point[1] + dy
         wire.prepareGeometryChange()
         self.setPos(nx, ny)
@@ -1486,6 +1510,16 @@ class WaypointHandle(QGraphicsItem):
         if self._magnet_target is not None:
             self._magnet_target.set_magnet_highlight(False)
             self._magnet_target = None
+        if not wire.edge.points and not self._gesture_moved:
+            # Acceptance round 7: click-only release on an auto wire's
+            # endpoint. The route's endpoints are float side-midpoints,
+            # so the snap below would register as a "move" and silently
+            # pin the wire - leave the route entirely untouched instead.
+            self._drag_from = None
+            self.setCursor(Qt.OpenHandCursor)
+            wire.state.on_live_status("")
+            ev.accept()
+            return
         fine = _fine_snap()
         new_xy = (snap(px, fine), snap(py, fine))
         wire.prepareGeometryChange()
@@ -1493,6 +1527,17 @@ class WaypointHandle(QGraphicsItem):
         wire.pts[self.index] = QPointF(new_xy[0], new_xy[1])
         wire.update()
         if new_xy != self._geom_at_press:
+            if not wire.edge.points:
+                # Acceptance round 7: first endpoint drag on an
+                # auto-routed wire pins it down as an explicit 2-point
+                # path (wire.pts already carries this index's new
+                # position from the move steps above) - the same
+                # conversion double-click insert does, minus the extra
+                # waypoint. A click-only release never reaches here,
+                # so merely touching a handle can't silently pin a
+                # wire that should keep following its blocks.
+                wire.edge.points = [(int(p.x()), int(p.y()))
+                                    for p in wire.pts]
             wire.edge.points[self.index] = new_xy
             wire.state.on_geometry_changed()
         self._geom_at_press = new_xy
@@ -1504,7 +1549,9 @@ class WaypointHandle(QGraphicsItem):
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             wire = self.parentItem()
-            n = len(wire.edge.points)
+            # Auto-routed wire (acceptance round 7): both handles are
+            # endpoints by construction - same no-op as below.
+            n = len(wire.edge.points) or len(wire.pts)
             if self.index == 0 or self.index == n - 1:
                 # Endpoints are anchors, not waypoints (full-polyline
                 # schema: edge.points[0]/[-1] are where the wire
@@ -1534,6 +1581,12 @@ class WaypointHandle(QGraphicsItem):
             wire.prepareGeometryChange()
             self.setPos(nx, ny)
             wire.pts[self.index] = QPointF(nx, ny)
+            if not wire.edge.points:
+                # Acceptance round 7: nudging an auto wire's endpoint
+                # pins it down exactly like a mouse drag would (see
+                # mouseReleaseEvent's matching conversion).
+                wire.edge.points = [(int(p.x()), int(p.y()))
+                                    for p in wire.pts]
             wire.edge.points[self.index] = (int(nx), int(ny))
             wire.update()
             self._geom_at_press = (int(nx), int(ny))

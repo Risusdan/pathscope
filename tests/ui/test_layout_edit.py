@@ -507,11 +507,16 @@ def test_set_editable_creates_handles_matching_points_and_destroys_on_disable(
     assert wire._handles == []
 
 
-def test_set_editable_on_pointless_edge_creates_no_handles(qtbot):
+def test_set_editable_on_pointless_edge_creates_endpoint_handles(qtbot):
+    # Acceptance round 7 flipped this test's original expectation (no
+    # handles on a pointless edge): every wire now shows its two
+    # endpoint handles in edit mode, auto-routed or not.
     _, state, scene, blocks, wires = _build(qtbot)
     wire = next(w for w in wires.values() if not w.edge.points)
     wire.set_editable(True)
-    assert wire._handles == []
+    assert len(wire._handles) == 2
+    assert wire._handles[0].pos() == wire.pts[0]
+    assert wire._handles[1].pos() == wire.pts[-1]
 
 
 # -- M8 task 4: handle drag moves/snaps a point, writes edge.points ------
@@ -660,7 +665,9 @@ def test_deleting_the_only_interior_point_reverts_to_auto_route():
 
     assert edge.points == []
     assert wire.pts == [auto_a, auto_b]
-    assert wire._handles == []
+    # acceptance round 7: reverting to auto-route keeps the two
+    # endpoint handles (rebuilt from the auto route), interior gone
+    assert len(wire._handles) == 2
 
 
 def test_chained_interior_deletes_stay_paintable(qtbot):
@@ -1086,7 +1093,9 @@ def test_born_pointed_edge_delete_to_auto_route_renders_fresh_straight_line(
     wire._handles[1].keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
 
     assert wire.edge.points == []
-    assert wire._handles == []
+    # acceptance round 7: the two endpoint handles remain, riding the
+    # fresh auto route; only the interior ones are gone
+    assert len(wire._handles) == 2
     from ui.diagram.items import _straight_route_points
     expected = _straight_route_points(win.blocks["adc1"], win.blocks["mux0"],
                                       wire.edge)
@@ -2682,3 +2691,83 @@ def test_real_click_reaches_an_endpoint_handle_on_a_block_boundary(qtbot):
     assert abs(after[1] - before[1]) >= 20
     # and the block itself must NOT have been the thing dragged
     assert win.blocks["adc1"].geometry() == adc1_before
+
+
+# -- Acceptance round 7: auto-routed wires get endpoint handles too --------
+# (user: two visually identical straight wires behaved differently
+# depending on whether the yaml happened to carry a points: entry -
+# every wire now shows draggable endpoints in edit mode; dragging one
+# converts the wire to an explicit 2-point path, same conversion the
+# double-click insert has always done)
+
+
+def test_auto_routed_wire_shows_two_endpoint_handles_in_edit_mode(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+    assert wire.edge.points == []          # sanity: auto-routed
+    assert len(wire._handles) == 2
+    assert wire._handles[0].pos() == wire.pts[0]
+    assert wire._handles[1].pos() == wire.pts[-1]
+
+
+def test_dragging_an_auto_wire_endpoint_converts_to_explicit_path(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+    handle = wire._handles[0]
+    start = wire.pts[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=start))
+    handle.mouseMoveEvent(_FakeEvent(
+        scene_pos=QPointF(start.x(), start.y() - 30)))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert len(wire.edge.points) == 2      # converted, endpoint moved
+    # release grid-snaps, and the auto route's endpoints are float
+    # side-midpoints - assert within one grid step of the drag target
+    assert abs(wire.edge.points[0][1] - (start.y() - 30)) <= 5
+    assert abs(wire.edge.points[0][0] - start.x()) <= 5
+    assert wire.edge.points[1] == (int(wire.pts[1].x()),
+                                   int(wire.pts[1].y()))
+
+
+def test_click_only_press_on_auto_wire_endpoint_stays_auto_routed(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+    handle = wire._handles[0]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=wire.pts[0]))
+    handle.mouseReleaseEvent(_FakeEvent())
+
+    assert wire.edge.points == []          # no silent pin-down
+
+
+def test_auto_wire_endpoint_handles_follow_a_block_drag(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+
+    _drag_block(win.blocks["dma2"], 400, 320)   # commit re-routes
+
+    assert wire.edge.points == []          # still auto
+    assert wire._handles[0].pos() == wire.pts[0]
+    assert wire._handles[1].pos() == wire.pts[-1]
+
+
+def test_delete_on_auto_wire_endpoint_handle_is_a_noop(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "mux0" and w.edge.dst == "dma2")
+
+    for handle in wire._handles:
+        handle.keyPressEvent(_FakeKeyEvent(Qt.Key_Delete))
+
+    assert wire.edge.points == []
+    assert len(wire._handles) == 2

@@ -541,7 +541,17 @@ class MainWindow(QMainWindow):
         the items/topology objects", so the label must keep showing
         after a toggle-off/tab-switch exit until an explicit Save or
         Revert. Only editability, the dashed viewport cue and the
-        strip's visibility otherwise change."""
+        strip's visibility otherwise change.
+
+        M8 wave B fix round 1: toggle-off cancels any in-flight
+        gesture's VISUALS (_cancel_gesture_visuals) BEFORE the
+        set_editable(False) loop below runs - items lose their
+        gesture-tracking state (WireItem._clear_handles destroys any
+        mid-drag WaypointHandle) as part of that loop, so the sweep
+        must see the pre-loop world, not react to it having already
+        happened."""
+        if not on:
+            self._cancel_gesture_visuals()
         self.diagram_state.edit_mode = on
         for item in self.blocks.values():
             item.set_editable(on)
@@ -553,7 +563,6 @@ class MainWindow(QMainWindow):
         if not on:
             self._undo_stack = []
             self._layout_world = self._capture_layout_world()
-            self._clear_alignment_guides()   # M8 wave B4b: mode exit
 
     def _capture_layout_world(self) -> Dict[str, Any]:
         return {
@@ -585,6 +594,10 @@ class MainWindow(QMainWindow):
         # M8 wave 2: this bypassed the live-drag path entirely - any
         # in-progress live-move tracking baseline is now meaningless.
         self._live_move_tracking = None
+        # M8 wave B fix round 1: undo (this method's only call site)
+        # can land mid-gesture - cancel any in-flight gesture visual
+        # the popped snapshot did not itself already account for.
+        self._cancel_gesture_visuals()
 
     def _on_layout_geometry_changed(self) -> None:
         """Wired to diagram_state.on_geometry_changed - fires once per
@@ -623,7 +636,14 @@ class MainWindow(QMainWindow):
         # is stale from here on (the NEXT drag on that block starts a
         # fresh gesture with its own baseline).
         self._live_move_tracking = None
-        self._clear_alignment_guides()   # M8 wave B4b: commit clears them
+        # M8 wave B fix round 1: a normal commit already had its own
+        # item-level release handler clear magnet-highlight/readout,
+        # so this is a redundant (idempotent, cheap) pass in the
+        # common case - but routing every gesture-terminating path
+        # through the SAME _cancel_gesture_visuals, rather than only
+        # calling _clear_alignment_guides here and the fuller sweep
+        # elsewhere, is the one-unified-path the review asked for.
+        self._cancel_gesture_visuals()
 
     def _on_block_live_moved(self, block_id: str) -> None:
         """Wired to diagram_state.on_block_live_moved - fires on EVERY
@@ -714,6 +734,32 @@ class MainWindow(QMainWindow):
     def _clear_alignment_guides(self) -> None:
         self._guide_v.setVisible(False)
         self._guide_h.setVisible(False)
+
+    def _cancel_gesture_visuals(self) -> None:
+        """M8 wave B fix round 1 (findings 1-3, one design gap): a
+        single, unified sweep of every in-flight-gesture VISUAL that
+        has no other guaranteed terminator - alignment guides (B4),
+        any block's magnet-highlight outline (B2), and the status-bar
+        live readout (B3) - all three are driven by mouse-move events
+        that a real drag's own mouseReleaseEvent normally clears, but
+        nothing FORCES a release to ever happen: edit-mode toggle-off,
+        undo, revert, and auto-layout can all land mid-gesture (the
+        user releases the mouse only after, if at all) and none of
+        those four previously reset this trio. Call this from all four
+        BEFORE the state it would otherwise be reacting to changes
+        (toggle-off: before items lose editability, so this method's
+        own reads/writes see the same item states a live gesture would
+        have). Magnet highlight is swept unconditionally across every
+        block (set_magnet_highlight(False) is idempotent/cheap) rather
+        than tracked centrally - WireItem._clear_handles independently
+        clears its own tracked target too (finding 2), so the two
+        never depend on each other; this is a second, complete
+        backstop, not a partial one relying on that item-level fix
+        having already run first."""
+        self._clear_alignment_guides()
+        for item in self.blocks.values():
+            item.set_magnet_highlight(False)
+        self._on_live_status("")
 
     def _on_live_status(self, msg: str) -> None:
         """Wired to diagram_state.on_live_status (M8 wave B3): a block
@@ -825,6 +871,8 @@ class MainWindow(QMainWindow):
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
         self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
+        # M8 wave B fix round 1: Revert can land mid-gesture too.
+        self._cancel_gesture_visuals()
 
     def _on_auto_layout(self) -> None:
         """auto_layout() only returns (x, y) - width/height are kept as
@@ -865,6 +913,8 @@ class MainWindow(QMainWindow):
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
         self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
+        # M8 wave B fix round 1: Auto-layout can land mid-gesture too.
+        self._cancel_gesture_visuals()
 
     # -- actions ---------------------------------------------------------
 

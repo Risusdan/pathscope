@@ -22,7 +22,8 @@ from PySide6.QtWidgets import QApplication, QGraphicsItem
 
 from core.target.topology import Block, Edge
 
-from ..style import COL_ACTIVE, COL_ANOM, COL_GREY, COL_WARN, MONO
+from ..style import (COL_ACTIVE, COL_ANOM, COL_EDIT_SELECT, COL_GREY,
+                    COL_WARN, MONO)
 
 # ---------------------------------------------------------------------------
 # Visual constants - copied verbatim from prototype/ui_proto.py
@@ -353,6 +354,14 @@ class BlockItem(QGraphicsItem):
             # selected_/in_flow pens, which are only meaningful outside
             # edit mode anyway.
             p.setPen(QPen(COL_ACTIVE, 3.2))
+        elif self.state.edit_mode and self.isSelected():
+            # M8 wave B fix round 1 (finding 4): visible selection
+            # indicator - without it, a block selected for the arrow-
+            # key nudge (B1) gave no visual sign anything was
+            # selected, so the nudge feature itself was undiscoverable.
+            # Distinct COL_EDIT_SELECT (teal), not COL_ACTIVE/COL_SELECT
+            # - see that constant's comment in style.py for why.
+            p.setPen(QPen(COL_EDIT_SELECT, 2.2))
         elif selected_:
             p.setPen(QPen(COL_ACTIVE, 2.6))
         elif in_flow:
@@ -443,7 +452,15 @@ class BlockItem(QGraphicsItem):
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
             self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
-            self.state.on_live_status("")   # M8 wave B3: clear on release
+        # M8 wave B fix round 1 (finding 3): NOT gated on self._editable
+        # (unlike the block above) - a mode-exit mid-drag flips
+        # _editable to False before this release ever fires (real
+        # gesture-visual cleanup now happens synchronously at toggle-
+        # off time, via MainWindow._cancel_gesture_visuals), so a
+        # release that arrives afterward must still be able to clear
+        # a readout, not silently skip it because the gate above no
+        # longer holds.
+        self.state.on_live_status("")
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
@@ -748,7 +765,21 @@ class WireItem(QGraphicsItem):
         return (self.edge.src, self.edge.dst, self.edge.label or "")
 
     def _clear_handles(self) -> None:
+        """Destroys every WaypointHandle - called by set_editable(False)
+        (mode exit) and by _rebuild_handles (points-list changes). M8
+        wave B fix round 1 (finding 2): a handle mid-drag when this
+        runs (mode exit mid-drag, the exact path the review
+        reproduced) dies WITHOUT ever reaching its own
+        mouseReleaseEvent - clear any magnet highlight it left on its
+        target block here, at the source, so destroying the handle can
+        never leave a block stuck highlighted with nothing left to
+        clear it. (MainWindow._cancel_gesture_visuals sweeps every
+        block's highlight too, as a second, independent backstop - the
+        two do not depend on each other.)"""
         for h in self._handles:
+            if h._magnet_target is not None:
+                h._magnet_target.set_magnet_highlight(False)
+                h._magnet_target = None
             h.setParentItem(None)
             sc = h.scene()
             if sc is not None:
@@ -1379,7 +1410,11 @@ class LegendItem(QGraphicsItem):
             if new_xy != self._geom_at_press:
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
-            self.state.on_live_status("")   # M8 wave B3: clear on release
+        # M8 wave B fix round 1 (finding 3, applied here too for the
+        # same reason - not itself named in the review, but the
+        # identical bug): NOT gated on self._editable - see
+        # BlockItem.mouseReleaseEvent's matching comment.
+        self.state.on_live_status("")
         ev.accept()
 
     def boundingRect(self):
@@ -1388,7 +1423,12 @@ class LegendItem(QGraphicsItem):
     def paint(self, p, opt, widget=None):
         p.setRenderHint(QPainter.Antialiasing)
         p.setBrush(QBrush(QColor(255, 255, 255, 235)))
-        p.setPen(QPen(QColor("#888888"), 1))
+        if self.state.edit_mode and self.isSelected():
+            # M8 wave B fix round 1 (finding 4): see BlockItem.paint's
+            # matching comment.
+            p.setPen(QPen(COL_EDIT_SELECT, 2.2))
+        else:
+            p.setPen(QPen(QColor("#888888"), 1))
         p.drawRect(self.boundingRect())
         f = QFont(FONT_PORT)
         f.setBold(True)

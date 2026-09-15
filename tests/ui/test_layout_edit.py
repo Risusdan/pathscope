@@ -1944,3 +1944,185 @@ def test_alignment_guide_clears_on_mode_exit(qtbot):
 
     assert win._guide_v.isVisible() is False
     assert win._guide_h.isVisible() is False
+
+
+# -- M8 wave B fix round 1: unified gesture-visual cancellation ------------
+#
+# The review's core finding: alignment guides, magnet highlight, and
+# the status-bar readout are all driven by mouse-MOVE events, which a
+# normal mouseReleaseEvent clears - but nothing forces a release to
+# ever happen. Every test here drives a gesture HALFWAY (press + move,
+# deliberately no release) and then triggers a terminator that is NOT
+# a release, asserting the visual state comes back clean anyway.
+
+
+def test_mode_exit_mid_block_drag_clears_readout(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 10, item.pos().y())
+    assert win.statusBar().currentMessage() != ""
+
+    win.edit_layout_btn.setChecked(False)   # terminator: mode exit, no release
+
+    assert win.statusBar().currentMessage() == ""
+
+
+def test_mode_exit_mid_waypoint_drag_clears_magnet_highlight(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    wire = next(w for w in win.wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    handle = wire._handles[0]   # src anchor -> adc1
+    adc1 = win.blocks["adc1"]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))  # in range
+    assert adc1._magnet_highlighted is True
+
+    win.edit_layout_btn.setChecked(False)   # terminator: mode exit, no release
+
+    assert adc1._magnet_highlighted is False
+
+
+def test_wire_clear_handles_clears_magnet_highlight_even_without_release(
+        qtbot):
+    # Item-level half of the same fix (finding 2), tested directly
+    # against WireItem rather than through MainWindow's toggle.
+    _, state, scene, blocks, wires = _build(qtbot)
+    for wire in wires.values():
+        wire.refresh_auto_route(blocks)
+    wire = next(w for w in wires.values()
+               if w.edge.src == "adc1" and w.edge.dst == "mux0")
+    wire.set_editable(True)
+    handle = wire._handles[0]
+    adc1 = blocks["adc1"]
+
+    handle.mousePressEvent(_FakeEvent(scene_pos=QPointF(210, 320)))
+    handle.mouseMoveEvent(_FakeEvent(scene_pos=QPointF(205, 320)))
+    assert adc1._magnet_highlighted is True
+
+    wire.set_editable(False)   # destroys the handle mid-drag, no release
+
+    assert adc1._magnet_highlighted is False
+
+
+def test_undo_mid_drag_clears_alignment_guides(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    dma2 = win.blocks["dma2"]
+    other = win.blocks["mux0"]
+    dma2.apply_geometry(500, 500, 160, 100)
+    other.apply_geometry(200, 900, 45, 90)
+
+    # a completed gesture first, so the undo stack has something to pop.
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(other.pos().x() + 20, other.pos().y())
+    other.mouseReleaseEvent(_FakeEvent())
+    assert win._undo_stack
+
+    # a SECOND drag, mid-gesture (no release), that raises a guide.
+    other.mousePressEvent(_FakeEvent())
+    other.setPos(497, 900)
+    assert win._guide_v.isVisible() is True
+
+    win._on_layout_undo()   # terminator: undo, no release
+
+    assert win._guide_v.isVisible() is False
+    assert win._guide_h.isVisible() is False
+
+
+def test_revert_mid_drag_cancels_gesture_visuals(qtbot, tmp_path):
+    tdir = tmp_path / "f411"
+    shutil.copytree("targets/f411", tdir)
+    engine, win = _build_window(qtbot, str(tdir))
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 10, item.pos().y())
+    assert win.statusBar().currentMessage() != ""
+
+    win._on_revert_layout()   # terminator: revert, no release
+
+    assert win.statusBar().currentMessage() == ""
+
+
+def test_auto_layout_mid_drag_cancels_gesture_visuals(qtbot):
+    engine, win = _build_window(qtbot)
+    win.edit_layout_btn.setChecked(True)
+    item = win.blocks["adc1"]
+
+    item.mousePressEvent(_FakeEvent())
+    item.setPos(item.pos().x() + 10, item.pos().y())
+    assert win.statusBar().currentMessage() != ""
+
+    win._on_auto_layout()   # terminator: auto-layout, no release
+
+    assert win.statusBar().currentMessage() == ""
+
+
+# -- M8 wave B fix round 1 (finding 4): edit-mode selection indicator ------
+
+
+def _paint_block(item):
+    """Same offscreen-render precedent as _paint_wire, above - proves
+    the new selection-indicator branch does not crash, not just that
+    the flags it reads are set correctly."""
+    img = QImage(300, 300, QImage.Format_ARGB32)
+    painter = QPainter(img)
+    try:
+        item.paint(painter, None)
+    finally:
+        painter.end()
+
+
+def test_block_click_in_edit_mode_sets_the_selection_indicator_condition(
+        qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    item.set_editable(True)
+    state.edit_mode = True
+
+    item.mousePressEvent(_FakeEvent())
+
+    assert item.isSelected() is True
+    assert state.edit_mode is True   # exactly paint()'s branch condition
+    _paint_block(item)   # renders without crashing
+
+
+def test_block_selection_indicator_condition_false_outside_edit_mode(qtbot):
+    _, state, scene, blocks, wires = _build(qtbot)
+    item = blocks["adc1"]
+    state.edit_mode = False
+
+    _paint_block(item)   # never selected, never edit_mode - renders fine
+
+    assert item.isSelected() is False
+    assert state.edit_mode is False
+
+
+def test_legend_click_in_edit_mode_sets_the_selection_indicator_condition():
+    state = DiagramState()
+    legend = LegendItem(state)
+    legend.set_editable(True)
+    state.edit_mode = True
+
+    legend.mousePressEvent(_FakeEvent())
+
+    assert legend.isSelected() is True
+    assert state.edit_mode is True
+    _paint_block(legend)   # renders without crashing
+
+
+def test_legend_selection_indicator_condition_false_outside_edit_mode():
+    state = DiagramState()
+    legend = LegendItem(state)
+    state.edit_mode = False
+
+    _paint_block(legend)
+
+    assert legend.isSelected() is False
+    assert state.edit_mode is False

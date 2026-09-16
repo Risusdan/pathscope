@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""UI/UX prototype for Data Path Explorer. THROWAWAY - stub data only.
+"""HISTORICAL PROTOTYPE - not part of the application.
+
+This is the original approved UI/UX prototype (stub data only) that
+the real app under ui/ was ported from. It is kept because code
+comments across ui/ cite it as provenance; it receives no maintenance
+and may no longer run. Nothing imports it.
 
 Run:            python prototype/ui_proto.py
 Self-check:     python prototype/ui_proto.py --shot out.png   (offscreen render)

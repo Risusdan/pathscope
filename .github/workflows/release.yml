@@ -9,10 +9,27 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches pyproject.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PY_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml | head -1)"
+          if [ -z "$PY_VERSION" ]; then
+            echo 'error: could not find a version = "..." line in pyproject.toml' >&2
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$PY_VERSION" ]; then
+            echo "error: tag 'v$TAG_VERSION' does not match pyproject.toml version '$PY_VERSION'" >&2
+            exit 1
+          fi
+
+  build-windows:
+    needs: check-version
     runs-on: windows-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,27 +43,69 @@ jobs:
         # packaging/build.ps1 assumes .venv already exists and installs
         # the ui+build extras into it itself.
 
-      - name: Check tag matches pyproject.toml version
-        run: |
-          $TagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          $VersionLine = Select-String -Path pyproject.toml -Pattern 'version = "([^"]+)"' | Select-Object -First 1
-          if (-not $VersionLine) {
-              Write-Error "error: could not find a version = ""..."" line in pyproject.toml"
-              exit 1
-          }
-          $PyVersion = $VersionLine.Matches[0].Groups[1].Value
-          if ($TagVersion -ne $PyVersion) {
-              Write-Error "error: tag 'v$TagVersion' does not match pyproject.toml version '$PyVersion'"
-              exit 1
-          }
-        shell: pwsh
-
       - name: Build release package
         run: packaging/build.ps1
         shell: pwsh
 
-      - name: Publish GitHub release
-        # pwsh does not glob-expand args to native commands, so dist/*.zip
-        # must be expanded ourselves before gh sees it.
-        run: gh release create "$env:GITHUB_REF_NAME" (Get-ChildItem dist\*.zip).FullName --generate-notes
+      - name: Smoke-test the built bundle
+        # pyOCD's plugin/dist-info packaging failures are runtime-only
+        # (see packaging/README.md), so an unsmoked bundle is exactly
+        # the artifact most likely to be silently broken. --shot runs
+        # the full UI offscreen against the demo engine and exits 0
+        # only after a frame actually rendered.
+        run: |
+          dist\pathscope\pathscope.exe --demo --shot smoke.png
+          if (-not (Test-Path smoke.png)) {
+              Write-Error "smoke test produced no frame"
+              exit 1
+          }
         shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zip-windows
+          path: dist/*.zip
+          if-no-files-found: error
+
+  build-macos:
+    needs: check-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Create virtual environment
+        run: python -m venv .venv
+
+      - name: Build release package
+        run: bash packaging/build.sh
+
+      - name: Smoke-test the built bundle
+        run: |
+          dist/pathscope/pathscope --demo --shot smoke.png
+          test -f smoke.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zip-macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip --generate-notes

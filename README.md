@@ -112,6 +112,10 @@ Point `--target-dir` at the new folder and run.
 
 ## Hardware validation
 
+Development ran as a series of milestone gates (M1, M2, ...), each
+closed by measurements on real hardware; this section is that record,
+kept verbatim as the evidence behind the feature claims above.
+
 Blackpill (STM32F411CE), clone ST-Link v2, macOS, pyOCD 0.45.1.
 
 - M1 poll rate: avg 38.0 Hz, min 37.3 Hz over 572 snapshots (threshold

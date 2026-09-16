@@ -10,6 +10,17 @@ from core.adapter.pyocd_swd import PyOCDAdapter
 from core.engine.core import Engine
 
 
+def _version() -> str:
+    """Installed distribution version, for --version and bug reports.
+    Falls back to "unknown" where no dist metadata is reachable (e.g.
+    a frozen bundle that did not collect the dist-info)."""
+    try:
+        from importlib.metadata import version
+        return version("pathscope")
+    except Exception:
+        return "unknown"
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     a = PyOCDAdapter(target=args.target)
     info = a.connect()
@@ -119,6 +130,8 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pathscope")
+    p.add_argument("--version", action="version",
+                   version="pathscope %s" % _version())
     p.add_argument("--target", default="stm32f411ce")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("probe", help="connect and print target identity")

@@ -119,3 +119,13 @@ def test_bench_read_prints_ceiling_math(monkeypatch, capsys):
     bytes_per_second = total_bytes / 1.25
     assert throughput == round(bytes_per_second / 1024.0, 1)
     assert ceiling == int(bytes_per_second / 48)
+
+
+def test_version_flag_prints_and_exits(capsys):
+    import pytest as _pytest
+    with _pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("pathscope ")
+    assert out.strip() != "pathscope unknown"

@@ -53,8 +53,21 @@ Blackpill over a clone ST-Link.
 
 ## Quick start
 
+macOS / Linux:
+
     python3 -m venv .venv
     .venv/bin/pip install -e ".[ui,dev]"
+
+Windows (PowerShell):
+
+    py -m venv .venv
+    .venv\Scripts\pip install -e ".[ui,dev]"
+
+Python 3.9+ is required. On Linux, PySide6 additionally needs the
+Qt xcb/EGL system libraries - the Debian/Ubuntu package list lives
+in `.github/workflows/ci.yml`. The commands below use the
+macOS/Linux `.venv/bin/` prefix; on Windows substitute
+`.venv\Scripts\`.
 
 No hardware needed:
 

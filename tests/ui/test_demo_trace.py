@@ -36,3 +36,20 @@ def _refresh_after(reader: TraceReader, seconds: float):
     recs = reader.refresh()
     assert len(recs) > 0
     return recs
+
+
+def test_engine_stop_ends_the_animate_thread():
+    """A demo engine's animate thread must die with engine.stop().
+    One leaked while-True thread per demo engine ever created
+    accumulated across a test run until a garbage-collection pass
+    inside one of them hard-aborted the interpreter (CI: 'Fatal
+    Python error: Aborted' with dozens of demo.py animate frames in
+    the dump)."""
+    import threading
+    before = {th.ident for th in threading.enumerate()}
+    engine = make_demo_engine("targets/f411")
+    engine.start()
+    engine.stop()
+    leaked = [th.name for th in threading.enumerate()
+              if th.ident not in before and th.is_alive()]
+    assert leaked == []

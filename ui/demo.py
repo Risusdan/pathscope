@@ -34,9 +34,11 @@ def make_demo_engine(target_dir: str = "targets/f411") -> Engine:
     engine.trace_desc_addr = fw.desc_addr
     engine._demo_trace_fw = fw
 
+    stop = threading.Event()
+
     def animate():
         t0 = time.monotonic()
-        while True:
+        while not stop.is_set():
             elapsed = time.monotonic() - t0
             phase = elapsed % 12.0
             if phase < 9.0:                       # normal streaming
@@ -57,7 +59,25 @@ def make_demo_engine(target_dir: str = "targets/f411") -> Engine:
             adapter.set_word(ADC_SAMPLE, sample & 0xFFFF)
 
             fw.step(TRACE_STEPS_PER_TICK)
-            time.sleep(0.05)
+            stop.wait(0.05)
 
-    threading.Thread(target=animate, daemon=True).start()
+    thread = threading.Thread(target=animate, daemon=True)
+    thread.start()
+
+    # engine.stop() also shuts the animate thread down. A demo engine
+    # whose animate thread outlives it keeps touching the dropped
+    # adapter/firmware objects forever; with one leaked thread per
+    # demo engine ever created in a process (e.g. a test suite), a
+    # garbage-collection pass running inside one of them can abort
+    # the whole interpreter (observed on CI as a hard
+    # "Fatal Python error: Aborted" with dozens of animate threads in
+    # the dump, under PySide6 6.11 / Python 3.12).
+    poller_stop = engine.stop
+
+    def stop_all() -> None:
+        stop.set()
+        thread.join(timeout=1.0)
+        poller_stop()
+
+    engine.stop = stop_all
     return engine

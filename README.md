@@ -53,7 +53,16 @@ Blackpill over a clone ST-Link.
 
 ## Quick start
 
-macOS / Linux:
+Every dependency - PySide6 included - installs from this repo's
+`pyproject.toml`; nothing needs a separate install step. Python 3.9+.
+
+With [uv](https://docs.astral.sh/uv/) (fast, same commands on every
+OS):
+
+    uv venv
+    uv pip install -e ".[ui,dev]"
+
+Or with the standard venv + pip - macOS / Linux:
 
     python3 -m venv .venv
     .venv/bin/pip install -e ".[ui,dev]"
@@ -63,11 +72,18 @@ Windows (PowerShell):
     py -m venv .venv
     .venv\Scripts\pip install -e ".[ui,dev]"
 
-Python 3.9+ is required. On Linux, PySide6 additionally needs the
-Qt xcb/EGL system libraries - the Debian/Ubuntu package list lives
-in `.github/workflows/ci.yml`. The commands below use the
-macOS/Linux `.venv/bin/` prefix; on Windows substitute
-`.venv\Scripts\`.
+What gets installed:
+
+- always: `pyocd` (SWD probe access), `PyYAML` (target files)
+- `[ui]` extra: `PySide6` (Qt widgets), `pyqtgraph` (scope plotting),
+  `pyelftools` (ELF symbol lookup)
+- `[dev]` extra: `pytest`, `pytest-qt`
+
+A headless CLI-only install (probe/monitor, no GUI) is plain
+`pip install -e .`. On Linux, PySide6 additionally needs the Qt
+xcb/EGL system libraries - the Debian/Ubuntu package list lives in
+`.github/workflows/ci.yml`. The commands below use the macOS/Linux
+`.venv/bin/` prefix; on Windows substitute `.venv\Scripts\`.
 
 No hardware needed:
 

@@ -1,0 +1,13 @@
+# CI pin for the Qt UI stack - the exact versions the project is
+# developed and hardware-validated against locally. CI exists to
+# catch OUR regressions deterministically; unpinned installs pulled
+# PySide6 6.11.x, whose offscreen paint path crashes the interpreter
+# intermittently (access violation inside pyqtgraph's
+# GraphicsView.paintEvent on Windows, GC-time aborts on Linux) and
+# turned CI into a coin flip. Bump these deliberately, with a local
+# full-suite run on the new versions first.
+PySide6==6.10.3
+PySide6_Essentials==6.10.3
+PySide6_Addons==6.10.3
+shiboken6==6.10.3
+pyqtgraph==0.13.7

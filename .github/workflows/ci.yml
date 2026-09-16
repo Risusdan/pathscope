@@ -42,7 +42,9 @@ jobs:
         # load on a bare Ubuntu runner without them installed.
 
       - name: Install package (ui + dev extras)
-        run: python -m pip install -e ".[ui,dev]"
+        # ci-constraints.txt pins the Qt stack to the locally
+        # validated versions - see that file for why.
+        run: python -m pip install -c ci-constraints.txt -e ".[ui,dev]"
 
       - name: Run test suite
         run: pytest -q

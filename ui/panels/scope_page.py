@@ -1559,8 +1559,15 @@ class ScopePage(QWidget):
         edit.setText(_fmt_num(value))
 
     def _flash_invalid(self, edit: QLineEdit) -> None:
+        # The 3-arg singleShot form makes `edit` the receiver context:
+        # if the widget is destroyed before the flash window elapses
+        # (page teardown, slot re-render), the callback is dropped
+        # instead of firing into a deleted C++ object - a parentless
+        # singleShot here outlived the widget and crashed whatever
+        # event loop happened to be pumping ~400 ms later.
         edit.setStyleSheet(INVALID_EDIT_STYLE)
-        QTimer.singleShot(INVALID_EDIT_FLASH_MS, lambda: edit.setStyleSheet(""))
+        QTimer.singleShot(INVALID_EDIT_FLASH_MS, edit,
+                          lambda: edit.setStyleSheet(""))
 
     # -- Auto-lane -------------------------------------------------------------
 
@@ -1803,7 +1810,9 @@ class ScopePage(QWidget):
         _nearest_t, line = min(self._markers,
                                key=lambda entry: abs(entry[0] - t))
         line.setPen(pg.mkPen(color=MARKER_FLASH_PEN, width=3))
-        QTimer.singleShot(MARKER_FLASH_MS,
+        # `self` as receiver context (see _flash_invalid): a destroyed
+        # page drops the pending unflash instead of firing into it.
+        QTimer.singleShot(MARKER_FLASH_MS, self,
                           lambda: self._unflash_marker(line))
 
     def _unflash_marker(self, line: pg.InfiniteLine) -> None:

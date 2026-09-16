@@ -1662,3 +1662,29 @@ def test_spacebar_toggles_run_stop(qtbot):
 
     qtbot.keyClick(page, Qt.Key_Space)
     assert not page.is_stopped()
+
+
+def test_invalid_flash_timer_dies_with_the_widget(qtbot, monkeypatch):
+    """The invalid-entry flash schedules a delayed style restore; that
+    singleShot must carry the edit as its receiver context. A
+    parentless timer outlived page teardown and fired into a deleted
+    QLineEdit ~400 ms later, crashing whichever event loop happened
+    to be pumping (seen on CI as a libshiboken RuntimeError blamed on
+    an unrelated auto-lane test). Reaching the end of this test
+    without a Qt-event-loop exception IS the assertion - pytest-qt
+    fails the test on any exception the pumped loop catches."""
+    from ui.panels.scope_page import (COL_SCALE,
+                                      INVALID_EDIT_FLASH_MS)
+    page = _make_stubbed_trace_page(qtbot, monkeypatch)
+    slot = page.add_address_slot(0x20000000, "buf0")
+    entry = page.channel_slots()[slot]
+
+    entry["scale_edit"].setText("not-a-number")
+    entry["scale_edit"].returnPressed.emit()   # schedules the flash
+
+    # Destroy just the edit the same way the app would (a cell-widget
+    # replacement/removal deletes it), then pump past the flash
+    # window with the page itself still alive.
+    page.channel_table.removeCellWidget(slot, COL_SCALE)
+    qtbot.wait(50)                             # let the C++ side die
+    qtbot.wait(INVALID_EDIT_FLASH_MS + 150)    # cross the flash window

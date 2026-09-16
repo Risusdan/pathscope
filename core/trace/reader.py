@@ -1,5 +1,5 @@
 """TraceReader: drains firmware trace records and drives the
-watch-table gate protocol described in the design doc (section 3).
+watch-table gate protocol described in the M7 trace spec (section 3).
 
 All target access goes through Engine.read_words/write_word, so every
 transaction is serialized onto the poller thread like everything else
@@ -56,9 +56,9 @@ Engine command is a submit-and-block round trip through the poller
 thread, and on a real probe each one costs real fixed overhead (tens
 of ms) on top of whatever it actually transfers - the sim never
 exercises this shape (wr_seq is frozen for the whole call, since
-nothing but an explicit step() advances it), so it never caught that
-the original three-commands-per-call refresh() (pre-read desc, record
-range, post-read desc) made hardware fall permanently behind: a large
+nothing but an explicit step() advances it), so only hardware exposes
+that a three-commands-per-call refresh() (pre-read desc, record
+range, post-read desc) makes hardware fall permanently behind: a large
 enough backlog produces a large enough read that its OWN transfer time
 lets the ring wrap underneath it before the post-read even runs,
 margin-dropping the entire batch, every cycle, forever - self.lost
@@ -80,7 +80,8 @@ window every cycle instead of periodically attempting (and always
 losing) an entire ring's worth at once.
 
 Cutting round trips alone still leaves a real backlog free to grow
-arbitrarily large: RING_COUNT was also bumped 256 -> 1024 (see
+arbitrarily large: the ring itself is sized big (RING_COUNT=1024 -
+see
 contract.py) for headroom, but a caller slow enough (or silent for
 long enough) can still accumulate a backlog whose OWN read would take
 long enough to transfer that it eats meaningfully into even a bigger
@@ -100,9 +101,9 @@ draining caller (e.g. a UI's Stop path, which only runs the slow timer)
 will silently rebuild the exact backlog this module fixed on its own
 side - see ui/panels/scope_page.py's _drain_interval_ms, which reads
 this constant for exactly that reason (found through hardware
-validation: an earlier version of that derivation sized the drain
+validation: sizing the drain
 interval only against the ring's own span, not against this per-call
-read cap, which still let a >1kHz-at-256-cap Stop hold reopen
+read cap, still lets a >1kHz-at-256-cap Stop hold reopen
 self.lost growth once held long enough).
 
 Target reboot detection: wr_seq only ever increases while firmware
@@ -114,7 +115,7 @@ matters beyond correctness bookkeeping: the Blackpill reference target
 is powered by the debug probe's own USB connection, so a probe replug
 after a dropped connection IS a power cycle, not just a reconnect -
 firmware reboots, wr_seq/generation reset near 0, and the watch table
-goes back to empty. Unlike M6's stateless register polling, this
+goes back to empty. Unlike stateless register polling, this
 reader carries SESSION state (last_seq in the hundreds of thousands by
 the time this matters in practice, self._expected_gen, self._cached_desc)
 that all silently describes a target that no longer exists the instant
@@ -169,7 +170,7 @@ table (e.g. TraceStore's column compaction on a channel removal,
 ui/trace_store.py) - it would land in a column that used to mean what
 it did but no longer does, a real value under the wrong channel.
 
-Both are fixed the same way, at the reader: self._expected_gen is the
+Both are handled the same way, at the reader: self._expected_gen is the
 generation this reader currently trusts - set once at discover() (to
 whatever generation was already running) and again on every successful
 non-empty set_watch() (to the NEW, just-accepted generation; set_watch
@@ -437,8 +438,8 @@ class TraceReader:
         # Dwell at least one sample period after
         # closing the gate before writing the new addresses - ps_trace.h
         # documents this as a should, not a must (the firmware's
-        # level-based gate, see ps_trace.c, no longer depends on it for
-        # correctness), but it's still what keeps a mid-edit sample
+        # level-based gate, see ps_trace.c, does not depend on it for
+        # correctness), but it's what keeps a mid-edit sample
         # from ever observing a half-written address table.
         period_s = self.desc.period_us / 1e6
         time.sleep(max(2 * period_s, 0.002))
@@ -457,7 +458,7 @@ class TraceReader:
 
         if desc.generation == prev_gen:
             # Generation advancing is the only
-            # trustworthy accept signal (reliable now that
+            # trustworthy accept signal (reliable because
             # _compose_count_word's read-modify-write keeps a stray
             # write from ever clobbering it) - a status
             # observed WHILE still polling is not trusted, since

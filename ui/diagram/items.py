@@ -1,16 +1,14 @@
 """QGraphicsItems for the block diagram: BlockItem, WireItem, LegendItem.
 
-Ported from prototype/ui_proto.py's BlockItem/WireItem/LegendItem. Paint
-code (trapezoid mux body, rotated MUX caption, port labels, arrowheads,
-longest-segment label placement, dash animation, badge solid/outline
-states, two-column legend) is copied verbatim; the only structural
-changes are per task-8's porting instructions:
+Paint code covers the trapezoid mux body, rotated MUX caption, port
+labels, arrowheads, longest-segment label placement, dash animation,
+badge solid/outline states, and the two-column legend. Structural
+rules:
 
-  - every prototype `self.win` becomes `self.state` (a DiagramState,
-    see ui.diagram.scene) - items never touch the engine, only
-    DiagramState and the Block/Edge topology dataclasses.
-  - BlockItem/WireItem construct from Block/Edge dataclasses instead of
-    the prototype's stub dicts (`spec["x"]` -> `block.x`, etc).
+  - items never touch the engine - only `self.state` (a DiagramState,
+    see ui.diagram.scene) and the Block/Edge topology dataclasses.
+  - BlockItem/WireItem construct from Block/Edge dataclasses
+    (`block.x`, `block.y`, `edge.points`, ...).
   - badge lookups go through the sparse `state.badges` dict via .get().
 """
 from typing import Dict, List, Optional, Tuple
@@ -27,7 +25,7 @@ from ..style import (COL_ACTIVE, COL_ANOM, COL_EDIT_SELECT, COL_GREY,
                     COL_WARN, MONO)
 
 # ---------------------------------------------------------------------------
-# Visual constants - copied verbatim from prototype/ui_proto.py
+# Visual constants
 # ---------------------------------------------------------------------------
 
 KIND_TINT = {
@@ -63,8 +61,8 @@ def default_wh(kind: str):
 
 
 # ---------------------------------------------------------------------------
-# M8 layout edit mode (task 3): drag/resize snapping shared by BlockItem
-# and LegendItem.
+# Layout edit mode (see the M8 layout spec): drag/resize snapping
+# shared by BlockItem and LegendItem.
 # ---------------------------------------------------------------------------
 
 _GRID_STEP = 10
@@ -73,18 +71,17 @@ _HANDLE_SIZE = 8
 _MIN_BLOCK_W = 30
 _MIN_BLOCK_H = 24
 
-# M8 task 5 manual-gate fix (finding 2): grab/click affordance. A
-# WaypointHandle is bigger than the block resize handle (_HANDLE_SIZE
-# stays 8, unchanged - this is a separate constant on purpose) and a
-# wire's own clickable shape() widens in edit mode, since that is
-# where double-click-to-insert precision actually matters; normal-mode
-# click-to-select keeps the original width.
+# Grab/click affordance. A WaypointHandle is deliberately bigger than
+# the block resize handle (_HANDLE_SIZE, 8 - a separate constant on
+# purpose) and a wire's own clickable shape() widens in edit mode,
+# since that is where double-click-to-insert precision actually
+# matters; normal-mode click-to-select keeps the narrower width.
 _WAYPOINT_HANDLE_SIZE = 12
 _WIRE_HIT_WIDTH = 12
 _WIRE_HIT_WIDTH_EDIT = 20
 _HANDLE_HOVER_FILL = QColor("#FFE0B2")
-# Endpoint re-anchor (finding 2d, made unconditional in acceptance
-# round 8): releasing - or arrow-nudging - an ENDPOINT waypoint handle
+# Endpoint re-anchor (unconditional): releasing - or arrow-nudging -
+# an ENDPOINT waypoint handle
 # ALWAYS projects it onto its own block's nearest boundary point (then
 # grid-snaps). A dangling endpoint has no meaning in this tool (the
 # edge's structure lives in the yaml; an endpoint can never re-bind to
@@ -92,10 +89,10 @@ _HANDLE_HOVER_FILL = QColor("#FFE0B2")
 # choosing the attachment point on the block's edge. A block MOVE
 # glues an explicit path's endpoints to it automatically
 # (BlockItem.itemChange -> DiagramState.on_block_live_moved ->
-# WireItem.translate_endpoint, M8 wave 2) - re-anchor covers what glue
+# WireItem.translate_endpoint) - re-anchor covers what glue
 # does not: a block RESIZE and any manual drag of the endpoint itself.
 
-# M8 wave B1: arrow-key nudge. Shared by BlockItem/WaypointHandle/
+# Arrow-key nudge. Shared by BlockItem/WaypointHandle/
 # LegendItem's keyPressEvent - one grid step per press, one unit with
 # Shift, matching the drag-time grid/fine step sizes exactly. Reads
 # the SHIFT state off the key event's own modifiers() rather than
@@ -117,8 +114,8 @@ def _nudge_step(ev) -> int:
     return _FINE_STEP if fine else _GRID_STEP
 
 
-# M8 wave B4: dynamic alignment guides. 6px (scene units) - deliberately
-# tighter than the 20px endpoint magnet (finding 2d): a block-alignment
+# Dynamic alignment guides. 6px (scene units) - deliberately
+# tighter than the 20px endpoint magnet: a block-alignment
 # guide should only bite once the user is clearly lining edges up, not
 # every time two blocks happen to pass near each other while dragging.
 _ALIGN_THRESHOLD = 6
@@ -145,16 +142,16 @@ def _compute_alignment_snap(x: float, y: float, w: float, h: float,
     decision (BlockItem.itemChange) and, if a caller wants to
     recompute after the fact, guide rendering.
 
-    M8 wave B fix round 3 (structural bound, user-acceptance finding
-    1): the return value is clamped to within `threshold` of the
+    Structural bound: the return value is clamped to within
+    `threshold` of the
     INPUT (x, y) on each axis BY CONSTRUCTION (max/min below), not
     merely as a consequence of the best_x/best_y search only ever
     accepting candidates with abs(d) <= threshold. The search's own
-    gating already enforced this in practice, but the caller (an
+    gating already enforces this in practice, but the caller (an
     itemChange handler that only ever calls this once per proposed
-    position) has no independent way to verify the bound holds - a
-    future edit to the search loop that widened or dropped that gate
-    would silently regress this function back into an unbounded
+    position) has no independent way to verify the bound holds - an
+    edit to the search loop that widened or dropped that gate
+    would silently turn this function into an unbounded
     teleport. Clamping the OUTPUT here, unconditionally, makes the
     bound hold no matter what the search above does."""
     cx_lines = (x, x + w / 2.0, x + w)
@@ -196,8 +193,8 @@ def _fine_snap() -> bool:
 
 def _select_exclusively(item: QGraphicsItem) -> None:
     """Select ONLY `item`, clearing any other currently-selected item
-    first (M8 wave B fix round 4, user-acceptance finding: clicking
-    three items in a row left all three showing the selection
+    first (without the clearing, clicking
+    three items in a row leaves all three showing the selection
     outline). QGraphicsItem.setSelected(True) alone is ADDITIVE -
     normally a plain click's base-class mousePressEvent handling is
     what clears the scene's previous selection, but every edit-mode
@@ -221,10 +218,9 @@ def _run_base_mouse_handler(base_handler, ev) -> None:
     """Deliver `ev` to a QGraphicsItem BASE-CLASS mouse handler (pass
     the bound super() method), skipping non-Qt stand-in events.
 
-    M8 wave B fix round 6 (user-acceptance finding, round 3 - the
-    drag-teleport that survived rounds 1 AND 2): every edit-mode press/
-    release override below used to fully consume its event (ev.accept()
-    with no super() call). That starves Qt's own drag bookkeeping - in
+    An edit-mode press/release override that fully consumes its event
+    (ev.accept() with no super() call) starves Qt's own drag
+    bookkeeping - in
     particular QGraphicsScenePrivate::movingItemsInitialPositions, the
     map the default ItemIsMovable mouse-move handler computes every
     drag step from:
@@ -280,16 +276,16 @@ def _view_mapping_fingerprint(view) -> QPointF:
 
 
 class _GestureMappingGuard:
-    """M8 wave B fix round 5 (user-acceptance finding, round 2: the
-    round-1 fix - gating _apply_zoom while a gesture is in flight -
-    was NOT the whole story. A window/dock resize mid-drag reproduces
-    the identical "teleport" with NO zoom call anywhere involved:
+    """Detects a mid-gesture shift of the view's widget-to-scene
+    mapping. Gating _apply_zoom while a gesture is in flight is NOT
+    sufficient on its own: a window/dock resize mid-drag reproduces
+    the identical "teleport" with NO zoom call anywhere involved -
     resizing the view's VIEWPORT shifts its scrollbar range/position
     even with the transform's scale left untouched, which is enough by
     itself to corrupt Qt's default ItemIsMovable drag tracking the
     same way a scale change does - see BlockItem.itemChange's matching
-    comment for the mechanism. Rather than keep chasing individual
-    triggers (zoom today, resize now, something else next), this
+    comment for the mechanism. Rather than chase individual
+    triggers (zoom, resize, whatever comes next), this
     detects the SYMPTOM directly and generically: has the view's
     widget-to-scene mapping - _view_mapping_fingerprint - moved since
     this gesture started, for ANY reason at all.
@@ -311,8 +307,8 @@ class _GestureMappingGuard:
     mid-gesture by Qt itself, so once the two mappings disagree they
     stay disagreeing, by roughly the same margin, for every subsequent
     step of this same drag. Resyncing the baseline and trusting the
-    very next step (an earlier version of this class did that) still
-    let the next step apply a similarly-corrupted value. The item
+    very next step would still
+    let that step apply a similarly-corrupted value. The item
     simply stays frozen at wherever it was when the drift was first
     caught until mouseReleaseEvent ends this gesture; the next press
     starts a fresh, uncorrupted one."""
@@ -364,12 +360,12 @@ class BlockItem(QGraphicsItem):
         self.handle = _ResizeHandle(self)
         self.handle.setVisible(False)
         self._position_handle()
-        # M8 wave B2: set by a WaypointHandle dragging an endpoint
+        # Set by a WaypointHandle dragging an endpoint
         # toward THIS block, while within the endpoint magnet's range
         # (see WaypointHandle._update_magnet_highlight) - paint() reads
         # it to brighten the outline as a "drop here to connect" cue.
         self._magnet_highlighted = False
-        # M8 wave B4 (dynamic alignment guides): (guide_x, guide_y) as
+        # Dynamic alignment guides: (guide_x, guide_y) as
         # of the LAST itemChange position-snap decision - None on an
         # axis with no active alignment. MainWindow reads this after
         # on_block_live_moved fires to draw/hide the reference lines;
@@ -377,7 +373,7 @@ class BlockItem(QGraphicsItem):
         # drag bypasses alignment snapping entirely.
         self._active_guides: Tuple[Optional[float], Optional[float]] = (
             None, None)
-        # M8 wave B fix round 5: see _GestureMappingGuard's docstring.
+        # See _GestureMappingGuard's docstring.
         self._gesture_mapping = _GestureMappingGuard()
 
     def _position_handle(self) -> None:
@@ -393,14 +389,14 @@ class BlockItem(QGraphicsItem):
         self._editable = bool(on)
         self.setFlag(QGraphicsItem.ItemIsMovable, on)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
-        # M8 wave B1 (arrow-key nudge): selectable/focusable only while
-        # editing - matches WaypointHandle, which has carried both
-        # unconditionally since T4's Delete flow (a handle only exists
-        # at all while editable, so it never needed the on/off dance).
+        # Arrow-key nudge support: selectable/focusable only while
+        # editing - matches WaypointHandle, which carries both
+        # unconditionally (a handle only exists
+        # at all while editable, so it never needs the on/off dance).
         self.setFlag(QGraphicsItem.ItemIsSelectable, on)
         self.setFlag(QGraphicsItem.ItemIsFocusable, on)
         self.handle.setVisible(on)
-        # finding 2c: an open-hand cursor signals "draggable" while
+        # An open-hand cursor signals "draggable" while
         # editing; cleared (falls back to whatever the view/cursor
         # stack underneath shows) the moment edit mode exits.
         if on:
@@ -422,7 +418,7 @@ class BlockItem(QGraphicsItem):
         never itself an alignment-snap decision, so a guide line left
         over from an earlier real drag would otherwise render stale.
 
-        sync_press=False (M8 wave B fix: nudge glue) skips resyncing
+        sync_press=False skips resyncing
         _geom_at_press to the new position - used ONLY by
         keyPressEvent's arrow-key nudge, which needs _geom_at_press to
         keep reading the PRE-nudge position for one more call
@@ -450,8 +446,7 @@ class BlockItem(QGraphicsItem):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.ItemPositionChange and self._editable
                 and not self._applying):
-            # M8 wave B fix round 5 (structural + root cause, user-
-            # acceptance finding round 2): if the view's widget-to-
+            # If the view's widget-to-
             # scene mapping shifted since this gesture started (a
             # zoom, a window/dock resize, anything) `value` reflects
             # that shift, not real mouse movement, and can be
@@ -466,7 +461,7 @@ class BlockItem(QGraphicsItem):
                 return self.pos()
             fine = _fine_snap()
             if fine:
-                # M8 wave B4: Shift disables alignment snapping
+                # Shift disables alignment snapping
                 # entirely, along with grid snapping falling back to
                 # its existing 1-unit fine step - the user is asking
                 # for unassisted, precise placement.
@@ -494,7 +489,7 @@ class BlockItem(QGraphicsItem):
             return QPointF(fx, fy)
         if (change == QGraphicsItem.ItemPositionHasChanged
                 and self._editable and not self._applying):
-            # M8 wave 2 (Visio-style connector glue): fires on every
+            # Visio-style connector glue: fires on every
             # snapped step of a live drag (ItemSendsGeometryChanges is
             # only on while editable, so this never fires outside a
             # drag; _applying excludes apply_geometry's own
@@ -503,11 +498,11 @@ class BlockItem(QGraphicsItem):
             # this live-drag path). MainWindow filters to the wires
             # actually attached to this block.
             self.state.on_block_live_moved(self.block.id)
-            self._emit_live_status()   # M8 wave B3
+            self._emit_live_status()   # live coordinate readout
         return super().itemChange(change, value)
 
     def _emit_live_status(self) -> None:
-        """M8 wave B3 (live coordinate readout): "id: x, y (w x h)" -
+        """Live coordinate readout: "id: x, y (w x h)" -
         the same format whether a position drag or a resize is what is
         actually changing (see _ResizeHandle.mouseMoveEvent's matching
         call), since both read the block's current, full geometry."""
@@ -537,17 +532,17 @@ class BlockItem(QGraphicsItem):
         selected_ = self.block.id == self.state.selected_block
         in_flow = self.block.id in self.state.flow_blocks
         if self._magnet_highlighted:
-            # M8 wave B2: "drop here to connect" cue while a
+            # "Drop here to connect" cue while a
             # WaypointHandle endpoint drag is within magnet range of
             # this block - takes priority over the live-inspection
             # selected_/in_flow pens, which are only meaningful outside
             # edit mode anyway.
             p.setPen(QPen(COL_ACTIVE, 3.2))
         elif self.state.edit_mode and self.isSelected():
-            # M8 wave B fix round 1 (finding 4): visible selection
+            # Visible selection
             # indicator - without it, a block selected for the arrow-
-            # key nudge (B1) gave no visual sign anything was
-            # selected, so the nudge feature itself was undiscoverable.
+            # key nudge gives no visual sign anything is
+            # selected, and the nudge feature itself is undiscoverable.
             # Distinct COL_EDIT_SELECT (teal), not COL_ACTIVE/COL_SELECT
             # - see that constant's comment in style.py for why.
             p.setPen(QPen(COL_EDIT_SELECT, 2.2))
@@ -616,19 +611,18 @@ class BlockItem(QGraphicsItem):
         if self._editable:
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
-            self.setCursor(Qt.ClosedHandCursor)   # finding 2c
-            # M8 wave B1: click-to-select/focus, mirroring WaypointHandle's
+            self.setCursor(Qt.ClosedHandCursor)   # closed hand: dragging
+            # Click-to-select/focus, mirroring WaypointHandle's
             # own mousePressEvent - the arrow-key nudge below only ever
             # fires on whichever item currently holds keyboard focus.
-            # Exclusive (see _select_exclusively's docstring) as of
-            # wave B fix round 4.
+            # Exclusive - see _select_exclusively's docstring.
             _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
-            # M8 wave B fix round 5: arm this gesture's mapping
+            # Arm this gesture's mapping
             # baseline - see _GestureMappingGuard's docstring.
             self._gesture_mapping.arm(self)
         if self.state.edit_mode:
-            # M8 wave B fix round 6: the base class MUST see the press
+            # The base class MUST see the press
             # too, so Qt's own drag bookkeeping is armed for this
             # gesture - see _run_base_mouse_handler's docstring. Runs
             # AFTER _select_exclusively above, so the base handler's
@@ -649,8 +643,7 @@ class BlockItem(QGraphicsItem):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
-        # M8 wave B fix round 6 (THE round-3 teleport root cause):
-        # the base-class release is the ONE place in Qt that clears
+        # The base-class release is the ONE place in Qt that clears
         # QGraphicsScenePrivate::movingItemsInitialPositions - skip it
         # and the next drag of any movable item computes its steps
         # from this gesture's stale map and teleports; see
@@ -666,22 +659,22 @@ class BlockItem(QGraphicsItem):
                 self.block.x, self.block.y = new_xy
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
-            self.setCursor(Qt.OpenHandCursor)   # finding 2c: back to open
-            # M8 wave B fix round 2 (regression): gated back on
+            self.setCursor(Qt.OpenHandCursor)   # back to open hand
+            # Gated on
             # self._editable - a mode-exit mid-drag is already covered
             # synchronously by MainWindow._cancel_gesture_visuals
             # (toggle-off calls it BEFORE the set_editable(False) loop
             # below runs, per its own docstring), so this is only
             # end-of-real-gesture cleanup while still editing. Ungated,
-            # this fired on every NORMAL-mode click too (this item
+            # this would fire on every NORMAL-mode click too (this item
             # accepts presses in both modes, for inspector clicks) and
-            # clobbered MainWindow.on_state's persistent
+            # clobber MainWindow.on_state's persistent
             # "poller: ..." status line on ordinary clicks.
             self.state.on_live_status("")
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
-        """M8 wave B1: arrow-key nudge - one grid step (10) per press,
+        """Arrow-key nudge - one grid step (10) per press,
         one unit with Shift, on the currently-focused/selected block.
         A completed gesture like a drag commit: moves via
         apply_geometry (snap-bypassing - the step is already exact, it
@@ -694,12 +687,13 @@ class BlockItem(QGraphicsItem):
         focus outside edit mode in the real app, but a test may call
         this directly).
 
-        Endpoint glue fix (M8 wave B, post-review): a nudge IS a move,
-        and Visio-style connector glue is input-agnostic - it used to
-        desync an explicit endpoint from the block by the nudge delta
-        while an auto-routed wire still correctly re-routed, exactly
-        the mouse-vs-keyboard inconsistency the glue wave had already
-        eliminated for drags. Fixed by reusing
+        Endpoint glue: a nudge IS a move,
+        and Visio-style connector glue is input-agnostic - skipping
+        the glue here would desync an explicit endpoint from the block
+        by the nudge delta
+        while an auto-routed wire still correctly re-routes, exactly
+        the mouse-vs-keyboard inconsistency the glue exists to
+        prevent for drags. The glue reuses
         DiagramState.on_block_live_moved - the SAME callback a live
         mouse drag fires per step - rather than duplicating its
         delta/translate/refresh logic: apply_geometry(sync_press=False)
@@ -740,7 +734,7 @@ class _ResizeHandle(QGraphicsItem):
         self._drag_from = None
         self._start_w = 0.0
         self._start_h = 0.0
-        # finding 2c: diagonal-resize cursor. Set unconditionally - the
+        # Diagonal-resize cursor. Set unconditionally - the
         # handle only exists/is interactive while its parent block is
         # editable (BlockItem.set_editable toggles handle.setVisible),
         # so there is no separate on/off to manage here.
@@ -773,7 +767,7 @@ class _ResizeHandle(QGraphicsItem):
         block_item.h = max(_MIN_BLOCK_H, self._start_h + dy)
         block_item._position_handle()
         block_item.update()
-        block_item._emit_live_status()   # M8 wave B3
+        block_item._emit_live_status()   # live coordinate readout
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
@@ -790,7 +784,7 @@ class _ResizeHandle(QGraphicsItem):
             block_item.block.w, block_item.block.h = w, h
             block_item.state.on_geometry_changed()
         self._drag_from = None
-        block_item.state.on_live_status("")   # M8 wave B3: clear on release
+        block_item.state.on_live_status("")   # clear readout on release
         ev.accept()
 
 
@@ -814,7 +808,7 @@ def _nearest_rect_boundary_point(px: float, py: float, x: float, y: float,
                                  w: float, h: float) -> Tuple[float, float]:
     """Nearest point ON the boundary (perimeter, not interior) of the
     rect (x, y, w, h) to (px, py) - used by the endpoint re-anchor
-    magnet (finding 2d) to snap a released handle onto its block's
+    magnet to snap a released handle onto its block's
     edge. If (px, py) is outside the rect, simple clamping already
     lands exactly on the boundary; if it is inside (or exactly on it),
     clamping alone would land in the interior, so the clamped point is
@@ -836,11 +830,11 @@ def _nearest_rect_boundary_point(px: float, py: float, x: float, y: float,
 
 
 # ---------------------------------------------------------------------------
-# M8 task 5 fix round 2: live auto-route recompute. This IS the single
+# Live auto-route recompute. This IS the single
 # routing implementation for a pointless edge's straight-line path -
 # scene.py's build_scene imports _straight_route_points from here for
 # an edge's initial route (scene.py already imports BlockItem/WireItem
-# from this module, so the direction was always fine); WireItem.
+# from this module, so the import direction is consistent); WireItem.
 # refresh_auto_route (below) calls it again later to recompute that
 # same route once the blocks have moved.
 # ---------------------------------------------------------------------------
@@ -880,13 +874,13 @@ def _straight_route_points(src_item: "BlockItem", dst_item: "BlockItem",
     position - deliberately NOT from src_item.block.x/y: BlockItem
     only writes a drag's final position back into block.x/y at
     mouseReleaseEvent (see BlockItem.mouseReleaseEvent), so during a
-    live drag (M8 wave 2's mid-gesture refresh_auto_route calls)
+    live drag (mid-gesture refresh_auto_route calls)
     block.x/y is still the GESTURE-START position - reading it here
     would silently recompute the OLD route every time, defeating the
     whole point of a live reroute. pos() carries no such lag; at
     construction and at every commit it is exactly block.x/y anyway,
-    so this is a strict improvement with no behavior change outside a
-    live drag. block.ports is still read off src_item.block/
+    so the two sources only ever differ mid-drag.
+    block.ports is still read off src_item.block/
     dst_item.block - the declared-port table is static, never
     mid-drag state. The single routing implementation: scene.py's
     build_scene imports this directly for a pointless edge's initial
@@ -915,7 +909,7 @@ class WireItem(QGraphicsItem):
     anchors, everything between is an interior waypoint), an
     auto-routed straight line to the connected blocks' ports
     otherwise. A moved block drags BOTH kinds of wire along with it
-    (Visio-style connector glue, M8 wave 2): a pointless wire's line
+    (Visio-style connector glue): a pointless wire's line
     is recomputed from the block's live position (refresh_auto_route,
     called by MainWindow after every block-geometry change - drag,
     auto-layout, undo, revert); an explicit path's own endpoint
@@ -933,7 +927,7 @@ class WireItem(QGraphicsItem):
         self.state = state
         self.pts = pts
         self.setZValue(-1)
-        # M8 task 4 (waypoint editing): _editable gates whether
+        # Waypoint editing: _editable gates whether
         # WaypointHandle children exist at all - they are created
         # lazily by set_editable(True) and torn down by
         # set_editable(False), never merely hidden.
@@ -951,7 +945,7 @@ class WireItem(QGraphicsItem):
         # reference to the src/dst BlockItems at construction (only
         # DiagramState, which carries no block geometry) - _src_item/
         # _dst_item start out None and are populated the first time
-        # refresh_auto_route(blocks) runs (finding 2d's endpoint
+        # refresh_auto_route(blocks) runs (the endpoint
         # magnet reads them off a WaypointHandle release; they stay
         # None for a wire built standalone in a test that never calls
         # refresh_auto_route, which simply disables the magnet for it).
@@ -967,17 +961,17 @@ class WireItem(QGraphicsItem):
             self._rebuild_handles()
         else:
             self._clear_handles()
-        # Acceptance round 6: while editing, the wire subtree rides
+        # While editing, the wire subtree rides
         # ABOVE the blocks. A child's hit-test stacking is resolved by
         # its top-level parent's z, so at z=-1 an endpoint handle
-        # sitting on its block's boundary was mostly unreachable by a
-        # real click - the block ate every press landing on the inner
+        # sitting on its block's boundary is mostly unreachable by a
+        # real click - the block eats every press landing on the inner
         # half of the handle square, and dragging "the endpoint"
-        # dragged the block instead. z=3 clears the blocks (0) while
+        # drags the block instead. z=3 clears the blocks (0) while
         # staying under the legend (5); normal mode returns to -1 so
         # lines run underneath blocks as always.
         self.setZValue(3 if on else -1)
-        # finding 2c: a cross-hair cursor signals the double-click-to-
+        # A cross-hair cursor signals the double-click-to-
         # insert affordance while editing; cleared on exit.
         if on:
             self.setCursor(Qt.CrossCursor)
@@ -986,17 +980,16 @@ class WireItem(QGraphicsItem):
 
     def edge_key(self) -> Tuple[str, str, str]:
         """Identity tuple matching core/target/layout_io.py's
-        _edge_identity(): (src, dst, label-or-empty-string) - Task 5
-        uses this to key layout_io.patch_layout_text's edge_points
+        _edge_identity(): (src, dst, label-or-empty-string) -
+        keys layout_io.patch_layout_text's edge_points
         dict."""
         return (self.edge.src, self.edge.dst, self.edge.label or "")
 
     def _clear_handles(self) -> None:
         """Destroys every WaypointHandle - called by set_editable(False)
-        (mode exit) and by _rebuild_handles (points-list changes). M8
-        wave B fix round 1 (finding 2): a handle mid-drag when this
-        runs (mode exit mid-drag, the exact path the review
-        reproduced) dies WITHOUT ever reaching its own
+        (mode exit) and by _rebuild_handles (points-list changes).
+        A handle mid-drag when this
+        runs (mode exit mid-drag) dies WITHOUT ever reaching its own
         mouseReleaseEvent - clear any magnet highlight it left on its
         target block here, at the source, so destroying the handle can
         never leave a block stuck highlighted with nothing left to
@@ -1014,12 +1007,12 @@ class WireItem(QGraphicsItem):
         self._handles = []
 
     def _rebuild_handles(self) -> None:
-        # Acceptance round 7: an auto-routed wire (edge.points empty)
+        # An auto-routed wire (edge.points empty)
         # gets handles for its two route endpoints too - self.pts is
         # its 2-point auto route, and dragging one converts the wire
         # to an explicit path (WaypointHandle.mouseReleaseEvent).
-        # Before this, two visually identical straight wires behaved
-        # differently depending on invisible yaml state.
+        # Without this, two visually identical straight wires would
+        # behave differently depending on invisible yaml state.
         self._clear_handles()
         n = len(self.edge.points) or len(self.pts)
         for i in range(n):
@@ -1071,12 +1064,13 @@ class WireItem(QGraphicsItem):
         no explicit path), the fresh route is also applied as the
         rendered path immediately (prepareGeometryChange + repaint) -
         so a pointless edge's line keeps following its connected
-        blocks, per spec section 3's "anchors follow their block".
+        blocks - "anchors follow their block" (see the M8 layout
+        spec).
         An edge with an explicit path only gets its _auto_pts fallback
         refreshed quietly; self.pts (the explicit path itself) is
         untouched HERE - an explicit path's endpoints do still track a
-        moved block, just via a different method (translate_endpoint,
-        M8 wave 2) called separately by MainWindow's live-move handler,
+        moved block, just via a different method (translate_endpoint)
+        called separately by MainWindow's live-move handler,
         not by this one.
 
         MainWindow - the only owner with a full id -> BlockItem map -
@@ -1094,7 +1088,7 @@ class WireItem(QGraphicsItem):
         from `blocks` (defensive only; MainWindow always passes its
         own complete self.blocks, which contains every block).
 
-        Side effect (finding 2d): also caches src_item/dst_item as
+        Side effect: also caches src_item/dst_item as
         self._src_item/_dst_item - a live BlockItem reference always
         reflects that block's CURRENT geometry via its own .geometry()
         regardless of when it was cached (blocks are mutated in place,
@@ -1112,7 +1106,7 @@ class WireItem(QGraphicsItem):
         if not self.edge.points:
             self.prepareGeometryChange()
             self.pts = list(self._auto_pts)
-            # Acceptance round 7: an auto wire's endpoint handles ride
+            # An auto wire's endpoint handles ride
             # the re-route (the explicit-path counterpart is
             # translate_endpoint's handle sync below). Baseline reset
             # matches translate_endpoint's: the handle did not gesture
@@ -1127,7 +1121,7 @@ class WireItem(QGraphicsItem):
             self.update()
 
     def translate_endpoint(self, block_id: str, dx: int, dy: int) -> None:
-        """Visio-style connector glue (M8 wave 2): translates THIS
+        """Visio-style connector glue: translates THIS
         wire's explicit-path endpoint(s) anchored to `block_id` by
         (dx, dy) - edge.points[0] if block_id == self.edge.src,
         edge.points[-1] if block_id == self.edge.dst (both are checked
@@ -1146,8 +1140,8 @@ class WireItem(QGraphicsItem):
         whatever offset the snap needed to land on-grid - still
         exactly the block's own delta, nothing extra). A Shift (fine)
         drag's delta is fine-grained and the endpoint follows at that
-        same fine grain - acceptable, documented behavior (finding
-        2d/5c), not a bug.
+        same fine grain - acceptable, documented behavior, not a
+        bug.
 
         Called by MainWindow from BOTH DiagramState.on_block_live_moved
         (live, mid-drag - so the wire visibly stays attached instead of
@@ -1155,9 +1149,9 @@ class WireItem(QGraphicsItem):
         SAME edge.points mutation this makes is what
         MainWindow._on_layout_geometry_changed's existing world-
         snapshot diff already detects at commit - no separate dirty-
-        marking or undo-snapshot logic was needed for this: the commit
-        handler's `old` snapshot was captured before this gesture even
-        started, so it already holds the PRE-drag endpoint, and its
+        marking or undo-snapshot logic is needed for this: the commit
+        handler's `old` snapshot is captured before this gesture even
+        starts, so it already holds the PRE-drag endpoint, and its
         diff against `new` (captured at commit, after every live
         translate_endpoint call this gesture made) already flags this
         wire's edge_key() dirty exactly like any other points change.
@@ -1196,7 +1190,8 @@ class WireItem(QGraphicsItem):
         """Delete key on a selected WaypointHandle: removes an
         INTERIOR waypoint (any index other than 0 or -1) and fires
         on_geometry_changed once - no implicit collinear merging is
-        ever applied (spec section 3). The two endpoints (index 0 and
+        ever applied (see the M8 layout spec). The two endpoints
+        (index 0 and
         len(edge.points)-1) are anchors, not waypoints, under the
         full-polyline schema - WaypointHandle.keyPressEvent already
         refuses to call this for an endpoint index, so `index` here is
@@ -1204,11 +1199,11 @@ class WireItem(QGraphicsItem):
         defensively for an endpoint/out-of-range index rather than
         ever producing an invalid path.
 
-        Edge case (controller ruling): once an interior delete leaves
+        Edge case: once an interior delete leaves
         only the 2 endpoints, edge.points reverts to [] (auto-
         routing) instead of staying a 2-element explicit path - a
         frozen path down to just its 2 endpoints is indistinguishable
-        from an edge that was never made explicit (spec section 3:
+        from an edge that was never made explicit (the M8 layout spec:
         "edges without a points: list show only their endpoints").
         This is also what makes the invalid length-1 state (see
         apply_points) unreachable by construction: an interior delete
@@ -1283,22 +1278,23 @@ class WireItem(QGraphicsItem):
         return best[0], best[1], vert
 
     def boundingRect(self):
-        # Ghost-trail fix (acceptance round 7): paint() draws the edge
+        # Ghost-trail guard: paint() draws the edge
         # label and the progress/value string up to a full text width
         # beyond the polyline's own bounds (a vertical segment's label
         # hangs entirely to its right at x+5, the progress text spans
         # half its width past either side of the segment midpoint) -
         # and Qt never invalidates pixels painted outside
-        # boundingRect, so dragging left text ghosts behind. The
+        # boundingRect, so a tighter rect leaves text ghosts behind
+        # when dragging. The
         # margins are deliberately CONSTANT and generous rather than
         # font-metric-derived: the progress text changes every poll
         # tick, and a boundingRect that varied with it would need a
         # prepareGeometryChange per tick to stay honest - the same
-        # bug class this fixes.
+        # bug class this margin exists to avoid.
         return self.path().boundingRect().adjusted(-150, -30, 150, 30)
 
     def shape(self):
-        # finding 2a: wider click/double-click hit area while editing
+        # Wider click/double-click hit area while editing
         # (the geometry that matters for placing a waypoint precisely)
         # - normal mode (edge-select-to-inspect) keeps the original
         # width.
@@ -1385,8 +1381,8 @@ class WaypointHandle(QGraphicsItem):
     mirroring BlockItem/_ResizeHandle's gesture-start-baseline
     discipline. Clicking a handle selects it; Delete then removes its
     point via the parent WireItem.remove_point (no implicit collinear
-    merging). Hover highlight and an open/closed-hand cursor (finding
-    2b) give it the same grab affordance as a block drag."""
+    merging). Hover highlight and an open/closed-hand cursor
+    give it the same grab affordance as a block drag."""
 
     def __init__(self, wire: "WireItem", index: int):
         super().__init__(wire)
@@ -1400,13 +1396,13 @@ class WaypointHandle(QGraphicsItem):
         self._start_point = (0.0, 0.0)
         self._gesture_moved = False
         self._hovered = False
-        # Acceptance round 8: same shape as BlockItem._active_guides -
+        # Same shape as BlockItem._active_guides -
         # (guide_x, guide_y), an axis' aligned coordinate while this
         # handle's live drag is axis-aligned to a neighboring polyline
         # vertex, None otherwise. MainWindow._update_alignment_guides
         # reads it via state.on_handle_live_moved.
         self._active_guides = (None, None)
-        # M8 wave B2: the BlockItem currently showing the "drop here to
+        # The BlockItem currently showing the "drop here to
         # connect" magnet-highlight cue because of THIS handle's live
         # drag, or None - see _update_magnet_highlight.
         self._magnet_target: Optional["BlockItem"] = None
@@ -1440,8 +1436,7 @@ class WaypointHandle(QGraphicsItem):
         self.update()
 
     def mousePressEvent(self, ev):
-        # Exclusive (see _select_exclusively's docstring) as of wave B
-        # fix round 4.
+        # Exclusive - see _select_exclusively's docstring.
         _select_exclusively(self)
         self.setFocus(Qt.MouseFocusReason)
         pos = self.pos()
@@ -1461,7 +1456,7 @@ class WaypointHandle(QGraphicsItem):
         always do this - see that method's docstring), so the magnet
         (and its highlight) is simply inert until then, same as a
         standalone test-built wire with no real blocks. An auto-routed
-        wire has no edge.points yet (acceptance round 7) - its handle
+        wire has no edge.points yet - its handle
         count is wire.pts' 2 route endpoints."""
         n = len(wire.edge.points) or len(wire.pts)
         if self.index == 0:
@@ -1471,10 +1466,10 @@ class WaypointHandle(QGraphicsItem):
         return None
 
     def _update_magnet_highlight(self, wire, px: float, py: float) -> None:
-        """M8 wave B2, unconditional since acceptance round 8: the
+        """The
         candidate block shows the "will attach here" cue for the WHOLE
         endpoint drag - release always re-anchors (mouseReleaseEvent's
-        projection), so there is no in/out-of-range distinction left
+        projection), so there is no in/out-of-range distinction
         for the cue to track. Interior handles still have no candidate
         and never highlight anything."""
         candidate = self._magnet_candidate(wire)
@@ -1487,10 +1482,10 @@ class WaypointHandle(QGraphicsItem):
             self._magnet_target = target
 
     def _neighbor_alignment(self, wire, nx: float, ny: float):
-        """Acceptance round 8: axis-align a dragged handle to its
+        """Axis-align a dragged handle to its
         ADJACENT polyline vertex/vertices when within
         _ALIGN_THRESHOLD - a slightly-crooked segment reads as sloppy,
-        and a near-horizontal/vertical drag now closes exactly.
+        and a near-horizontal/vertical drag closes exactly.
         Returns (x, y, guide_x, guide_y); guide_* is the aligned
         axis' coordinate (feeding the same guide-line UI block drags
         use) or None."""
@@ -1533,29 +1528,29 @@ class WaypointHandle(QGraphicsItem):
         wire.pts[self.index] = QPointF(nx, ny)
         wire.update()
         self._update_magnet_highlight(wire, nx, ny)
-        wire.state.on_live_status(   # M8 wave B3
+        wire.state.on_live_status(   # live coordinate readout
             "waypoint: %d, %d" % (int(nx), int(ny)))
-        wire.state.on_handle_live_moved(self)   # acceptance round 8
+        wire.state.on_handle_live_moved(self)   # alignment guide UI
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
         wire = self.parentItem()
         pos = self.pos()
         px, py = pos.x(), pos.y()
-        # finding 2d: endpoint re-anchor magnet. Only index 0 (src) and
+        # Endpoint re-anchor magnet. Only index 0 (src) and
         # index n-1 (dst) are anchors at all; an interior waypoint is
         # never magnetized (_magnet_candidate returns None for it).
         magnet_item = self._magnet_candidate(wire)
         if magnet_item is not None:
             bx, by, bw, bh = magnet_item.geometry()
             px, py = _nearest_rect_boundary_point(px, py, bx, by, bw, bh)
-        # M8 wave B2: the highlight is a LIVE-drag-only cue - clears on
+        # The highlight is a LIVE-drag-only cue - clears on
         # release regardless of whether the magnet actually applied.
         if self._magnet_target is not None:
             self._magnet_target.set_magnet_highlight(False)
             self._magnet_target = None
         if not wire.edge.points and not self._gesture_moved:
-            # Acceptance round 7: click-only release on an auto wire's
+            # Click-only release on an auto wire's
             # endpoint. The route's endpoints are float side-midpoints,
             # so the snap below would register as a "move" and silently
             # pin the wire - leave the route entirely untouched instead.
@@ -1566,7 +1561,7 @@ class WaypointHandle(QGraphicsItem):
             return
         fine = _fine_snap()
         new_xy = (snap(px, fine), snap(py, fine))
-        # Acceptance round 8: the neighbor alignment must survive the
+        # The neighbor alignment must survive the
         # grid snap (a neighbor at a non-multiple coordinate would
         # otherwise be re-crooked by up to half a grid step) - re-run
         # the check on the snapped value and override with the
@@ -1581,7 +1576,7 @@ class WaypointHandle(QGraphicsItem):
         wire.update()
         if new_xy != self._geom_at_press:
             if not wire.edge.points:
-                # Acceptance round 7: first endpoint drag on an
+                # First endpoint drag on an
                 # auto-routed wire pins it down as an explicit 2-point
                 # path (wire.pts already carries this index's new
                 # position from the move steps above) - the same
@@ -1596,13 +1591,13 @@ class WaypointHandle(QGraphicsItem):
         self._geom_at_press = new_xy
         self._drag_from = None
         self.setCursor(Qt.OpenHandCursor)
-        wire.state.on_live_status("")   # M8 wave B3: clear on release
+        wire.state.on_live_status("")   # clear readout on release
         ev.accept()
 
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             wire = self.parentItem()
-            # Auto-routed wire (acceptance round 7): both handles are
+            # Auto-routed wire: both handles are
             # endpoints by construction - same no-op as below.
             n = len(wire.edge.points) or len(wire.pts)
             if self.index == 0 or self.index == n - 1:
@@ -1620,7 +1615,7 @@ class WaypointHandle(QGraphicsItem):
             wire.remove_point(self.index)
             ev.accept()
         elif ev.key() in _ARROW_DELTAS:
-            # M8 wave B1: arrow-key nudge, on whichever waypoint handle
+            # Arrow-key nudge, on whichever waypoint handle
             # is currently selected/focused (set in mousePressEvent) -
             # one grid step per press, one unit with Shift. No magnet:
             # nudge is exact-by-construction, so re-anchoring only
@@ -1635,7 +1630,7 @@ class WaypointHandle(QGraphicsItem):
             self.setPos(nx, ny)
             wire.pts[self.index] = QPointF(nx, ny)
             if not wire.edge.points:
-                # Acceptance round 7: nudging an auto wire's endpoint
+                # Nudging an auto wire's endpoint
                 # pins it down exactly like a mouse drag would (see
                 # mouseReleaseEvent's matching conversion).
                 wire.edge.points = [(int(p.x()), int(p.y()))
@@ -1671,14 +1666,14 @@ class LegendItem(QGraphicsItem):
         self.setPos(x, y)
         self._geom_at_press = (int(x), int(y))
         self.setZValue(5)
-        # M8 wave B fix round 5: see _GestureMappingGuard's docstring.
+        # See _GestureMappingGuard's docstring.
         self._gesture_mapping = _GestureMappingGuard()
 
     def set_editable(self, on: bool) -> None:
         self._editable = bool(on)
         self.setFlag(QGraphicsItem.ItemIsMovable, on)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, on)
-        # M8 wave B1 (arrow-key nudge): see BlockItem.set_editable's
+        # Arrow-key nudge: see BlockItem.set_editable's
         # matching comment.
         self.setFlag(QGraphicsItem.ItemIsSelectable, on)
         self.setFlag(QGraphicsItem.ItemIsFocusable, on)
@@ -1702,7 +1697,7 @@ class LegendItem(QGraphicsItem):
     def itemChange(self, change, value):
         if (change == QGraphicsItem.ItemPositionChange and self._editable
                 and not self._applying):
-            # M8 wave B fix round 5: see BlockItem.itemChange's
+            # See BlockItem.itemChange's
             # matching comment / _GestureMappingGuard's docstring.
             if self._gesture_mapping.drifted(self):
                 return self.pos()
@@ -1710,7 +1705,7 @@ class LegendItem(QGraphicsItem):
                            snap(value.y(), _fine_snap()))
         if (change == QGraphicsItem.ItemPositionHasChanged
                 and self._editable and not self._applying):
-            # M8 wave B3 (live coordinate readout): mirrors BlockItem's
+            # Live coordinate readout: mirrors BlockItem's
             # matching branch - ItemSendsGeometryChanges is only on
             # while editable, so this never fires outside a drag;
             # _applying excludes apply_geometry's own programmatic
@@ -1724,16 +1719,15 @@ class LegendItem(QGraphicsItem):
         if self._editable:
             pos = self.pos()
             self._geom_at_press = (int(pos.x()), int(pos.y()))
-            # M8 wave B1: click-to-select/focus - see BlockItem's
-            # matching mousePressEvent comment. Exclusive (see
-            # _select_exclusively's docstring) as of wave B fix
-            # round 4.
+            # Click-to-select/focus - see BlockItem's
+            # matching mousePressEvent comment. Exclusive - see
+            # _select_exclusively's docstring.
             _select_exclusively(self)
             self.setFocus(Qt.MouseFocusReason)
-            # M8 wave B fix round 5: see _GestureMappingGuard's
+            # See _GestureMappingGuard's
             # docstring.
             self._gesture_mapping.arm(self)
-            # M8 wave B fix round 6: arm Qt's own drag bookkeeping
+            # Arm Qt's own drag bookkeeping
             # too - see BlockItem.mousePressEvent's matching comment /
             # _run_base_mouse_handler's docstring. Editable-only for
             # the same reason as there: with every interaction flag
@@ -1742,7 +1736,7 @@ class LegendItem(QGraphicsItem):
         ev.accept()
 
     def keyPressEvent(self, ev) -> None:
-        """M8 wave B1: arrow-key nudge - see BlockItem.keyPressEvent's
+        """Arrow-key nudge - see BlockItem.keyPressEvent's
         docstring; identical contract, just legend-shaped (no w/h)."""
         if not self._editable or ev.key() not in _ARROW_DELTAS:
             ev.accept()
@@ -1755,7 +1749,7 @@ class LegendItem(QGraphicsItem):
         ev.accept()
 
     def mouseReleaseEvent(self, ev):
-        # M8 wave B fix round 6: see BlockItem.mouseReleaseEvent's
+        # See BlockItem.mouseReleaseEvent's
         # matching comment - the base release is the one place Qt
         # clears movingItemsInitialPositions, and a completed legend
         # drag poisons the map for the next BLOCK drag exactly the
@@ -1768,8 +1762,7 @@ class LegendItem(QGraphicsItem):
             if new_xy != self._geom_at_press:
                 self.state.on_geometry_changed()
             self._geom_at_press = new_xy
-            # M8 wave B fix round 2 (regression, applied here too for
-            # the same reason): gated back on self._editable - see
+            # Gated on self._editable for the same reason as
             # BlockItem.mouseReleaseEvent's matching comment.
             self.state.on_live_status("")
         ev.accept()
@@ -1781,7 +1774,7 @@ class LegendItem(QGraphicsItem):
         p.setRenderHint(QPainter.Antialiasing)
         p.setBrush(QBrush(QColor(255, 255, 255, 235)))
         if self.state.edit_mode and self.isSelected():
-            # M8 wave B fix round 1 (finding 4): see BlockItem.paint's
+            # See BlockItem.paint's
             # matching comment.
             p.setPen(QPen(COL_EDIT_SELECT, 2.2))
         else:

@@ -1,11 +1,11 @@
-"""Scope panel: M7 replaces polling (a History-fed channel table) with
-a firmware trace-buffer scope: this page discovers the trace target,
-shows discovery/error state, renders the channel table, occupies slots
-(watching an address on a trace channel) via the watch-table protocol
+"""Scope panel: a firmware trace-buffer scope (see the M7 trace
+spec): this page discovers the trace target, shows discovery/error
+state, renders the channel table, occupies slots (watching an address
+on a trace channel) via the watch-table protocol
 (TraceReader.set_watch), and plots the resulting curves - all driven
-by TraceStore rather than the old per-register History.
+by TraceStore.
 
-Page states (spec point 1), all rendered inline in `error_label` -
+Page states, all rendered inline in `error_label` -
 never a dialog, the same convention as every other Inspector-family
 page (register_page.py, memory_page.py):
 
@@ -47,7 +47,7 @@ READY. A missing symbol after a real ELF load leaves the page in
 NO_SOURCE rather than silently keeping whatever unrelated state was
 already showing.
 
-Channel slots (spec point 2): `self._slots` is a
+Channel slots: `self._slots` is a
 List[Optional[dict]] of exactly MAX_CH entries, always kept COMPACTED
 - every occupied entry sits in a contiguous prefix starting at index 0,
 every trailing entry is None. Index i is simultaneously: the trace
@@ -73,7 +73,7 @@ flag drives add_address_slot() directly for the same reason a manual
 address add would (the demo target has no register model to resolve a
 reg_key against).
 
-Refusals (spec point 3) happen BEFORE any hardware write, in this
+Refusals happen BEFORE any hardware write, in this
 order: a full table ("table full"), an address in
 engine.guarded_addrs (the same guarded-address set register_page.py's
 show_block() reads off Engine.load - "address 0x%08X is guarded"),
@@ -89,7 +89,7 @@ inline verbatim, exactly like the discovery states above. Every
 refusal/error path calls error_label.setText() itself; every success
 path clears it.
 
-Rendering (spec point 4): the repaint tick drains the reader
+Rendering: the repaint tick drains the reader
 (`self.reader.refresh()` -> `self.store.append()`) via `_drain_once()`,
 then rebuilds each occupied slot's curve from `self.store.series(row)`
 - a raw-domain (t, y) numpy pair covering the whole store window.
@@ -107,15 +107,14 @@ once, at creation (_make_slot_entry) - pyqtgraph decimates the huge
 in-memory series down to what the pixel width can actually show,
 rather than this page doing that work itself.
 
-`value_at` (below) is this panel's ORIGINAL (M6) sample-lookup helper -
-still directly unit-tested as a pure function and still reused by the
-crosshair hover readout (`_value_text_for`, against a NaN-filtered view
-of the cached per-slot series). M6 also had a statistical gap detector
-here (`_gapped_xy`); it was removed once TraceStore took over exact
-seq/gen-based gap detection for channel curves (see the "Rendering"
-paragraph above) and no channel curve ran through it any longer.
+`value_at` (below) is a pure sample-lookup helper - directly
+unit-tested as a pure function and reused by the crosshair hover
+readout (`_value_text_for`, against a NaN-filtered view of the cached
+per-slot series). Gap detection for channel curves is TraceStore's
+exact seq/gen-based detection (see the "Rendering" paragraph above);
+no statistical gap detection happens in this panel.
 
-Drain independent of paint state (spec point 5): a SEPARATE QTimer
+Drain independent of paint state: a SEPARATE QTimer
 (`self._drain_timer`) calls `_drain_once()` on its own, and is started
 once discovery first succeeds and left running for the page's
 lifetime - completely independent of Run/Stop (`self._stopped`) and of
@@ -135,12 +134,12 @@ exceeds the ring's own span at the firmware's sampling rate
 (ring_count * period_us), records get overwritten faster than they're
 drained and TraceReader.lost grows on every stopped tick, by
 construction, regardless of how attentively anything is watching. A
-fixed interval cannot honor this for every firmware: M7's own demo
-default (period_us=5000, a 1.28s ring span at the original
-RING_COUNT=256) tolerated a fixed 500ms drain comfortably, but a real
-board sampling at 1 kHz (period_us=1000) did not at that same original
-RING_COUNT - a hardware run of the E2E suite's run/stop test
-caught exactly this. `_drain_interval_ms()` (below) computes the
+fixed interval cannot honor this for every firmware: a slow
+demo-style geometry (period_us=5000, a 1.28s ring span at
+ring_count=256) tolerates a fixed 500ms drain comfortably, but a real
+board sampling at 1 kHz (period_us=1000) at that same ring_count does
+not - a hardware run of the E2E suite's run/stop test demonstrated
+exactly this. `_drain_interval_ms()` (below) computes the
 interval fresh from whatever descriptor was actually discovered - the
 tightest of the ring's own span, DRAIN_MS_CAP, and TraceReader's own
 per-call read cap (see that function's docstring for why the read cap
@@ -149,13 +148,13 @@ floored at DRAIN_MS_FLOOR - and `_discover_at()` applies it (and
 re-applies it on every re-discovery, since a different ELF/target can
 carry a different geometry) to `self._drain_timer` before starting it.
 
-Drain health (spec point 6): `lost_label`, on the header row next to
+Drain health: `lost_label`, on the header row next to
 `rate_label`, shows "lost N samples" when TraceReader.lost has grown
 in roughly the last roll-mode window (`engine.history.window_s`) and
 is blank otherwise - `_update_drain_health()`, called from every
 `_drain_once()`.
 
-Target reboot recovery (T11 hardware gate): the Blackpill reference
+Target reboot recovery: the Blackpill reference
 target is powered by the debug probe's own USB connection, so a
 TARGET_LOST->RUNNING cycle (a probe replug) is a REAL power cycle for
 the target too, not just a reconnect - firmware reboots, and this
@@ -174,7 +173,7 @@ plain callback (default a no-op) MainWindow wires to the real
 `EventLog` after constructing this page - see `_recover_after_reboot`'s
 own comment.
 
-Recovery reads ONLY `self._trace_home` (re-review fix round 2) - a
+Recovery reads ONLY `self._trace_home` - a
 DURABLE `(desc_addr, [(addr, label, type_name), ...])` snapshot kept
 entirely separate from `self.reader.desc_addr`/`self._slots`, both of
 which a FAILED recovery attempt can leave transiently cleared (a failed
@@ -190,7 +189,7 @@ still-valid home instead of a permanently `None` one. `self._recovery_
 attempts` gates `on_info()` to once per failure streak, not once per
 retry tick.
 
-X axis: ROLL MODE, standard-scope style, unchanged since M6.
+X axis: ROLL MODE, standard-scope style.
 Every sample plots at sample_t - now, where now = time.monotonic() is
 captured once per refresh_plot() call and cached as `self._last_now`
 (channel curves instead use `self._last_t_latest`, the newest real
@@ -206,9 +205,9 @@ on (`enableAutoRange(y=True)`), adapting only to the currently-visible
 data. Event markers and the jump cursor (see "Cursor sync" below)
 store their ABSOLUTE time.monotonic t and are repositioned every
 refresh (t - now) so they scroll left with their moment in history,
-exactly like the data curves. `self._t0` (dock-open time, still
-captured at construction) is no longer used for axis positioning -
-only `self._last_now` is; it survives only as a convenience anchor for
+exactly like the data curves. `self._t0` (dock-open time, captured
+at construction) plays no part in axis positioning - only
+`self._last_now` does; it exists purely as a convenience anchor for
 a few tests. Consequence of sharing one plot between two clock
 domains: markers/cursor track host `time.monotonic` while channel
 curves track sample_t derived from the trace-buffer seq, so a marker
@@ -240,9 +239,9 @@ this t back, never a relative one - and positioned the same way
 on every refresh_plot() tick the same way so it scrolls left with its
 moment in history, exactly like a real scope annotation. Before the
 cursor has ever been placed, `cursor_time()` returns None - fed by
-MainWindow._on_log_time_focus, itself wired to EventLog's new
+MainWindow._on_log_time_focus, itself wired to EventLog's
 on_event_time callback (an event-log row click). This is purely
-visual (spec point 5) - no PIN, no value-locking: an event-log click
+visual - no PIN, no value-locking: an event-log click
 only ever moves this line, and never touches the Value column or its
 "Value"/"Value @ -X.Xs" header (see `_value_text_for`'s two-state
 readout below), which stays governed solely by the mouse's own
@@ -298,7 +297,7 @@ SYMBOL_LIST_TOOLTIP = (
 # exactly this, so any firmware built with it exposes this symbol.
 TRACE_DESC_SYMBOL = "ps_trace_desc"
 
-# NO_SOURCE state text (spec point 1): neither engine.trace_desc_addr
+# NO_SOURCE state text: neither engine.trace_desc_addr
 # (demo mode) nor a loaded ELF's ps_trace_desc symbol exists yet.
 NO_SOURCE_TEXT = "Load an ELF built with the ps_trace module to use the scope"
 
@@ -344,16 +343,16 @@ MARKER_FLASH_MS = 400
 MARKER_HARD_CAP = 200
 PLACEHOLDER_FG = "#9E9E9E"
 
-# Channel table columns (spec point 2). The per-channel Hz column is
-# retired with the old per-channel poll rate - the firmware period is
-# now the one rate that matters, and it's shown once, in rate_label,
-# rather than once per row.
+# Channel table columns. There is no per-channel Hz column - the
+# firmware period is the one rate that matters, and it's shown once,
+# in rate_label, rather than once per row.
 COL_REMOVE, COL_SWATCH, COL_NAME, COL_ADDR, COL_TYPE, COL_VALUE, \
     COL_SCALE, COL_OFFSET = range(8)
 COLUMN_LABELS = ["", "", "Name", "Address", "Type", "Value",
                  "Scale", "Offset"]
 
-# Type decode set (spec point 3): display-side only, core untouched.
+# Type decode set: display-side only - the core always carries the
+# raw 32-bit word.
 # Each spec is (bit width, signed?, shift-from-bit-0); f32 is handled
 # separately (IEEE-754 reinterpretation of the raw 32-bit word).
 TYPE_SPECS = {
@@ -372,7 +371,7 @@ TYPE_SPECS = {
 TYPES = list(TYPE_SPECS)
 DEFAULT_TYPE = "u32"
 
-# Scale/offset cells (spec point 2): plain QLineEdit text fields, not
+# Scale/offset cells: plain QLineEdit text fields, not
 # spinboxes - accept scientific notation, Enter commits, an invalid
 # entry reverts to the last-good value and flashes this background
 # briefly so the user sees why nothing changed.
@@ -429,16 +428,17 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
     NOT sufficient - TraceReader.refresh() itself never reads more than
     ring_count // READ_CAP_DIVISOR records in one call (that per-call
     cap; core.trace.reader), and
-    _drain_once() calls refresh() exactly once per tick. A ring 4x
-    bigger than before let DRAIN_MS_CAP alone bind at 1 kHz
-    (ring_count=1024 -> span_ms/2 = 512, past the 500ms cap) - but the
-    500ms cap demands draining ~500 records/tick from firmware ticking
-    at 1 kHz, while a single refresh() call can only ever drain 256
-    (1024 // 4) of them: a ~244/tick backlog that compounds, silently
-    reopening TraceReader.lost growth during a long-enough Stop hold
-    even though invariant 1 alone looked satisfied (found through
-    hardware validation - an earlier hw test's ~1s Stop window was too
-    short to expose it). So the interval must ALSO stay under
+    _drain_once() calls refresh() exactly once per tick. A ring big
+    enough that DRAIN_MS_CAP alone binds at 1 kHz
+    (ring_count=1024 -> span_ms/2 = 512, past the 500ms cap) shows
+    why: the 500ms cap demands draining ~500 records/tick from
+    firmware ticking at 1 kHz, while a single refresh() call can only
+    ever drain 256 (1024 // 4) of them - a ~244/tick backlog that
+    compounds, silently reopening TraceReader.lost growth during a
+    long-enough Stop hold even though invariant 1 alone looks
+    satisfied (found through hardware validation - a ~1s Stop window
+    is too short to expose it; only a long Stop hold does). So the
+    interval must ALSO stay under
     DRAIN_CAP_SLACK of the time it takes firmware to produce a full
     cap's worth of records, guaranteeing one refresh() call can always
     drain everything a single interval accumulates, with slack to
@@ -451,9 +451,8 @@ def _drain_interval_ms(ring_count: int, period_us: int) -> int:
     DRAIN_MS_CAP ceiling and DRAIN_MS_FLOOR floor apply uniformly to
     whichever one binds - a slow/huge-ring firmware whose OWN
     read-cap span already exceeds DRAIN_MS_CAP still drains at least
-    that often, matching the pre-fix behavior for any geometry that
-    was already safe under it (e.g. the demo target's period_us=5000,
-    1.28s ring span, 1280-record cap span)."""
+    that often (e.g. the demo target's period_us=5000, 1.28s ring
+    span, 1280-record cap span)."""
     span_ms = ring_count * period_us / 1000.0
     cap_records = ring_count // READ_CAP_DIVISOR
     cap_span_ms = cap_records * period_us / 1000.0 * DRAIN_CAP_SLACK
@@ -475,8 +474,8 @@ def value_at(series: List[Tuple[float, int]], t: float) -> Optional[int]:
 
 
 def decode_value(raw: int, type_name: str):
-    """Display-side type decode (spec point 3) of a raw 32-bit trace
-    sample - core is untouched, this is purely how the value is
+    """Display-side type decode of a raw 32-bit trace sample - the
+    core always carries the raw word; this is purely how the value is
     interpreted for the table's Value column and the plotted curve.
     f32 reinterprets the raw word's bit pattern as IEEE-754 (returns a
     float); every other type extracts a sub-field by shift/width and,
@@ -511,7 +510,7 @@ def _decode_series(y: np.ndarray, type_name: str) -> List[float]:
 
 
 def format_value(decoded, type_name: str) -> str:
-    """The Value column's fixed dual-radix format (spec point 6):
+    """The Value column's fixed dual-radix format:
     "55 (0x37)" for an integer type, sized to that type's own bit
     width (e.g. a u8 field shows 2 hex digits, not 8); f32 shows the
     float alone - a hex reading of a float's bits would not mean
@@ -527,7 +526,7 @@ def format_value(decoded, type_name: str) -> str:
 
 
 def _default_type_for_size(size: int) -> str:
-    """ELF preselect (spec point 3): choose a type from the symbol's
+    """ELF preselect: choose a type from the symbol's
     declared byte size, unsigned default - a 1-byte symbol starts as
     u8.0, a 2-byte symbol as u16.lo, anything else (4 bytes, or larger
     - a channel only ever samples the first word regardless) as u32."""
@@ -547,15 +546,14 @@ def _fmt_num(v: float) -> str:
 
 def _fit_scale_offset(lo: float, hi: float, band_lo: float,
                       band_hi: float) -> Tuple[float, float]:
-    """Auto-lane's core computation (spec point 4): the scale/offset
+    """Auto-lane's core computation: the scale/offset
     pair such that a channel whose raw decoded window spans [lo, hi]
     displays inside [band_lo, band_hi] through the existing display
     transform y' = (y - offset) * scale - the same fields a manual
     edit could set by hand, just computed. A flat window (hi <= lo,
     including no data at all: lo == hi == 0.0) can't be mapped to a
     span without dividing by zero, so it centers on the band's
-    midpoint instead - analogous to old Normalize's flat-series 0.5
-    guard, generalized to an arbitrary band."""
+    midpoint instead."""
     if hi <= lo:
         return 1.0, lo - (band_lo + band_hi) / 2.0
     scale = (band_hi - band_lo) / (hi - lo)
@@ -582,14 +580,14 @@ class ScopePage(QWidget):
     def __init__(self, engine: Engine, parent=None):
         super().__init__(parent)
         self.engine = engine
-        # This page's own independent run/stop flag (spec point 1) -
-        # unrelated to MainWindow's Data Path stop flag.
+        # This page's own independent run/stop flag - unrelated to
+        # MainWindow's Data Path stop flag.
         self._stopped = False
-        # _t0 (dock-open time) no longer drives axis positioning - see
-        # the module docstring's "X axis" paragraph for roll mode.
-        # Kept only as a construction-time anchor a few tests use for
-        # convenience; refresh_plot()/add_event_marker()/jump_to() all
-        # key off _last_now instead.
+        # _t0 (dock-open time) does not drive axis positioning - see
+        # the module docstring's "X axis" paragraph for roll mode. It
+        # exists only as a construction-time anchor a few tests use
+        # for convenience; refresh_plot()/add_event_marker()/jump_to()
+        # all key off _last_now instead.
         self._t0 = time.monotonic()
         self._last_now = self._t0
         self._last_t_latest = self._t0
@@ -615,19 +613,19 @@ class ScopePage(QWidget):
         # lazily there, not at this module's top, so this attribute is
         # typed structurally rather than by importing the class.
         self.elf_symbols: Dict[str, tuple] = {}
-        # Y axis follows the selected row (spec point 7) - None means
+        # Y axis follows the selected row - None means
         # no selection, which hides the axis's tick numbers entirely
         # rather than showing a meaningless shared scale.
         self._selected_row: Optional[int] = None
-        # Auto-lane (spec point 4): while on, every refresh_plot()
+        # Auto-lane: while on, every refresh_plot()
         # tick stacks ALL occupied channels into equal horizontal
         # bands (one lane each, in slot order - see _apply_auto_lane),
         # writing the computed scale/offset into the editable cells;
         # while off, the cells are whatever was last computed or
         # typed.
         self._auto_lane = False
-        # Trace discovery (spec point 1/2 of the M7 rework): the
-        # reader is always constructed, even in NO_SOURCE - discover()
+        # Trace discovery: the reader is always constructed, even in
+        # NO_SOURCE - discover()
         # only ever runs once an address is known, at the bottom of
         # this method (demo mode) or from load_elf() (a real ELF's
         # ps_trace_desc symbol). self.desc/self.store are None until a
@@ -647,7 +645,7 @@ class ScopePage(QWidget):
         # _refresh_error_active above.
         self._status_error_active = False
         # Rolling (t, cumulative reader.lost) samples, pruned to the
-        # roll-mode window - see _update_drain_health (spec point 6).
+        # roll-mode window - see _update_drain_health.
         self._lost_window: List[Tuple[float, int]] = []
         # Tracks whether the poller thread is actually draining
         # commands right now - _drain_once() below skips
@@ -681,7 +679,7 @@ class ScopePage(QWidget):
         # thread), read only by _drain_once (Qt thread) - same plain-
         # bool, no-lock-needed handoff as self._poller_running itself.
         self._target_lost = False
-        # T11 hardware gate: latches True the moment the poller ever
+        # Latches True the moment the poller ever
         # reports TARGET_LOST, consumed (cleared) by the next
         # _drain_once() tick that finds the poller RUNNING again - see
         # that method and _recover_after_reboot(). The Blackpill
@@ -691,20 +689,20 @@ class ScopePage(QWidget):
         # reset), so this reader/page's SESSION state (last_seq in the
         # hundreds of thousands, the occupied watch table) is entirely
         # stale the moment RUNNING resumes and must be rebuilt, not
-        # merely reconnected to - unlike M6's stateless register
-        # polling, which needed no equivalent latch. Written only by
+        # merely reconnected to - unlike stateless register polling,
+        # which needs no equivalent latch. Written only by
         # _on_engine_state (poller thread, a plain bool assignment - no
         # lock needed, same argument as self._poller_running's own
         # comment); read AND cleared only by _drain_once (Qt thread).
         self._was_lost = False
-        # T11 hardware gate: lets a page constructed with no wiring at
-        # all (most tests) stay silent, while MainWindow (which owns
+        # Lets a page constructed with no wiring at all (most tests)
+        # stay silent, while MainWindow (which owns
         # the actual EventLog) wires this to event_log.add_info after
         # construction - see _recover_after_reboot's own comment for
         # why this page cannot just reach into a log dock directly.
         self.on_info: Callable[[str], None] = _noop
-        # T11 hardware gate (re-review, fix round 2): a DURABLE copy of
-        # "what a successful discovery+table state last looked like" -
+        # A DURABLE copy of "what a successful discovery+table state
+        # last looked like" -
         # (desc_addr, [(addr, label, type_name), ...] in slot order) -
         # kept entirely separate from self.reader.desc_addr and
         # self._slots because recovery itself transiently clears BOTH
@@ -725,8 +723,8 @@ class ScopePage(QWidget):
         # successful discovery.
         self._trace_home: Optional[Tuple[int, List[Tuple[int, str, str]]]] \
             = None
-        # T11 hardware gate (re-review, fix round 2): counts consecutive
-        # FAILED recovery attempts since the last success (or since the
+        # Counts consecutive FAILED recovery attempts since the last
+        # success (or since the
         # first attempt of a fresh failure streak) - see
         # _recover_after_reboot(). Exists purely to gate on_info() calls:
         # _drain_once() re-arms the latch on every failure so the NEXT
@@ -751,13 +749,14 @@ class ScopePage(QWidget):
         # subscription never needs to be torn down and re-added.
         self.engine.on_state(self._on_engine_state)
 
-        # Top-bottom layout (changed after a live hardware session found
-        # the original left-right split too cramped): the channel table needs the
-        # window's full width to show its columns comfortably, so
-        # the controls block sits ON TOP of the plot, the two joined
-        # by a draggable vertical splitter. The page's first row is
-        # the time label + big Run/Stop - keeping Run/Stop at the
-        # page's top-right, the same spot as the Data Path page's.
+        # Top-bottom layout (found in a live hardware session: a
+        # left-right split leaves the channel table too cramped): the
+        # channel table needs the window's full width to show its
+        # columns comfortably, so the controls block sits ON TOP of
+        # the plot, the two joined by a draggable vertical splitter.
+        # The page's first row is the time label + big Run/Stop -
+        # keeping Run/Stop at the page's top-right, the same spot as
+        # the Data Path page's.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
 
@@ -771,20 +770,19 @@ class ScopePage(QWidget):
         # Inline error surface (never a dialog, per the class-level
         # convention) - lives on the always-visible top row so an
         # error (or the NO_SOURCE state) can never be hidden by the
-        # splitter. Doubles as this page's page-state indicator (spec
-        # point 1): NO_SOURCE / TraceError text lives here, cleared
-        # once READY - and also carries channel-add refusals and
-        # _drain_once() failures (spec points 3/5), all via the same
-        # single inline surface.
+        # splitter. Doubles as this page's page-state indicator:
+        # NO_SOURCE / TraceError text lives here, cleared once READY -
+        # and also carries channel-add refusals and _drain_once()
+        # failures, all via the same single inline surface.
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: %s;" % ANOM_HEX)
         top_row.addWidget(self.error_label, 1)
-        # Firmware sample rate (spec point: "Rate header") - a
-        # property of the trace buffer's own period_us, set once
+        # Firmware sample rate (the "Rate header") - a property of
+        # the trace buffer's own period_us, set once
         # discovery succeeds; blank in NO_SOURCE/TraceError.
         self.rate_label = QLabel("")
         top_row.addWidget(self.rate_label)
-        # Drain health (spec point 6): "lost N samples" when
+        # Drain health: "lost N samples" when
         # TraceReader.lost has grown in roughly the last roll-mode
         # window, blank otherwise - see _update_drain_health.
         self.lost_label = QLabel("")
@@ -793,10 +791,9 @@ class ScopePage(QWidget):
         self.auto_lane_check = QCheckBox("Auto-lane")
         self.auto_lane_check.toggled.connect(self._on_auto_lane_toggled)
         top_row.addWidget(self.auto_lane_check)
-        # The scope page's own big Run/Stop button (spec point 1),
-        # this page's only run/stop control besides spacebar
-        # (keyPressEvent below) - checkable so its own pressed-look
-        # tracks state too.
+        # The scope page's own big Run/Stop button - this page's only
+        # run/stop control besides spacebar (keyPressEvent below) -
+        # checkable so its own pressed-look tracks state too.
         self.run_stop_btn = QPushButton("Stop")
         self.run_stop_btn.setCheckable(True)
         self.run_stop_btn.setMinimumHeight(36)
@@ -809,7 +806,7 @@ class ScopePage(QWidget):
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(3)
 
-        # The channel table is this panel's hero (spec point 2): ALWAYS
+        # The channel table is this panel's hero: ALWAYS
         # exactly MAX_CH rows, row i permanently representing trace
         # slot i (see _build_channel_table_skeleton below) - occupying
         # a slot rewrites an existing row's cells in place, this page
@@ -853,7 +850,7 @@ class ScopePage(QWidget):
         load_elf_btn = QPushButton("Load ELF...")
         load_elf_btn.clicked.connect(self._on_load_elf_clicked)
         add_row.addWidget(load_elf_btn)
-        # Collapsible symbol picker (spec point 8): collapsed by
+        # Collapsible symbol picker: collapsed by
         # default so the add row doesn't cost vertical space for a
         # symbol list nobody has loaded yet - auto-expands the first
         # time load_elf() actually populates one.
@@ -918,12 +915,12 @@ class ScopePage(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         outer.addWidget(self.splitter, 1)
-        # All MAX_CH slot rows visible by default (spec point 7),
+        # All MAX_CH slot rows visible by default,
         # sized from the table's own row/header metrics rather than a
         # hardcoded pixel guess.
         self._size_splitter_for_all_rows()
 
-        # Crosshair (feature 1): a light-grey dashed vertical line,
+        # Crosshair: a light-grey dashed vertical line,
         # deliberately distinct from the cursor's dashed blue
         # (CURSOR_PEN, jump_to()) and a marker's solid red
         # (MARKER_PEN, add_event_marker()) so none of the three are
@@ -936,7 +933,7 @@ class ScopePage(QWidget):
         self._crosshair_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30,
             slot=self._on_mouse_moved)
-        # Belt-and-braces "mouse off plot" detection (spec point 5):
+        # Belt-and-braces "mouse off plot" detection:
         # sigMouseMoved only fires on an in-scene move, so a mouse
         # that exits plot_widget without one last move inside the
         # scene needs this Leave event instead - see eventFilter().
@@ -950,7 +947,7 @@ class ScopePage(QWidget):
         self._timer.timeout.connect(self.refresh_plot)
         self._timer.start()
 
-        # Slow drain timer (spec point 5): keeps draining the trace
+        # Slow drain timer: keeps draining the trace
         # ring into self.store regardless of Run/Stop or page
         # visibility, so the ring (RING_COUNT records - contract.py)
         # can never overflow just because nobody's watching. Started
@@ -962,7 +959,7 @@ class ScopePage(QWidget):
         # TraceReader's own per-call read cap can drain per tick (see
         # _drain_interval_ms's docstring for why both matter) or the
         # stop path loses data by construction - a fixed interval here
-        # (500ms, pre-fix) is only safe for firmware slow enough that
+        # (e.g. 500ms) is only safe for firmware slow enough that
         # 500ms is under both. setInterval() below is a placeholder for
         # before any descriptor exists; _discover_at() overwrites it
         # with _drain_interval_ms(desc.ring_count, desc.period_us) -
@@ -973,8 +970,8 @@ class ScopePage(QWidget):
         self._drain_timer.setInterval(DRAIN_MS_CAP)
         self._drain_timer.timeout.connect(self._drain_once)
 
-        # No selection yet - hide the y-axis tick numbers (spec point
-        # 7) rather than show a shared scale that means nothing until
+        # No selection yet - hide the y-axis tick numbers rather than
+        # show a shared scale that means nothing until
         # a channel is picked.
         self._update_y_axis()
 
@@ -987,15 +984,15 @@ class ScopePage(QWidget):
         else:
             self.error_label.setText(NO_SOURCE_TEXT)
 
-    # -- run/stop (spec point 1) ---------------------------------------------
+    # -- run/stop ------------------------------------------------------------
 
     def set_stopped(self, on: bool) -> None:
-        """This page's own independent stop flag (spec point 1: "Scope
-        stop = waveform hold" - unlike the old global Freeze, this has
-        no effect on the Data Path tab or vice versa). Pauses (or
-        resumes) the 200 ms FAST repaint timer only - the slow drain
-        timer is unaffected (spec point 5: Run/Stop is display-only,
-        the ring must keep draining regardless). refresh_plot() itself
+        """This page's own independent stop flag ("scope stop =
+        waveform hold" - it has no effect on the Data Path tab or
+        vice versa). Pauses (or resumes) the 200 ms FAST repaint
+        timer only - the slow drain timer is unaffected (Run/Stop is
+        display-only; the ring must keep draining regardless).
+        refresh_plot() itself
         stays callable regardless (tests call it directly). Resuming
         only starts the timer if the page is currently visible -
         resuming while the dock is hidden (tabbed away) must not wake
@@ -1024,7 +1021,7 @@ class ScopePage(QWidget):
     def keyPressEvent(self, event) -> None:
         """Spacebar toggles run/stop, but only while this page (or a
         non-text-input descendant of it) actually has keyboard focus -
-        "scope-focus only" (spec point 1), not a global app-wide
+        "scope-focus only", not a global app-wide
         shortcut. A focused QLineEdit/QTableWidget cell editor
         consumes Space as ordinary text input before it ever reaches
         here, which is exactly the exclusion the spec calls for -
@@ -1039,7 +1036,7 @@ class ScopePage(QWidget):
         tabbed away behind Event log, same bug class as
         memory_page.py's auto-refresh: an invisible ScopePage has no
         reason to keep redrawing a plot nobody sees every 200 ms
-        forever. The slow drain timer is untouched (spec point 5)."""
+        forever. The slow drain timer is untouched."""
         self._timer.stop()
         super().hideEvent(event)
 
@@ -1075,13 +1072,13 @@ class ScopePage(QWidget):
         self._drain_timer.stop()
         super().closeEvent(event)
 
-    # -- trace discovery & page state (spec point 1) -------------------------
+    # -- trace discovery & page state ----------------------------------------
 
     def _capture_trace_home(self) -> None:
-        """T11 hardware gate (re-review, fix round 2): refresh
-        self._trace_home from the CURRENT reader.desc_addr and
-        self._slots - see that attribute's own __init__ comment for why
-        it exists as a separate, durable copy. Called after every
+        """Refresh self._trace_home from the CURRENT reader.desc_addr
+        and self._slots - see that attribute's own __init__ comment
+        for why it exists as a separate, durable copy. Called after
+        every
         successful _discover_at() (default behavior - see its
         update_home parameter) and after every successful
         add_address_slot()/remove_channel(), and once, explicitly, at
@@ -1129,9 +1126,9 @@ class ScopePage(QWidget):
         succeeded, for callers (load_elf(), __init__) that branch on
         it.
 
-        update_home (T11 hardware gate, re-review fix round 2): when
-        True (the default, used by every normal caller), a successful
-        discovery also refreshes self._trace_home (_capture_trace_home)
+        update_home: when True (the default, used by every normal
+        caller), a successful discovery also refreshes
+        self._trace_home (_capture_trace_home)
         - the durable recovery anchor. _recover_after_reboot() passes
         False for its OWN interim re-discovery step specifically so
         that step alone does NOT commit a new home (to an empty channel
@@ -1169,11 +1166,11 @@ class ScopePage(QWidget):
         return True
 
     def rate_label_text(self) -> str:
-        """Test-support accessor for the firmware rate readout (spec
-        point: "Rate header") - "" before READY."""
+        """Test-support accessor for the firmware rate readout (the
+        "Rate header") - "" before READY."""
         return self.rate_label.text()
 
-    # -- channel table skeleton (spec point 2) --------------------------------
+    # -- channel table skeleton -----------------------------------------------
 
     def _build_channel_table_skeleton(self) -> None:
         """The table ALWAYS has exactly MAX_CH rows, row i permanently
@@ -1225,7 +1222,7 @@ class ScopePage(QWidget):
         return item
 
     def _size_splitter_for_all_rows(self) -> None:
-        """Spec point 7: all MAX_CH slot rows visible by default,
+        """All MAX_CH slot rows visible by default,
         without dragging the splitter - computed from the channel
         table's own header/row metrics (not a hardcoded pixel guess)
         plus a small fixed allowance for the Load-ELF/toggle button
@@ -1238,7 +1235,7 @@ class ScopePage(QWidget):
         top_h = header_h + rows_h + frame + 40
         self.splitter.setSizes([top_h, 400])
 
-    # -- channel slots (spec point 2) ------------------------------------------
+    # -- channel slots ---------------------------------------------------------
 
     def channel_slots(self) -> List[Optional[dict]]:
         """Test-support + the panel's own produced interface: the raw
@@ -1285,8 +1282,8 @@ class ScopePage(QWidget):
         table, a guarded address, a misaligned address, or a
         TraceError/EngineError from the firmware write itself - renders
         inline in error_label and leaves self._slots exactly as it was
-        before the call (spec point 3: guarded/alignment refusal BEFORE
-        any write; a firmware rejection rolls the tentative slot back).
+        before the call (guarded/alignment refusals happen BEFORE any
+        write; a firmware rejection rolls the tentative slot back).
 
         Also clears the TraceStore column at the slot being occupied
         (TraceStore.clear_slot) before this entry is wired up at all -
@@ -1392,8 +1389,8 @@ class ScopePage(QWidget):
         color = CURVE_COLORS[row]
         curve = self.plot.plot([], [], pen=pg.mkPen(color=color, width=1.5),
                                name=label)
-        # setDownsampling/setClipToView are set ONCE, here, at creation
-        # (spec point 4) - pyqtgraph then decimates the in-memory
+        # setDownsampling/setClipToView are set ONCE, here, at
+        # creation - pyqtgraph then decimates the in-memory
         # series down to what the pixel width can actually show on
         # every subsequent setData(), rather than this page doing that
         # work itself.
@@ -1491,7 +1488,7 @@ class ScopePage(QWidget):
         self.channel_table.setCellWidget(row, COL_OFFSET, offset_edit)
         entry["offset_edit"] = offset_edit
 
-    # -- inline table editing (spec point 2) --------------------------------
+    # -- inline table editing -------------------------------------------------
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         """Handles a committed edit of the Name cell (double-click to
@@ -1519,7 +1516,7 @@ class ScopePage(QWidget):
         if legend_label is not None:
             legend_label.setText(new_label)
         if row == self._selected_row:
-            # the y-axis title (spec point 7) is this channel's name -
+            # the y-axis title is this channel's name -
             # keep it in sync with a live rename.
             self._update_y_axis()
 
@@ -1532,7 +1529,7 @@ class ScopePage(QWidget):
 
     def _make_number_edit(self, row: int, field: str,
                           initial: float) -> QLineEdit:
-        """A scale/offset cell (spec point 2): a plain text field, not
+        """A scale/offset cell: a plain text field, not
         a spinbox - a QDoubleValidator in scientific-notation mode
         keeps out non-numeric keystrokes, Enter commits via
         _commit_number_edit, and losing focus with an uncommitted edit
@@ -1565,7 +1562,7 @@ class ScopePage(QWidget):
         edit.setStyleSheet(INVALID_EDIT_STYLE)
         QTimer.singleShot(INVALID_EDIT_FLASH_MS, lambda: edit.setStyleSheet(""))
 
-    # -- Auto-lane (spec point 4) --------------------------------------------
+    # -- Auto-lane -------------------------------------------------------------
 
     def _on_auto_lane_toggled(self, on: bool) -> None:
         """While on, every refresh_plot() tick restacks every occupied
@@ -1593,8 +1590,8 @@ class ScopePage(QWidget):
             self.set_channel_transform(row, scale, offset)
 
     def _window_min_max(self, row: int) -> Tuple[float, float]:
-        """The raw-decoded (spec point 4: "readouts always decoded raw
-        domain" - Auto-lane fits the same domain, pre scale/offset)
+        """The raw-decoded ("readouts always decoded raw domain" -
+        Auto-lane fits the same domain, pre scale/offset)
         min/max of a channel's currently cached window series, NaN gap
         rows excluded. (0.0, 0.0) - a flat window, per
         _fit_scale_offset's guard - for a channel with no real samples
@@ -1609,7 +1606,7 @@ class ScopePage(QWidget):
             return 0.0, 0.0
         return float(min(decoded)), float(max(decoded))
 
-    # -- y axis follows the selected channel (spec point 7) ------------------
+    # -- y axis follows the selected channel ----------------------------------
 
     def _on_table_selection_changed(self) -> None:
         # selectionModel().selectedRows(), not currentRow(): Qt keeps
@@ -1672,8 +1669,8 @@ class ScopePage(QWidget):
         `symbol_list`. Any failure (bad path, unparsable ELF) is
         rendered in `error_label` - never a dialog; the QFileDialog in
         _on_load_elf_clicked is this panel's one and only dialog. On
-        success, auto-expands the collapsible symbol picker (spec
-        point 8) so the newly loaded list is immediately visible, then
+        success, auto-expands the collapsible symbol picker so the
+        newly loaded list is immediately visible, then
         looks for TRACE_DESC_SYMBOL ("ps_trace_desc") in the loaded
         table and, if present, drives discovery at its address (module
         docstring's "Discovery" paragraph) - overriding whatever
@@ -1766,7 +1763,7 @@ class ScopePage(QWidget):
                 kept.append((t, line))
         self._markers = kept
 
-    # -- cursor sync (event-log click -> scope cursor, task 4) -------------
+    # -- cursor sync (event-log click -> scope cursor) -----------------------
 
     def jump_to(self, t: float) -> None:
         """Place (or move) the scope cursor at t and flash the nearest
@@ -1816,7 +1813,7 @@ class ScopePage(QWidget):
         if any(existing is line for _t, existing in self._markers):
             line.setPen(pg.mkPen(color=MARKER_PEN, width=1))
 
-    # -- drain (spec point 5) -------------------------------------------------
+    # -- drain -----------------------------------------------------------------
 
     def _on_engine_state(self, state: str) -> None:
         """See the __init__ comments on self._poller_running/
@@ -1824,7 +1821,7 @@ class ScopePage(QWidget):
         skip reader.refresh() outright once the poller has actually
         stopped, instead of blocking the Qt main thread for a full
         Engine._exec timeout on every drain tick forever after.
-        self._target_lost/_was_lost (T11 hardware gate) let a LATER
+        self._target_lost/_was_lost let a LATER
         _drain_once() tick recognize "just recovered from a lost
         target" so it can resync the trace session instead of quietly
         resuming a now-stale one - see _recover_after_reboot()."""
@@ -1840,12 +1837,12 @@ class ScopePage(QWidget):
         TraceReader.refresh() is safe to call redundantly (it returns
         only records newer than what it has already delivered), so no
         coordination between the two timers is needed. A TraceError/
-        EngineError here (spec point 5) renders inline and the page
+        EngineError here renders inline and the page
         stays alive - the next tick, from either timer, retries. Skips
         entirely once the poller has stopped (self._poller_running) -
         see its own comment for why that guard exists.
 
-        T11 hardware gate: runs _recover_after_reboot() instead of a
+        Reboot recovery: runs _recover_after_reboot() instead of a
         normal drain on the first tick that finds the poller RUNNING
         again after having latched TARGET_LOST (self._was_lost,
         consumed/cleared here) - or, if a reboot happens WITHOUT ever
@@ -1878,13 +1875,13 @@ class ScopePage(QWidget):
         self._update_drain_health(time.monotonic())
 
     def _recover_after_reboot(self) -> None:
-        """T11 hardware gate: the Blackpill reference target is powered
+        """The Blackpill reference target is powered
         by the debug probe's own USB connection, so a replug after
         TARGET_LOST (or any other target-only reset - see
         _drain_once()'s TraceRebootedError route) is a REAL power
         cycle, not just a reconnect - firmware reboots, wr_seq/
         generation reset near 0, and the watch table goes back to
-        empty. Unlike M6's stateless register polling, this page/
+        empty. Unlike stateless register polling, this page/
         reader carry SESSION state (TraceReader.last_seq in the
         hundreds of thousands by the time this matters in practice,
         self.reader._expected_gen, the occupied watch table, this
@@ -1924,14 +1921,14 @@ class ScopePage(QWidget):
         re-discovery attempt nulls - see _discover_at's own comment on
         why) or the live self._slots (which a SUCCEEDED re-discovery
         followed by a FAILED re-submit leaves already wiped by that
-        re-discovery's own _reset_channels()). Re-review fix round 2:
-        an earlier version read those live values directly, so a single
-        transient re-discovery failure (plausible right after a real
-        reconnect) permanently disabled every later recovery attempt
-        for the page's life, and a discover-ok/set_watch-fails sequence
-        would have made any FUTURE retry restore zero channels instead
-        of the originals - both now impossible, since self._trace_home
-        is left completely untouched by a failed attempt.
+        re-discovery's own _reset_channels()). Reading either live
+        value directly would let a single transient re-discovery
+        failure (plausible right after a real reconnect) permanently
+        disable every later recovery attempt for the page's life, and
+        a discover-ok/set_watch-fails sequence would make any FUTURE
+        retry restore zero channels instead of the originals - both
+        impossible while self._trace_home is left completely untouched
+        by a failed attempt.
 
         A failure at either step renders inline via the same paths
         those primitives already use (_discover_at()/set_watch()'s own
@@ -1992,11 +1989,11 @@ class ScopePage(QWidget):
         self.on_info("target rebooted - trace channels resubmitted")
 
     def _update_status_health(self) -> None:
-        """Per spec 3.4: a nonzero desc.status observed
-        during a drain tick is surfaced inline, naming the code -
-        previously only a set_watch() rejection ever raised on a bad
-        status, so a status that stayed (or went) bad through any
-        other path had no on-screen surface at all. Mirrors
+        """A nonzero desc.status observed during a drain tick is
+        surfaced inline, naming the code (status codes: see the M7
+        trace spec) - set_watch() raises on a bad status at submit
+        time, but a status that stays (or goes) bad through any other
+        path has no on-screen surface except this one. Mirrors
         _refresh_error_active's own non-clobbering rule via
         self._status_error_active: an OK status only ever clears a
         message THIS method set, never an unrelated refusal (e.g.
@@ -2012,7 +2009,7 @@ class ScopePage(QWidget):
             self._status_error_active = False
 
     def _update_drain_health(self, now: float) -> None:
-        """Spec point 6: reader.lost delta within roughly the last
+        """Shows the reader.lost delta within roughly the last
         roll-mode window (engine.history.window_s) - hidden entirely
         when nothing has been lost recently, rather than an all-time
         total that would never go back to zero even long after the
@@ -2075,24 +2072,23 @@ class ScopePage(QWidget):
             entry["curve"].setData(x, decoded, connect="finite")
             entry["value_item"].setText(self._value_text_for(row))
 
-    # -- crosshair / Value column readout (feature 1, spec point 6) ---------
+    # -- crosshair / Value column readout ------------------------------------
 
     def _value_text_for(self, row: int) -> str:
         """The Value column's text for one channel - two states, no
-        PIN, no third "locked" state (spec point 5): mouse off the
-        plot (self._crosshair_t is None) shows the newest REAL sample
+        PIN, no third "locked" state: mouse off the plot
+        (self._crosshair_t is None) shows the newest REAL sample
         (self.store.newest(), which already skips NaN gap rows); mouse
         on the plot shows the value at the crosshair's time, found via
         value_at() against a NaN-filtered view of this row's cached
         series. Either way the reading is the type-decoded, dual-radix
-        value (spec point 6), RAW (decode()'d, but never
-        scale/offset'd - "Readouts always decoded raw domain", spec
-        point 4) rather than the scaled/fit display value on the
+        value, RAW (decode()'d, but never scale/offset'd - "readouts
+        always decoded raw domain") rather than the scaled/fit
+        display value on the
         curve, which is the whole point of this readout existing
         alongside the curve. jump_to()'s cursor line never reaches
-        this method at all - an event-log click only moves that line,
-        per spec point 5; to read the value at an event's moment, stop
-        and hover."""
+        this method at all - an event-log click only moves that line;
+        to read the value at an event's moment, stop and hover."""
         entry = self._slots[row]
         if self._crosshair_t is None:
             raw = self.store.newest(row)
@@ -2129,8 +2125,8 @@ class ScopePage(QWidget):
 
     def eventFilter(self, obj, event) -> bool:
         """Installed on plot_widget only, to catch the mouse leaving
-        the plot widget entirely (spec point 5's "mouse off plot"
-        state) - sigMouseMoved (the SignalProxy above) only fires on
+        the plot widget entirely (the "mouse off plot" state) -
+        sigMouseMoved (the SignalProxy above) only fires on
         an actual move *within* the graphics scene, so a mouse that
         exits the widget without a trailing in-scene move never
         reaches _on_mouse_moved's own out-of-bounds check."""
@@ -2139,7 +2135,7 @@ class ScopePage(QWidget):
         return super().eventFilter(obj, event)
 
     def _clear_crosshair(self) -> None:
-        """Two-state cursor readout (spec point 5): "mouse off plot" -
+        """Two-state cursor readout: "mouse off plot" -
         hides the crosshair line, and the Value column reverts to
         showing each channel's newest sample (via _value_text_for,
         which already falls back to that when self._crosshair_t is
@@ -2155,7 +2151,7 @@ class ScopePage(QWidget):
         self._last_now, the last refresh's now; see the module
         docstring's "X axis" paragraph) - and refresh every channel
         row's Value cell plus the time label and Value column header
-        (spec point 5's "mouse on plot" state: "Value @ -X.Xs").
+        (the "mouse on plot" state: "Value @ -X.Xs").
         Reads only self._last_series, populated by the most recent
         refresh_plot(): no store.series() call here, so a mouse-move
         event costs no extra TraceStore copy."""
@@ -2195,7 +2191,7 @@ class ScopePage(QWidget):
                 continue
             entry["value_item"].setText(self._value_text_for(row))
 
-    # -- per-channel scale/offset (feature 2) --------------------------------
+    # -- per-channel scale/offset ---------------------------------------------
 
     def set_channel_transform(self, row: int, scale: float,
                               offset: float) -> None:

@@ -1,16 +1,12 @@
 """Main application window: central diagram view plus chrome toolbar.
 
-Ported from prototype/ui_proto.py's Main class - toolbar construction
-(stylesheet, actions) is the same pattern, wired to the real
-Engine/EngineBridge/DiagramState instead of the prototype's StubEngine
-and stub-dict snapshots. The prototype's single global Freeze has
-since been replaced by per-page Run/Stop (spec point 1, M6 scope-view
-plan v2): each page carries its own button in the same top-right
+Run/Stop is per-page, never global: each page carries its own button
+in the same top-right
 position - dp_run_stop_btn on the Data Path page header,
 ScopePage.run_stop_btn on the Scope page - and the toolbar carries
 none. The toolbar holds only the target name, the Data Path/Scope
-page switch (two exclusive buttons at a fixed position - the old
-QTabWidget tab bar rendered as a segmented control that shifted
+page switch (two exclusive buttons at a fixed position - unlike a
+QTabWidget tab bar, which renders as a segmented control that shifts
 position with the page content) and the poll rate."""
 from collections import OrderedDict
 from typing import Any, Dict, Optional, Set
@@ -38,25 +34,24 @@ from .panels.memory_page import MemoryPage
 from .panels.register_page import RegisterPage
 from .style import COL_GREY
 
-# M8 layout edit mode: dashed border cue applied to the diagram view's
+# Layout edit mode: dashed border cue applied to the diagram view's
 # viewport while editing (a plain stylesheet swap - cleared back to ""
 # on toggle-off), so the user always has an unambiguous "you are
 # editing the layout" cue independent of the toolbar button's own
 # checked state.
 _EDIT_VIEW_STYLE = "QGraphicsView { border: 2px dashed #999999; }"
 
-# Manual-gate wave B, B4 (dynamic alignment guides): light grey dashed
+# Dynamic alignment guides: light grey dashed
 # - reuses the existing palette's COL_GREY rather than adding a new
-# color, per the "no new colors beyond ui/style.py... add if needed"
-# instruction (grey already covers "light grey dashed", so nothing new
-# was needed). GUIDE_MARGIN pads the block-extents-derived span the
+# color (no new colors beyond ui/style.py unless genuinely needed,
+# and grey already covers "light grey
+# dashed"). GUIDE_MARGIN pads the block-extents-derived span the
 # reference lines are drawn across, so a line reaches visibly past the
 # outermost block rather than stopping exactly at its edge.
 _GUIDE_PEN = QPen(COL_GREY, 1, Qt.DashLine)
 _GUIDE_MARGIN = 200
 
-# Low sweep-rate warning on the toolbar's poll label (moved here from
-# the scope page's budget label, which used to repeat the same rate):
+# Low sweep-rate warning on the toolbar's poll label:
 # below LOW_RATE_HZ - and above 0, a reported stall is not a budget
 # problem - the label turns orange with a tooltip naming the likely
 # cause. Global on purpose: a saturated read budget slows BOTH pages.
@@ -65,7 +60,7 @@ RATE_ORANGE_STYLE = "color: #E65100;"
 RATE_TOOLTIP = ("high read count is lowering the sweep rate; prefer "
                 "contiguous addresses")
 
-# Manual-gate finding 3: trackpad/wheel zoom. _ZOOM_MIN/_ZOOM_MAX bound
+# Trackpad/wheel zoom. _ZOOM_MIN/_ZOOM_MAX bound
 # the view's CUMULATIVE scale (tracked in _DiagramView._zoom, since
 # extracting a scalar "current zoom" back out of a QTransform is more
 # indirection than just keeping our own running total); both the wheel
@@ -94,21 +89,21 @@ def _clamped_zoom_factor(current_scale: float, requested_factor: float,
 
 
 class _DiagramView(QGraphicsView):
-    """QGraphicsView with wheel-to-zoom and trackpad pinch-to-zoom. The
-    prototype overrode wheelEvent on the QMainWindow itself; here it
+    """QGraphicsView with wheel-to-zoom and trackpad pinch-to-zoom.
+    wheelEvent
     lives on the view widget directly, which receives wheel events
     unconditionally (independent of Qt's event-bubbling path for
     unhandled events).
 
-    Manual-gate finding 3 (trackpad zoomed out but never in): macOS
+    macOS
     trackpad wheel events typically carry angleDelta().y() == 0 (the
     trackpad reports pixel-based scrolling, not the discrete "clicks"
-    angleDelta measures) - the old `angleDelta().y() > 0 else
-    zoom-out` logic fell into the zoom-out branch on EVERY trackpad
-    scroll, so the view could zoom out but never in. pixelDelta() is
-    now preferred whenever it is non-zero; angleDelta() is the
+    angleDelta measures) - a plain `angleDelta().y() > 0 else
+    zoom-out` test falls into the zoom-out branch on EVERY trackpad
+    scroll, so the view can zoom out but never in. pixelDelta() is
+    therefore preferred whenever it is non-zero; angleDelta() is the
     fallback for a real (non-trackpad) wheel; a genuinely zero delta
-    from either is a no-op rather than the old default zoom-out.
+    from either is a no-op, never a default zoom-out.
 
     A trackpad PINCH is an entirely separate Qt event -
     QEvent.NativeGesture, NativeGestureType.ZoomNativeGesture subtype
@@ -116,7 +111,7 @@ class _DiagramView(QGraphicsView):
     event() override. Both paths share one cumulative-scale clamp
     (_clamped_zoom_factor, module-level, pure, unit-tested directly).
 
-    M8 wave B fix round 3 (user-acceptance finding 1 root cause): both
+    Both
     paths also share this method as the one choke point for a second
     guard - self.scale() rescales the view's transform in place, and
     if a block/legend/waypoint drag is in flight (the scene has a
@@ -144,9 +139,9 @@ class _DiagramView(QGraphicsView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._zoom = 1.0
-        # Acceptance round 6: zoom anchors under the mouse cursor
-        # (Qt's default AnchorViewCenter kept re-centering the view,
-        # so zooming in always drifted away from what the user was
+        # Zoom anchors under the mouse cursor
+        # (Qt's default AnchorViewCenter keeps re-centering the view,
+        # so zooming in drifts away from what the user is
         # pointing at). Applies to both wheel and trackpad pinch -
         # scale() honors this anchor whenever the cursor is over the
         # viewport, falling back to center otherwise. Safe w.r.t. the
@@ -190,11 +185,10 @@ class MainWindow(QMainWindow):
 
         self.engine = engine
         self.bridge = bridge
-        # Data Path's own stop flag (spec point 1: per-page run/stop
-        # replaces the old global Freeze) - holds the diagram +
-        # Inspector display exactly like the old self.frozen did,
-        # minus the scope side effect: Scope's stop state
-        # (scope_page._stopped) is now completely independent, set
+        # Data Path's own stop flag (per-page run/stop,
+        # never global) - holds the diagram +
+        # Inspector display, and ONLY that: Scope's stop state
+        # (scope_page._stopped) is completely independent, set
         # only via ScopePage.set_stopped().
         self._datapath_stopped = False
         self.last_update: Optional[EngineUpdate] = None
@@ -203,7 +197,7 @@ class MainWindow(QMainWindow):
         self.diagram_state = DiagramState()
         self.scene, self.blocks, self.wires = build_scene(
             engine.topology, self.diagram_state)
-        # M8 task 5 fix round 2: a wire that started with an explicit
+        # A wire that started with an explicit
         # path seeds its auto-route fallback wrong (WireItem.__init__'s
         # comment) - correct every wire's fallback right away, before
         # the window is ever shown, so even a first-interaction
@@ -220,9 +214,9 @@ class MainWindow(QMainWindow):
         self.view = _DiagramView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
-        # Acceptance round 6: the live coordinate readout (wave B3)
+        # The live coordinate readout
         # lives INSIDE the drawing area - reading the window-bottom
-        # status bar mid-drag meant taking eyes off the diagram. An
+        # status bar mid-drag means taking eyes off the diagram. An
         # overlay label pinned to the view's top-left corner, shown
         # only while a gesture is feeding coordinates.
         self.live_coord_label = QLabel(self.view)
@@ -256,7 +250,7 @@ class MainWindow(QMainWindow):
             self._on_layout_geometry_changed)
         self.diagram_state.on_block_live_moved = self._on_block_live_moved
         self.diagram_state.on_live_status = self._on_live_status
-        # Acceptance round 8: a dragged waypoint handle drives the
+        # A dragged waypoint handle drives the
         # same guide lines a dragged block does - the handle carries
         # its own _active_guides, which is all
         # _update_alignment_guides reads.
@@ -293,7 +287,7 @@ class MainWindow(QMainWindow):
         through the text's full horizontal span and can cross a
         character - visible on the f411 demo target's dma2->busmx edge,
         whose slope is ~50 degrees because `busmx` has no declared
-        ports (Task 8's straight-route fallback). Restricting the
+        ports (the straight-route fallback). Restricting the
         search to near-horizontal segments first sidesteps that
         collision (lands on busmx->sram1 for f411) while still falling
         back to the plain longest segment - even a diagonal one - if an
@@ -350,10 +344,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         # The ONLY Data Path/Scope switch: two exclusive checkable
-        # buttons at a fixed toolbar position. (The QTabWidget tab bar
-        # this replaces rendered as a platform segmented control whose
-        # on-screen position shifted with the page content - a UX
-        # finding.) setChecked() below in _on_tab_changed never emits
+        # buttons at a fixed toolbar position. (A QTabWidget tab bar
+        # renders as a platform segmented control whose
+        # on-screen position shifts with the page content - hence
+        # buttons.) setChecked() below in _on_tab_changed never emits
         # clicked, so programmatic tab switches cannot recurse here.
         self.datapath_page_btn = QToolButton()
         self.datapath_page_btn.setText("Data Path")
@@ -371,12 +365,12 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.datapath_page_btn)
         tb.addWidget(self.scope_page_btn)
 
-        # M8 layout edit mode: edit_layout_btn and layout_dirty_label
-        # used to live here (toolbar), but a manual-gate finding (1)
-        # was that they read as a third page switcher next to Data
-        # Path/Scope - both moved into the Data Path page's own header
-        # row instead (_build_central_tabs, right after Halt MCU); see
-        # that method for their construction.
+        # Layout edit mode: edit_layout_btn and layout_dirty_label
+        # live on the Data Path page's own header row, NOT here - on
+        # the toolbar they read as a third page switcher next to Data
+        # Path/Scope
+        # (_build_central_tabs, right after Halt MCU; see
+        # that method for their construction).
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -388,12 +382,11 @@ class MainWindow(QMainWindow):
 
     def _build_docks(self) -> None:
         """Right "Inspector" dock: a QStackedWidget holding the register
-        page (block clicks, Task 10), the flow page (edge clicks,
-        Task 11), and the memory page (memory-kind block clicks, Task
-        12). Bottom "Event log" dock: same size (140px) as the
-        prototype's `dock2`.
+        page (block clicks), the flow page (edge clicks),
+        and the memory page (memory-kind block clicks).
+        Bottom "Event log" dock: 140px.
 
-        Inspector's visibility is now tied to which central tab is
+        Inspector's visibility is tied to which central tab is
         active (_on_tab_changed, below - visible only on Data Path; a
         full-page Scope has no room for it and it is irrelevant
         there). Event log stays visible on both tabs - events matter
@@ -420,15 +413,16 @@ class MainWindow(QMainWindow):
 
     def _build_central_tabs(self) -> None:
         """Central widget: two full-page tabs, "Data Path" (the
-        existing diagram QGraphicsView) and "Scope" - replacing the
-        old diagram-plus-docked-scope stack per a UX finding: when
-        watching the scope the diagram is irrelevant, and both were
+        diagram QGraphicsView) and "Scope" - full pages, not a
+        diagram-plus-docked-scope stack: when
+        watching the scope the diagram is irrelevant, and the two are
         cramped sharing the window.
 
-        The pages live in a plain QStackedWidget (still named
+        The pages live in a plain QStackedWidget (named
         self.tabs - QStackedWidget shares QTabWidget's
-        currentIndex/setCurrentIndex/currentChanged surface, so every
-        caller and test kept working across the switch); the visible
+        currentIndex/setCurrentIndex/currentChanged surface, so
+        callers and tests can treat it like a tab
+        widget); the visible
         switch is the pair of toolbar page buttons, not a tab bar.
 
         The Data Path page wraps the diagram view under a header row
@@ -437,15 +431,15 @@ class MainWindow(QMainWindow):
         Run/Stop on the right - the SAME top-right position as the
         Scope page's own big button, deliberately (user requirement:
         Run/Stop sits in one consistent place on both pages) - and,
-        in between, M8's edit_layout_btn/layout_dirty_label (manual-
-        gate finding 1: these used to sit on the toolbar next to the
-        Data Path/Scope page switch and read as a third page there;
-        moved here, right after Halt MCU, with the dirty label right
+        in between, edit_layout_btn/layout_dirty_label (on the
+        toolbar these would read as a third page switch next to the
+        Data Path/Scope pair, so they live
+        here, right after Halt MCU, with the dirty label right
         beside the button so it stays visible whether or not edit mode
         is on).
 
-        Below that header, M8 (task 5) adds a second row -
-        layout_edit_strip - carrying the Save layout/Revert/Auto-layout
+        Below that header, a second row -
+        layout_edit_strip - carries the Save layout/Revert/Auto-layout
         buttons; it is hidden until edit_layout_btn
         (_on_edit_layout_toggled) turns edit mode on.
 
@@ -469,22 +463,22 @@ class MainWindow(QMainWindow):
         self.halt_btn.clicked.connect(self._toggle_halt)
         header.addWidget(self.halt_btn)
 
-        # M8 layout edit mode (task 5, manual-gate finding 1): moved
-        # off the toolbar into this header row, right after Halt MCU.
-        # Toggle behavior (drives DiagramState.edit_mode + every item's
+        # Layout edit mode toggle, in this header row right after
+        # Halt MCU (not the toolbar - see _build_toolbar's comment).
+        # The toggle drives DiagramState.edit_mode + every item's
         # set_editable together - see _on_edit_layout_toggled's
-        # docstring for why those two must never be set independently)
-        # is unchanged; only the widgets' PARENT changed.
-        # User-acceptance finding 2, round 2: a QToolButton here (even
-        # with matching setMinimumHeight/Width - round 1's fix) still
-        # rendered with the toolbar-era look (smaller font, darker
+        # docstring for why those two must never be set independently.
+        # A plain QPushButton, deliberately the SAME widget class as
+        # its neighbors: a QToolButton here (even
+        # with matching setMinimumHeight/Width)
+        # renders with a toolbar look (smaller font, darker
         # fill, different height/baseline) because it is a DIFFERENT
         # WIDGET CLASS from its neighbors, with its own default style.
         # halt_btn/dp_run_stop_btn are plain QPushButtons; matching
         # the class (not just the size hints) is what actually gets
         # the same flat, tall look - including its CHECKED state,
-        # which now renders as the same standard pressed-pushbutton
-        # look dp_run_stop_btn's own checked state already uses.
+        # which renders as the same standard pressed-pushbutton
+        # look dp_run_stop_btn's own checked state uses.
         self.edit_layout_btn = QPushButton("Edit Layout")
         self.edit_layout_btn.setCheckable(True)
         self.edit_layout_btn.setMinimumHeight(36)
@@ -495,7 +489,7 @@ class MainWindow(QMainWindow):
         self.layout_dirty_label = QLabel("unsaved layout changes")
         self.layout_dirty_label.setStyleSheet("color: #B71C1C;")
         self.layout_dirty_label.setVisible(False)
-        # User-acceptance finding 2: explicitly vertically centered in
+        # Explicitly vertically centered in
         # the row - the row's height is driven by the 36px buttons on
         # either side of it, and the label should not default to
         # whatever top/stretch behavior QHBoxLayout gives an
@@ -547,7 +541,7 @@ class MainWindow(QMainWindow):
         if not rect.isEmpty():
             self.view.fitInView(rect, Qt.KeepAspectRatio)
 
-    # -- M8 layout edit mode (task 5): mode toggle, undo, save/revert -------
+    # -- layout edit mode: mode toggle, undo, save/revert --------------------
 
     def _init_layout_edit_state(self) -> None:
         """Undo/dirty bookkeeping for the layout editor. self._layout_world
@@ -564,13 +558,14 @@ class MainWindow(QMainWindow):
         tracks which edges changed this session). Undo does NOT clear
         the dirty flag: landing back on the saved geometry via Z still
         leaves layout_dirty_label showing until an explicit Save or
-        Revert (v1 simplification, not worth a byte-for-byte compare)."""
+        Revert (a deliberate simplification - not worth a
+        byte-for-byte compare)."""
         self._undo_stack = []
         self._dirty_wire_keys = set()
         self._layout_dirty = False
         self._legend_moved = self.engine.topology.legend is not None
         self._layout_world = self._capture_layout_world()
-        # M8 wave 2 (Visio-style connector glue): (block_id, x, y) of
+        # Visio-style connector glue: (block_id, x, y) of
         # the block's position as of the LAST on_block_live_moved call
         # this gesture, or None between gestures - see
         # _on_block_live_moved's docstring. Reset to None any time a
@@ -580,8 +575,8 @@ class MainWindow(QMainWindow):
         # position that block reached some other way.
         self._live_move_tracking = None
 
-        # M8 wave B4b (dynamic alignment guides - rendering half of
-        # wave B4a's detection): one vertical + one horizontal
+        # Dynamic alignment guides - the rendering half of the
+        # detection items.py does: one vertical + one horizontal
         # QGraphicsLineItem, owned by MainWindow (the scene is
         # MainWindow's own - items.py's BlockItem only computes WHICH
         # lines are active, in _active_guides, it never touches the
@@ -602,8 +597,8 @@ class MainWindow(QMainWindow):
         """The ONE toggle for edit mode. diagram_state.edit_mode (gates
         click-vs-drag routing in items.py) and every item's own
         set_editable (gates whether a drag/resize/waypoint-drag
-        actually commits) are two independent switches upstream - see
-        the task handover note - and MUST always be flipped together
+        actually commits) are two independent switches upstream, and
+        MUST always be flipped together
         here so the two can never drift apart.
 
         Toggling off clears the undo stack (spec: "Stack clears on
@@ -619,7 +614,7 @@ class MainWindow(QMainWindow):
         Revert. Only editability, the dashed viewport cue and the
         strip's visibility otherwise change.
 
-        M8 wave B fix round 1: toggle-off cancels any in-flight
+        Toggle-off cancels any in-flight
         gesture's VISUALS (_cancel_gesture_visuals) BEFORE the
         set_editable(False) loop below runs - items lose their
         gesture-tracking state (WireItem._clear_handles destroys any
@@ -651,8 +646,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_progress_edges(self) -> None:
         """Re-picks which edge carries each activity's progress text
-        (_build_progress_edge_map). The pick is geometry-based and M8
-        made geometry editable at runtime, so every layout-changing
+        (_build_progress_edge_map). The pick is geometry-based and
+        geometry is editable at runtime, so every layout-changing
         path calls this - otherwise a re-routed diagram could keep
         the text on exactly the steep diagonal segment the picker
         exists to avoid, until the next app start."""
@@ -670,7 +665,7 @@ class MainWindow(QMainWindow):
             wire = self.wires.get(eid)
             if wire is not None:
                 wire.apply_points(points)
-        # M8 task 5 fix round 2: blocks above may have just moved (this
+        # Blocks above may have just moved (this
         # is undo's only call site) - re-route every currently-pointless
         # wire from their RESTORED geometry, and refresh every wire's
         # auto-route fallback to match, same as every other site that
@@ -678,10 +673,10 @@ class MainWindow(QMainWindow):
         for wire in self.wires.values():
             wire.refresh_auto_route(self.blocks)
         self._refresh_progress_edges()
-        # M8 wave 2: this bypassed the live-drag path entirely - any
+        # This bypassed the live-drag path entirely - any
         # in-progress live-move tracking baseline is now meaningless.
         self._live_move_tracking = None
-        # M8 wave B fix round 1: undo (this method's only call site)
+        # Undo (this method's only call site)
         # can land mid-gesture - cancel any in-flight gesture visual
         # the popped snapshot did not itself already account for.
         self._cancel_gesture_visuals()
@@ -708,35 +703,35 @@ class MainWindow(QMainWindow):
         self._layout_world = new
         self._layout_dirty = True
         self._update_layout_dirty_label()
-        # M8 task 5 fix round 2: this fires after EVERY gesture, block
+        # This fires after EVERY gesture, block
         # drag/resize commits included - re-route every currently-
         # pointless wire from the blocks' now-current geometry (a no-op
         # for a wire whose endpoints did not move) and refresh every
         # wire's auto-route fallback, so a pointless edge's line keeps
-        # following a dragged block (spec 3) and a later delete-to-
+        # following a dragged block and a later delete-to-
         # auto-route on an explicit-path wire never falls back to a
         # stale route.
         for wire in self.wires.values():
             wire.refresh_auto_route(self.blocks)
         self._refresh_progress_edges()
-        # M8 wave 2: this gesture (whatever kind) is now fully
+        # This gesture (whatever kind) is now fully
         # committed - a block's live-move tracking baseline, if any,
         # is stale from here on (the NEXT drag on that block starts a
         # fresh gesture with its own baseline).
         self._live_move_tracking = None
-        # M8 wave B fix round 1: a normal commit already had its own
+        # A normal commit already has its own
         # item-level release handler clear magnet-highlight/readout,
         # so this is a redundant (idempotent, cheap) pass in the
-        # common case - but routing every gesture-terminating path
+        # common case - but every gesture-terminating path routes
         # through the SAME _cancel_gesture_visuals, rather than only
         # calling _clear_alignment_guides here and the fuller sweep
-        # elsewhere, is the one-unified-path the review asked for.
+        # elsewhere: one unified path.
         self._cancel_gesture_visuals()
 
     def _on_block_live_moved(self, block_id: str) -> None:
         """Wired to diagram_state.on_block_live_moved - fires on EVERY
-        snapped step of a block drag, well before release/commit (M8
-        wave 2, Visio-style connector glue). Unlike
+        snapped step of a block drag, well before release/commit
+        (Visio-style connector glue). Unlike
         _on_layout_geometry_changed this only touches the wires
         actually attached to `block_id` (cheap - there are only ever a
         few), and does not touch the undo stack or dirty bookkeeping
@@ -778,7 +773,7 @@ class MainWindow(QMainWindow):
         self._live_move_tracking = (block_id, x, y)
         for wire in attached:
             wire.refresh_auto_route(self.blocks)
-        self._update_alignment_guides(item)   # M8 wave B4b
+        self._update_alignment_guides(item)   # alignment guides
 
     def _diagram_bounds(self) -> QRectF:
         """Bounding rect of every block's CURRENT geometry, padded by
@@ -801,9 +796,9 @@ class MainWindow(QMainWindow):
                       max(ys1) - min(ys0) + 2 * _GUIDE_MARGIN)
 
     def _update_alignment_guides(self, item) -> None:
-        """M8 wave B4b: reads the dragged BlockItem's _active_guides
-        (set by its own itemChange during the snap decision - wave
-        B4a) and shows/positions the matching QGraphicsLineItem(s)
+        """Reads the dragged BlockItem's _active_guides
+        (set by its own itemChange during the snap
+        decision) and shows/positions the matching QGraphicsLineItem(s)
         across the current diagram bounds, or hides whichever axis has
         no active alignment."""
         gx, gy = item._active_guides
@@ -824,23 +819,24 @@ class MainWindow(QMainWindow):
         self._guide_h.setVisible(False)
 
     def _cancel_gesture_visuals(self) -> None:
-        """M8 wave B fix round 1 (findings 1-3, one design gap): a
+        """A
         single, unified sweep of every in-flight-gesture VISUAL that
-        has no other guaranteed terminator - alignment guides (B4),
-        any block's magnet-highlight outline (B2), and the status-bar
-        live readout (B3) - all three are driven by mouse-move events
+        has no other guaranteed terminator - alignment guides,
+        any block's magnet-highlight outline, and the
+        live coordinate readout - all three are driven by mouse-move
+        events
         that a real drag's own mouseReleaseEvent normally clears, but
         nothing FORCES a release to ever happen: edit-mode toggle-off,
         undo, revert, and auto-layout can all land mid-gesture (the
-        user releases the mouse only after, if at all) and none of
-        those four previously reset this trio. Call this from all four
+        user releases the mouse only after, if at all), so
+        all four call this
         BEFORE the state it would otherwise be reacting to changes
         (toggle-off: before items lose editability, so this method's
         own reads/writes see the same item states a live gesture would
         have). Magnet highlight is swept unconditionally across every
         block (set_magnet_highlight(False) is idempotent/cheap) rather
         than tracked centrally - WireItem._clear_handles independently
-        clears its own tracked target too (finding 2), so the two
+        clears its own tracked target too, so the two
         never depend on each other; this is a second, complete
         backstop, not a partial one relying on that item-level fix
         having already run first."""
@@ -850,14 +846,15 @@ class MainWindow(QMainWindow):
         self._on_live_status("")
 
     def _on_live_status(self, msg: str) -> None:
-        """Wired to diagram_state.on_live_status (M8 wave B3): a block
+        """Wired to diagram_state.on_live_status: a block
         drag/resize (BlockItem/_ResizeHandle), a waypoint drag
         (WaypointHandle), or a legend drag (LegendItem) all forward
         their own formatted "id: x, y (w x h)" / "waypoint: x, y" /
         "legend: x, y" string here on every live move step, and an
-        empty string on release. Acceptance round 6 moved the readout
-        from the window status bar into live_coord_label, an overlay
-        inside the drawing area itself (see __init__) - visible only
+        empty string on release. The readout renders in
+        live_coord_label, an overlay
+        inside the drawing area itself rather than the window status
+        bar (see __init__) - visible only
         while a gesture feeds it."""
         if msg:
             self.live_coord_label.setText(msg)
@@ -946,7 +943,7 @@ class MainWindow(QMainWindow):
         self.legend.apply_geometry(lx, ly, 0, 0)
         self.engine.topology.legend = fresh.legend
 
-        # M8 task 5 fix round 2: blocks above were just reverted to
+        # Blocks above were just reverted to
         # their on-disk geometry - re-route every currently-pointless
         # wire from THAT geometry (and refresh every wire's fallback),
         # same as every other block-geometry-changing site.
@@ -959,24 +956,25 @@ class MainWindow(QMainWindow):
         self._legend_moved = fresh.legend is not None
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
-        self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
-        # M8 wave B fix round 1: Revert can land mid-gesture too.
+        self._live_move_tracking = None   # bypassed the drag path
+        # Revert can land mid-gesture too.
         self._cancel_gesture_visuals()
 
     def _on_auto_layout(self) -> None:
         """auto_layout() only returns (x, y) - width/height are kept as
         they currently are on each item. Explicit edge points are
-        cleared on EVERY wire (spec 6: auto-layout re-routes everything
-        straight, not just the blocks it moved) and every wire is
-        re-routed from the NEW block positions (fix round 2:
-        refresh_auto_route, so a pointless wire's line actually follows
+        cleared on EVERY wire (auto-layout re-routes everything
+        straight, not just the blocks it moved - see the M8 layout
+        spec) and every wire is
+        re-routed from the NEW block positions
+        (refresh_auto_route, so a pointless wire's line actually follows
         its moved blocks instead of rendering its pre-auto-layout
         path) - but only a wire that ACTUALLY HAD explicit points
-        before the clear is added to the dirty set (fix round 2: a
+        before the clear is added to the dirty set (a
         wire that was already pointless gains nothing to save, and
         marking it dirty would stamp a needless `points: []` onto an
         edge entry that never had one, breaking the clean-diff
-        promise - spec section 5). One undo snapshot is pushed up
+        promise). One undo snapshot is pushed up
         front (apply_geometry/apply_points are callback-silent, so
         this method owns pushing it) so a single Z restores the
         pre-auto-layout picture whole."""
@@ -991,7 +989,7 @@ class MainWindow(QMainWindow):
             _, _, w, h = item.geometry()
             item.apply_geometry(x, y, w, h)
 
-        # Acceptance round 5: the legend moves too. Left at its stale
+        # The legend moves too. Left at its stale
         # pre-layout coordinates it routinely lands on top of a
         # relocated block (seen on f411: legend over the bus matrix).
         # Below the whole picture is the one spot no block placement
@@ -1019,8 +1017,8 @@ class MainWindow(QMainWindow):
         self._layout_dirty = True
         self._layout_world = self._capture_layout_world()
         self._update_layout_dirty_label()
-        self._live_move_tracking = None   # M8 wave 2: bypassed the drag path
-        # M8 wave B fix round 1: Auto-layout can land mid-gesture too.
+        self._live_move_tracking = None   # bypassed the drag path
+        # Auto-layout can land mid-gesture too.
         self._cancel_gesture_visuals()
 
     # -- actions ---------------------------------------------------------
@@ -1038,8 +1036,8 @@ class MainWindow(QMainWindow):
         self.halt_btn.setText("Resume MCU" if halting else "Halt MCU")
 
     def set_datapath_stopped(self, on: bool) -> None:
-        """The Data Path page's own independent stop flag (spec
-        point 1: diagram+Inspector hold, the display only - the
+        """The Data Path page's own independent stop flag
+        (diagram+Inspector hold, the display only - the
         target and the poller keep running, and the Scope page's own
         flag is untouched). Mirror of ScopePage.set_stopped: syncs
         the page button's label/checked state whichever entry point
@@ -1065,7 +1063,7 @@ class MainWindow(QMainWindow):
         resync there. Lazily constructs the real ScopePage the first
         time the Scope page is activated.
 
-        M8 (task 5): switching to Scope while the layout editor is on
+        Switching to Scope while the layout editor is on
         turns it off - unlike the page buttons above, setChecked here
         is meant to recurse into _on_edit_layout_toggled (via the
         toggled signal, not clicked) so editability/the dashed cue/the
@@ -1082,7 +1080,7 @@ class MainWindow(QMainWindow):
             self._activate_scope_tab()
 
     def _activate_scope_tab(self) -> None:
-        """Lazy construction (per the M6 scope-view plan): the
+        """Lazy construction: the
         pyqtgraph-importing module is only imported here, on first
         activation of the Scope tab, not at MainWindow import time -
         pyqtgraph's import cost is paid only if the user ever visits
@@ -1099,10 +1097,10 @@ class MainWindow(QMainWindow):
         a second construction - the method converges on Scope,
         active, with the real page in place. The page starts running
         regardless of Data Path's own _datapath_stopped (independent
-        flags, spec point 1)."""
+        flags)."""
         from .panels.scope_page import ScopePage
         self.scope_page = ScopePage(self.engine)
-        # T11 hardware gate: lets ScopePage's own target-reboot
+        # Lets ScopePage's own target-reboot
         # recovery (_recover_after_reboot) post one info line to the
         # SAME event log every other info/anomaly row goes through,
         # without ScopePage needing to own (or import) EventLog
@@ -1121,8 +1119,8 @@ class MainWindow(QMainWindow):
 
     def _select_block(self, block_id: str) -> None:
         """Wired to diagram_state.on_block_clicked (ui/diagram/items.py's
-        BlockItem.mousePressEvent). Ported from the prototype's
-        Main.select_block: marks the block selected, clears any flow
+        BlockItem.mousePressEvent).
+        Marks the block selected, clears any flow
         highlight, and routes the Inspector dock to the register page
         for this block - except a memory-kind block (SRAM/Flash, no SVD
         peripheral registers to show), which routes to the memory page
@@ -1144,9 +1142,9 @@ class MainWindow(QMainWindow):
 
     def _on_edge_clicked(self, edge_id: str) -> None:
         """Wired to diagram_state.on_edge_clicked (ui/diagram/items.py's
-        WireItem.mousePressEvent). Ported from the prototype's
-        Main.select_edge: an edge that belongs to no activity is a
-        no-op (reuses self._flow_edges, T9, for that membership check);
+        WireItem.mousePressEvent).
+        An edge that belongs to no activity is a
+        no-op (reuses self._flow_edges for that membership check);
         otherwise clears block selection, routes the Inspector dock to
         the flow page for this edge, and highlights the flow the page
         auto-picked."""
@@ -1163,9 +1161,9 @@ class MainWindow(QMainWindow):
 
     def _highlight_flow(self, flow_id: Optional[str]) -> None:
         """Wired to flow_page.on_pick as well as called directly from
-        _on_edge_clicked. Ported from the prototype's
-        Main.highlight_flow: sets diagram_state.flow_edges/flow_blocks
-        from a flow_id - edges via self._flow_edges (T9), blocks via
+        _on_edge_clicked.
+        Sets diagram_state.flow_edges/flow_blocks
+        from a flow_id - edges via self._flow_edges, blocks via
         the activity's own `path` (flow_page.activities)."""
         edges: Set[str] = (self._flow_edges.get(flow_id, set())
                            if flow_id else set())
@@ -1183,10 +1181,10 @@ class MainWindow(QMainWindow):
 
     def _on_badge_clicked(self, block_id: str) -> None:
         """Wired to diagram_state.on_badge_clicked (BlockItem's
-        mousePressEvent badge-rect hit). Ported from the prototype's
-        BlockItem.mousePressEvent badge branch: clears the badge and
-        logs an info row. No explicit repaint here - same as the
-        prototype - since the next EngineUpdate's badges dict (the
+        mousePressEvent badge-rect hit).
+        Clears the badge and
+        logs an info row. No explicit repaint
+        here, since the next EngineUpdate's badges dict (the
         RuleEngine, cleared by engine.clear_badge(), is the source of
         truth diagram_state.badges is refreshed from in _apply) repaints
         the block within one poll tick."""
@@ -1194,8 +1192,8 @@ class MainWindow(QMainWindow):
         self.event_log.add_info("badge cleared on %s" % block_id, block_id)
 
     def _on_log_focus(self, block_id: str) -> None:
-        """Wired to event_log.on_focus (EventLog row click). Ported
-        from the prototype's Main.log_clicked: centers the view on the
+        """Wired to event_log.on_focus (EventLog row click).
+        Centers the view on the
         block and routes the Inspector dock to its register page."""
         if block_id in self.blocks:
             self._select_block(block_id)
@@ -1214,13 +1212,13 @@ class MainWindow(QMainWindow):
 
     def apply_update(self, u: EngineUpdate) -> None:
         self.last_update = u
-        # spec point 1 "event log always live": the log must not
+        # "Event log always live": the log must not
         # depend on either tab's own stop flag, so it is fed here,
         # unconditionally, before the Data Path stop check below - not
         # from inside _apply(), which that check can skip entirely.
         # This also means resuming Data Path (which replays
         # self.last_update through _apply() to restore the display)
-        # can no longer double-log that update's events, since
+        # cannot double-log that update's events, since
         # _apply() itself never touches the log. Scope's own event
         # markers are likewise unconditional here - Scope's stop flag
         # only pauses ITS repaint timer (ScopePage.set_stopped), not
